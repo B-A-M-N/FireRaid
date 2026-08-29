@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.dev.vars
+.env
+.wrangler/
+harness/results/*.json
+harness/results/**/*.json
+!harness/results/.gitkeep
+playwright-report/
+test-results/
+*.log

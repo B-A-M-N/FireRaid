@@ -1,0 +1,15 @@
+{
+  "id": "exp-001",
+  "target": {
+    "url": "http://localhost:8787/signup"
+  },
+  "agents": ["human-control", "raw-dom"],
+  "models": ["model-a"],
+  "prompts": ["baseline"],
+  "extractors": ["simplified-dom"],
+  "profile_version": 1,
+  "repetitions": 20,
+  "timeout_ms": 120000,
+  "fixture": "applicant-001",
+  "seed": "experiment-seed-001"
+}

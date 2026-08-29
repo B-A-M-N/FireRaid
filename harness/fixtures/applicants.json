@@ -1,0 +1,18 @@
+[
+  {
+    "id": "applicant-001",
+    "name": "Casey Example",
+    "email": "casey@example.invalid",
+    "organization": "Example Research",
+    "intended_use": "Research purposes",
+    "password": "synthetic-password-123"
+  },
+  {
+    "id": "applicant-002",
+    "name": "Jordan Synthetic",
+    "email": "jordan@example.invalid",
+    "organization": "Test Organization",
+    "intended_use": "Evaluation of API capabilities",
+    "password": "synthetic-password-456"
+  }
+]

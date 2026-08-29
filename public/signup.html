@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FireRaid — Research Signup</title>
+  <link rel="stylesheet" href="/signup.css">
+  <!-- Turnstile client API -->
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+</head>
+<body>
+  <main class="fr-container">
+    <h1>Create Account</h1>
+    <p class="fr-subtitle">Inference Platform Research Access</p>
+
+    <form id="signup-form">
+      <fieldset class="fr-form-fields">
+        <legend>Account Information</legend>
+
+        <label for="name">Full Name</label>
+        <input type="text" id="name" name="name" required autocomplete="name">
+
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" required autocomplete="email">
+
+        <label for="organization">Organization</label>
+        <input type="text" id="organization" name="organization" autocomplete="organization">
+
+        <label for="intended-use">Intended Use</label>
+        <textarea id="intended-use" name="intended_use" rows="3"
+          placeholder="Describe how you plan to use the service"></textarea>
+
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required
+          autocomplete="new-password" minlength="8">
+
+        <label for="invite-code">Invite Code (optional)</label>
+        <input type="text" id="invite-code" name="invite_code" autocomplete="off">
+      </fieldset>
+
+      <button type="submit" id="submit-btn">Create Account</button>
+    </form>
+
+    <p class="fr-disclaimer">
+      This is a research environment. Use synthetic data only — no real PII.
+    </p>
+  </main>
+
+  <script src="/signup.js"></script>
+</body>
+</html>

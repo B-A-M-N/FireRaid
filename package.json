@@ -1,0 +1,34 @@
+{
+  "name": "fireraid",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FireRaid — deterministic per-session admission defense lab against autonomous browser agents.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "playwright test",
+    "test:a11y": "playwright test tests/accessibility",
+    "lint": "eslint src/ harness/core/ harness/extractors/ tests/ --max-warnings 0",
+    "experiment": "tsx harness/core/runner.ts",
+    "analyze": "python3 harness/analysis/analyze.py"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260818.1",
+    "@playwright/test": "^1.49.0",
+    "@axe-core/playwright": "^4.10.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0",
+    "wrangler": "^4.0.0",
+    "tsx": "^4.19.0",
+    "eslint": "^9.15.0",
+    "@eslint/js": "^9.15.0",
+    "typescript-eslint": "^8.15.0"
+  }
+}

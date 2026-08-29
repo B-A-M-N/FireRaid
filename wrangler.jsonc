@@ -1,0 +1,35 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "fireraid",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-29",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": [
+      "/signup",
+      "/api/*",
+      "/c/*",
+      "/admin*"
+    ]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fireraid",
+      "database_id": "REPLACE_AFTER_CREATE"
+    }
+  ],
+
+  "vars": {
+    "PROFILE_VERSION": "1",
+    "LAB_MODE": "true"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

@@ -1,0 +1,13 @@
+/* FireRaid signup — vanilla CSS */
+.fr-container { max-width: 480px; margin: 3rem auto; padding: 0 1rem; font-family: system-ui, sans-serif; }
+.fr-subtitle { color: #666; margin-top: -0.5rem; }
+.fr-form-fields { border: none; padding: 0; }
+.fr-form-fields legend { font-weight: 600; margin-bottom: 1rem; }
+.fr-form-fields label { display: block; margin-top: 1rem; font-size: 0.9rem; font-weight: 500; }
+.fr-form-fields input, .fr-form-fields textarea { width: 100%; padding: 0.5rem; margin-top: 0.25rem;
+  border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-size: 1rem; }
+#submit-btn { margin-top: 1.5rem; width: 100%; padding: 0.75rem; background: #2563eb; color: white;
+  border: none; border-radius: 4px; font-size: 1rem; cursor: pointer; }
+#submit-btn:hover { background: #1d4ed8; }
+.fr-disclaimer { font-size: 0.8rem; color: #888; margin-top: 2rem; }
+.fr-lab-banner { background: #dc2626; color: white; text-align: center; padding: 0.5rem; font-weight: 600; font-size: 0.9rem; }

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FireRaid — Admin</title>
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+  <!-- Login View -->
+  <div id="login-view" class="fr-login">
+    <div class="fr-login-box">
+      <h1>FireRaid Admin</h1>
+      <p>Enter admin secret to continue.</p>
+      <input type="password" id="admin-secret" placeholder="Admin secret" autofocus>
+      <button id="login-btn">Login</button>
+      <p id="login-error" class="fr-login-error"></p>
+    </div>
+  </div>
+
+  <!-- Dashboard View -->
+  <div id="dashboard-view" class="fr-hidden">
+    <header class="fr-header">
+      <h1>FireRaid // Admin Dashboard</h1>
+      <nav>
+        <a href="#summary">Summary</a>
+        <a href="#sessions">Sessions</a>
+        <a href="#experiments">Experiments</a>
+        <button id="logout-btn" class="fr-logout-btn">Logout</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="summary" class="fr-section">
+        <h2>Summary</h2>
+        <div class="fr-metrics">
+          <div class="fr-metric"><span class="fr-metric-value" id="m-sessions">—</span><span class="fr-metric-label">Sessions</span></div>
+          <div class="fr-metric"><span class="fr-metric-value" id="m-submitted">—</span><span class="fr-metric-label">Submitted</span></div>
+          <div class="fr-metric fr-metric-warn"><span class="fr-metric-value" id="m-quarantined">—</span><span class="fr-metric-label">Quarantined</span></div>
+          <div class="fr-metric fr-metric-causal"><span class="fr-metric-value" id="m-causal">—</span><span class="fr-metric-label">Causal Hits</span></div>
+          <div class="fr-metric"><span class="fr-metric-value" id="m-experiments">—</span><span class="fr-metric-label">Experiments</span></div>
+        </div>
+      </section>
+
+      <section id="sessions" class="fr-section">
+        <h2>Sessions</h2>
+        <table class="fr-table">
+          <thead>
+            <tr><th>ID</th><th>Created</th><th>Profile</th><th>Disposition</th><th>Score</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="sessions-body"><tr><td colspan="6">Loading...</td></tr></tbody>
+        </table>
+      </section>
+
+      <section id="session-detail" class="fr-section fr-hidden">
+        <h2>Session Detail</h2>
+        <div id="session-detail-content"></div>
+      </section>
+
+      <section id="experiments" class="fr-section">
+        <h2>Experiments</h2>
+        <table class="fr-table">
+          <thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Created</th></tr></thead>
+          <tbody id="experiments-body"><tr><td colspan="4">Loading...</td></tr></tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+
+  <script src="/admin.js"></script>
+</body>
+</html>
