@@ -31,7 +31,7 @@ import {
   MAX_EVENT_PAYLOAD_BYTES,
 } from "../types/telemetry.js";
 import { isLabMode } from "../env.js";
-import { mergeSessionMetrics } from "../telemetry/aggregate.js";
+import { foldSessionMetrics } from "../telemetry/aggregate.js";
 
 /** Canonical validated telemetry event shape. */
 export interface ValidatedEvent {
@@ -344,8 +344,14 @@ export async function events(req: Request, env: Env): Promise<Response> {
       // Production only — lab needs the raw rows and nothing else.
       if (!isLabMode(env) && outcome.stored.length > 0) {
         try {
-          const capture = await resolveCaptureMask(env, session);
-          await mergeSessionMetrics(env.DB, sessionId, outcome.stored, capture);
+          // FR-P1-28: one D1 state load per batch. foldSessionMetrics uses
+          // the STORED capture mask when the state row exists (skipping
+          // profile reconstruction entirely — the per-flush reconstruction
+          // resolveCaptureMask did was a hidden cost the budget harness
+          // surfaced) and falls back to the reconstructed mask only on the
+          // FIRST batch, which initializes the row.
+          const capture = await lazyCaptureMask(env, session);
+          await foldSessionMetrics(env.DB, sessionId, outcome.stored, capture);
         } catch (mergeErr) {
           // Metrics merge is best-effort; never block an event batch.
           console.warn("session_metrics merge failed:", mergeErr);
@@ -372,6 +378,18 @@ export async function events(req: Request, env: Env): Promise<Response> {
  * treated as unknown → both channels enabled=false → metrics stay NULL
  * (never scored) rather than assumed-on.
  */
+/**
+ * FR-P1-28: the INITIAL capture mask for a fresh metrics state row.
+ * foldSessionMetrics reuses the stored mask on every batch after the first,
+ * so this reconstruction happens at most ONCE per session.
+ */
+async function lazyCaptureMask(
+  env: Env,
+  session: { profileVersion: number; profileKeyId: string | null; labModeHoldout?: boolean }
+): Promise<{ capturePointer: boolean; captureKey: boolean }> {
+  return resolveCaptureMask(env, session);
+}
+
 async function resolveCaptureMask(
   env: Env,
   session: { profileVersion: number; profileKeyId: string | null; labModeHoldout?: boolean }

@@ -264,6 +264,37 @@ export async function mergeSessionMetrics(
 }
 
 /**
+ * FR-P1-28: one-load fold. Loads the incremental state ONCE, resolves the
+ * capture mask from the stored state when present (skipping profile
+ * reconstruction entirely) or from the passed mask when absent (first
+ * batch), advances, and saves. Returns the mask so a caller that also
+ * needs it doesn't issue a second load.
+ *
+ * The route-level resolveCaptureMask() per batch was a hidden per-flush
+ * cost: reconstruction + a D1 read on every flush, when only the FIRST
+ * flush needs the real mask (the state row persists it thereafter).
+ */
+export async function foldSessionMetrics(
+  db: D1Database,
+  sessionId: string,
+  events: ValidatedEvent[],
+  initialCapture: CaptureConfig
+): Promise<CaptureConfig> {
+  const { loadMetricsState, advance, saveMetricsState } = await import("./state.js");
+  const state = await loadMetricsState(db, sessionId);
+  if (state) {
+    // Stored mask is authoritative — no reconstruction needed.
+    advance(state, events);
+    await saveMetricsState(db, sessionId, state);
+    return { capturePointer: state.capturePointer, captureKey: state.captureKey };
+  }
+  const fresh = emptyState(initialCapture);
+  advance(fresh, events);
+  await saveMetricsState(db, sessionId, fresh);
+  return initialCapture;
+}
+
+/**
  * FR-R7-022 / FR-P0-1: read the compact metrics for a session. Prefers the
  * persisted incremental state (projects it via toMetrics); falls back to a
  * full raw aggregation when the state row is absent (lab sessions, or
