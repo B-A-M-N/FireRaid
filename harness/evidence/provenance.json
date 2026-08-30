@@ -1,0 +1,32 @@
+{
+  "captured_at": "2026-08-30",
+  "node": "v22.22.3",
+  "npm": "10.9.8",
+  "wrangler": "4.127.1",
+  "playwright_node": "1.62.1",
+  "browser_launched_by_playwright_adapters": {
+    "name": "Google Chrome for Testing",
+    "version": "151.0.7922.34",
+    "channel": "chrome-for-testing (playwright-core registry)",
+    "recorded_per_run_as": "browser_name / browser_version"
+  },
+  "python_system": {
+    "version": "3.10.12",
+    "playwright_python": "1.57.0",
+    "browser_use": "not installed"
+  },
+  "python_venv_on_path": {
+    "note": "shell default python3 resolves to /home/bamn/Breathplay/.venv (3.11.15, playwright 1.61.0); the browser-use worker spawns bare `python3` and inherits the caller's PATH — provenance recorded per run by the worker itself",
+    "browser_use": "not installed"
+  },
+  "llm": {
+    "FIRERAID_LLM_BASE_URL": "unset",
+    "FIRERAID_LLM_API_KEY": "unset",
+    "FIRERAID_LLM_MODEL": "unset",
+    "policy": "LLM-dependent trials fail closed with typed errors; no model ids, no fabricated provenance"
+  },
+  "git": {
+    "head_at_capture": "6e8476c",
+    "dirty": false
+  }
+}
