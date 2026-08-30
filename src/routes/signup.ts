@@ -121,12 +121,13 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
   const profileHash = await hashProfile(profile);
   const csrfToken = await makeCsrfToken(env, sessionId);
 
-  // FR-R6-011: atomic session-create + lab claim via D1 batch (transactional).
-  // Combines the session INSERT (verbatim from D1SessionStore.create) and
-  // the conditional lab-run claim UPDATE into a single round-trip so the
-  // session insert rolls back if the claim fails — no orphan sessions.
+  // FR-R7-001: every newly-persisted session carries the key id of the
+  // current profile secret, so a future rotation that moves it to the
+  // previous-map can still reconstruct the issued profile correctly. The
+  // lab-bound path keeps its atomic batch so a failed bind rolls back the
+  // session insert; the production path takes the standard delegate.
+  const profileKeyId = resolveProfileKey(env).current.id;
   if (labBindRequested && bindToken && bindHash) {
-    const profileKeyId = resolveProfileKey(env).current.id;
     const sessionStmt = env.DB.prepare(
       `INSERT INTO sessions (id, created_at, last_seen_at, profile_version, profile_key_id, profile_id, profile_hash, submitted)
        VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
@@ -154,12 +155,12 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
       return error("lab run bind failed: internal error", 500);
     }
   } else {
-    // Unbound / production path — persist session as before.
+    // Unbound / production path.
     await persistSession(env.DB, {
       id: sessionId,
       createdAt: now(),
       profileVersion: profileVersion(env),
-    }, profile.profileId, profileHash);
+    }, profile.profileId, profileHash, profileKeyId);
   }
 
   let staticHtml: string;

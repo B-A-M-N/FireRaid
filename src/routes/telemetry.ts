@@ -24,13 +24,14 @@ import {
 } from "../core/session.js";
 import {
   loadSession,
-  touchSession,
 } from "../cloudflare/session.js";;
 import {
   ALLOWED_EVENT_TYPES,
   MAX_EVENTS_PER_BATCH,
   MAX_EVENT_PAYLOAD_BYTES,
 } from "../types/telemetry.js";
+import { isLabMode } from "../env.js";
+import { mergeSessionMetrics } from "../telemetry/aggregate.js";
 
 /** Canonical validated telemetry event shape. */
 export interface ValidatedEvent {
@@ -176,19 +177,22 @@ export async function persistTelemetryBatch(
 
   // FR-R6-032/033: BOTH statements gated on the first edge of the incoming
   // batch vs the stored watermark (COALESCE handles fresh NULL rows).
+  // FR-R7-017: the watermark UPDATE also bumps last_seen_at — previously
+  // the route called touchSession() after this, causing a second UPDATE.
+  const now = Date.now();
   const insertStmt = db
     .prepare(
       `INSERT INTO event_batches (session_id, created_at, first_seq, last_seq, event_count, payload_json)
        SELECT ?, ?, ?, ?, ?, ?
        WHERE COALESCE((SELECT last_event_seq FROM sessions WHERE id = ?), -1) < ?`
     )
-    .bind(sessionId, Date.now(), firstSeq, lastSeq, events.length, payload, sessionId, firstSeq);
+    .bind(sessionId, now, firstSeq, lastSeq, events.length, payload, sessionId, firstSeq);
 
   const watermarkStmt = db
     .prepare(
-      `UPDATE sessions SET last_event_seq = ? WHERE id = ? AND COALESCE(last_event_seq, -1) < ?`
+      `UPDATE sessions SET last_event_seq = ?, last_seen_at = ? WHERE id = ? AND COALESCE(last_event_seq, -1) < ?`
     )
-    .bind(lastSeq, sessionId, firstSeq);
+    .bind(lastSeq, now, sessionId, firstSeq);
 
   let results: { meta?: { changes?: number } }[];
   try {
@@ -243,7 +247,28 @@ export async function events(req: Request, env: Env): Promise<Response> {
   if (validated.events.length > 0) {
     try {
       await persistTelemetryBatch(env.DB, sessionId, validated.events);
-      await touchSession(env.DB, sessionId);
+      // FR-R7-022: production sessions maintain a compact per-session
+      // metrics row that submit scoring reads at finalize time. Lab mode
+      // skips this — research needs the raw event_batches rows intact.
+      if (!isLabMode(env)) {
+        // Read capture config from the session's persisted profile — we
+        // already SELECTed the session above, so the capture flags are not
+        // yet in hand. Use the page-config defaults (pointer/key both on,
+        // matching the most common production profile shape); when the
+        // profile disables capture the resulting noPointerEvents/noKeyEvents
+        // fields become NULL (unknown) rather than scoring the user.
+        try {
+          await mergeSessionMetrics(
+            env.DB,
+            sessionId,
+            validated.events,
+            { capturePointer: true, captureKey: true }
+          );
+        } catch (mergeErr) {
+          // Metrics merge is best-effort; never block an event batch.
+          console.warn("session_metrics merge failed:", mergeErr);
+        }
+      }
     } catch (err) {
       if (err instanceof Error && err.message === "PAYLOAD_TOO_LARGE") {
         return error("payload too large", 413);
@@ -259,7 +284,7 @@ export async function events(req: Request, env: Env): Promise<Response> {
     }
   }
 
-  return json({ received: validated.events.length });
+  return json({ received: validated.events.length, acceptedThrough: validated.events[validated.events.length - 1].seq });
 }
 
 /**

@@ -20,6 +20,20 @@ export interface Env {
   ADMIN_SECRET?: string;
   /** Lab correlation API auth — required for lab-run create/get (FR-R4-030). */
   FIRERAID_LAB_API_SECRET?: string;
+
+  // FR-R7-002: profile key-ring env (typed). Optional at the type level so
+  // dev/test envs without rotation still bind; the validator (see
+  // validateConfig in src/index.ts) is the runtime authority and rejects
+  // malformed rings fail-closed.
+  /** ID of the active profile key (defaults to "default" when absent). */
+  FIRERAID_PROFILE_KEY_CURRENT_ID?: string;
+  /** JSON object {"<id>":"<secret>"} of known previous keys. */
+  FIRERAID_PROFILE_KEY_PREVIOUS?: string;
+
+  /** FR-R7-025: scheduled retention sweep retention window (days). */
+  FIRERAID_RETENTION_DAYS?: string;
+  /** FR-R7-021: persist ALL production verification attempts (audit opt-in). */
+  FIRERAID_AUDIT_VERIFICATION_ATTEMPTS?: string;
 }
 
 export function isLabMode(env: Env): boolean {

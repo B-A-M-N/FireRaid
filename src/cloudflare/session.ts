@@ -29,13 +29,24 @@ export function createSessionStore(db: D1Database): D1SessionStore {
 
 /**
  * Persist a new session row (via D1SessionStore).
+ *
+ * FR-R7-001: profileKeyId is REQUIRED. A production session persisted
+ * without a persisted key id would be reconstructed under the CURRENT key
+ * after rotation, even when it was originally issued under a now-previous
+ * key — silently mutating the defense profile that was issued to a real
+ * user. The lab-bound path already supplied the key id directly; this
+ * delegate now enforces it for every caller.
  */
 export async function persistSession(
   db: D1Database,
   session: SessionPayload,
   profileId: string,
-  profileHash: string
+  profileHash: string,
+  profileKeyId: string
 ): Promise<void> {
+  if (typeof profileKeyId !== "string" || profileKeyId.length === 0) {
+    throw new Error("FR-R7-001: persistSession requires a non-empty profileKeyId");
+  }
   const store = new D1SessionStore(db);
   return store.create({
     id: session.id,
@@ -43,17 +54,26 @@ export async function persistSession(
     profileVersion: session.profileVersion,
     profileId,
     profileHash,
+    profileKeyId,
   });
 }
 
 /**
  * Load a session row, mapping the store's boolean `submitted` back to
  * SessionPayload's `submitted?: number`.
+ *
+ * FR-R7-018: returns the persisted profileKeyId alongside the payload so
+ * the caller can call reconstructIssuedProfile directly without a second
+ * SELECT.
  */
+export interface LoadedSession extends SessionPayload {
+  profileKeyId: string | null;
+}
+
 export async function loadSession(
   db: D1Database,
   sessionId: string
-): Promise<SessionPayload | null> {
+): Promise<LoadedSession | null> {
   const store = new D1SessionStore(db);
   const row = await store.load(sessionId);
   if (!row) return null;
@@ -64,6 +84,7 @@ export async function loadSession(
     submitted: row.submitted ? 1 : undefined,
     finalScore: row.finalScore,
     finalDisposition: row.finalDisposition,
+    profileKeyId: row.profileKeyId,
   };
 }
 
@@ -80,17 +101,4 @@ export async function markSessionSubmitted(
 ): Promise<void> {
   const store = new D1SessionStore(db);
   return store.markSubmitted(sessionId, score, disposition);
-}
-
-/**
- * FR-R5-029: Load the profile_key_id for a session from D1.
- * Returns NULL if the session doesn't exist or has no key.
- */
-export async function loadSessionKey(
-  db: D1Database,
-  sessionId: string
-): Promise<string | null> {
-  const store = new D1SessionStore(db);
-  const row = await store.load(sessionId);
-  return row?.profileKeyId ?? null;
 }

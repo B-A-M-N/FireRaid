@@ -185,3 +185,77 @@ export function resolveProfileKey(
     previous,
   };
 }
+
+/**
+ * FR-R7-002: fail-closed key-ring validation, called at Worker startup.
+ * Catches malformed PREVIOUS JSON, duplicate IDs, current-vs-previous
+ * conflicts, and secrets that fail the same minimum-length bar the
+ * existing profile/CSRF secret checks enforce. Returns null when the ring
+ * is OK, or a human-readable error string otherwise.
+ *
+ * The validator is strictly stricter than `resolveProfileKey` (which used
+ * to silently discard malformed PREVIOUS JSON). New rows MUST end up with a
+ * known, persisted key id; legacy rules for NULL-key rows still reconstruct
+ * against the current key, but no NEW row should ever be created with a
+ * NULL key id again (enforced by FR-R7-001 in persistSession / signup).
+ */
+const KEY_ID_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+const MIN_KEY_SECRET_BYTES = 32;
+
+export function validateProfileKeyRing(env: {
+  FIRERAID_PROFILE_SECRET: string;
+  FIRERAID_PROFILE_KEY_CURRENT_ID?: string;
+  FIRERAID_PROFILE_KEY_PREVIOUS?: string;
+}): string | null {
+  // Current key id format
+  const currentId = env.FIRERAID_PROFILE_KEY_CURRENT_ID ?? "default";
+  if (!KEY_ID_PATTERN.test(currentId)) {
+    return `FIRERAID_PROFILE_KEY_CURRENT_ID is malformed: "${currentId}"`;
+  }
+  // Current secret length (re-uses the same min bar as the existing startup check)
+  if (new TextEncoder().encode(env.FIRERAID_PROFILE_SECRET).length < MIN_KEY_SECRET_BYTES) {
+    return `FIRERAID_PROFILE_SECRET must be at least ${MIN_KEY_SECRET_BYTES} bytes`;
+  }
+
+  // PREVIOUS must be a JSON object of {id: secret}; not an array, not a scalar.
+  if (env.FIRERAID_PROFILE_KEY_PREVIOUS !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(env.FIRERAID_PROFILE_KEY_PREVIOUS);
+    } catch (err) {
+      return `FIRERAID_PROFILE_KEY_PREVIOUS is not valid JSON: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return "FIRERAID_PROFILE_KEY_PREVIOUS must be a JSON object of {id: secret}";
+    }
+    const entries = Object.entries(parsed as Record<string, unknown>);
+    if (entries.length === 0) {
+      return "FIRERAID_PROFILE_KEY_PREVIOUS is empty (omit the variable or supply at least one entry)";
+    }
+    const seen = new Set<string>([currentId]);
+    for (const [id, secret] of entries) {
+      if (!KEY_ID_PATTERN.test(id)) {
+        return `FIRERAID_PROFILE_KEY_PREVIOUS contains a malformed key id: "${id}"`;
+      }
+      if (typeof secret !== "string") {
+        return `FIRERAID_PROFILE_KEY_PREVIOUS["${id}"] is not a string`;
+      }
+      if (new TextEncoder().encode(secret).length < MIN_KEY_SECRET_BYTES) {
+        return `FIRERAID_PROFILE_KEY_PREVIOUS["${id}"] must be at least ${MIN_KEY_SECRET_BYTES} bytes`;
+      }
+      if (seen.has(id)) {
+        return `FIRERAID_PROFILE_KEY_PREVIOUS contains a duplicate key id: "${id}"`;
+      }
+      seen.add(id);
+    }
+    // The current id must NOT also appear in previous: rotating a key moves
+    // it FROM current TO previous; if both contain it, that key is
+    // simultaneously active for two secrets, which corrupts every later
+    // derivation (deterministic content of HMAC).
+    if (Object.prototype.hasOwnProperty.call(parsed, currentId)) {
+      return `FIRERAID_PROFILE_KEY_PREVIOUS must not contain the current key id ("${currentId}")`;
+    }
+  }
+
+  return null;
+}

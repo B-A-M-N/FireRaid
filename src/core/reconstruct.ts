@@ -15,7 +15,6 @@
  */
 import type { Env } from "../env.js";
 import { profileVersion, isLabMode } from "../env.js";
-import { loadSessionKey } from "../cloudflare/session.js";
 import {
   resolveProfileKey,
   type ProfileKeyRing,
@@ -114,6 +113,11 @@ export async function reconstructIssuedProfile(
 /**
  * Convenience wrapper: reconstruct from a session id, loading the key id
  * from D1. Used by routes that hold only the session id.
+ *
+ * FR-R7-018: this path is kept only for callers that already hold a
+ * session id but not a `ReconstructableSession`. Routes that already call
+ * `loadSession` MUST pass the loaded `profileKeyId` to
+ * `reconstructIssuedProfile` directly — the duplicate SELECT was removed.
  */
 export async function reconstructFromSessionId(
   env: Env,
@@ -125,13 +129,16 @@ export async function reconstructFromSessionId(
     holdoutMode?: boolean;
   }
 ): Promise<ReconstructionResult> {
-  const profileKeyId = await loadSessionKey(env.DB, sessionId);
+  // Lazily import to avoid a circular module-graph edge between core and
+  // the Cloudflare session adapter (the adapter already imports core types).
+  const { loadSession } = await import("../cloudflare/session.js");
+  const loaded = await loadSession(env.DB, sessionId);
   return reconstructIssuedProfile(
     env,
     {
       id: sessionId,
-      profileVersion: opts?.profileVersion ?? profileVersion(env),
-      profileKeyId,
+      profileVersion: opts?.profileVersion ?? loaded?.profileVersion ?? profileVersion(env),
+      profileKeyId: loaded?.profileKeyId ?? null,
     },
     opts?.recipe,
     { holdoutMode: opts?.holdoutMode }

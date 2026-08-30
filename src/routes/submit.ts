@@ -33,16 +33,17 @@ import {
   loadSession,
 } from "../cloudflare/session.js";;
 import { getPolicy } from "../core/decision.js";
-import { reconstructFromSessionId } from "../core/reconstruct.js";
+import { reconstructIssuedProfile } from "../core/reconstruct.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
 import { checkCsrf } from "../security/csrf.js";
-import { verifyTurnstile } from "../turnstile/verify.js";
+import { defaultVerificationProvider } from "../turnstile/verify.js";
 import { correlate, type ObservationSet } from "../core/correlation.js";
 import { decide } from "../core/decision.js";
 import { MAX_SUBMIT_BODY_BYTES } from "../types/telemetry.js";
 import { isLabMode } from "../env.js";
 import { validateTelemetryBatch, persistTelemetryBatch } from "./telemetry.js";
-import { aggregateSessionTelemetry } from "../telemetry/aggregate.js";
+import { aggregateSessionTelemetry, loadSessionMetrics } from "../telemetry/aggregate.js";
+import type { TelemetryMetrics } from "../telemetry/aggregate.js";
 import { D1SubmissionFinalizer } from "../cloudflare/session-store.js";
 import { randomUUID } from "node:crypto";
 
@@ -174,27 +175,43 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   }
   if (turnstileRequired && turnstileSecret) {
     if (!body.turnstileToken) {
-      // FR-R6-022: record the missing-token attempt.
-      await recordVerificationAttempt(env, sessionId, false, "missing_token").catch(() => {});
+      // FR-R6-022 + FR-R7-021: missing-token attempts are always recorded
+      // (every production signup benefits from a forensic trail of
+      // unverified submissions; this path represents a deliberate gap).
+      await recordVerificationAttempt(env, sessionId, false, "missing_token", true).catch(() => {});
       return json({
         status: "verification_required",
         message: "Turnstile verification required. Please complete the challenge.",
       }, 403);
     }
-    const turnstileResult = await verifyTurnstile({
+    // FR-R7-026: the route depends on a VerificationProvider, not on the
+    // Turnstile implementation directly. Cloudflare's reference deployment
+    // configures the Turnstile provider via env; other deployments can
+    // swap implementations in defaultVerificationProvider().
+    const provider = defaultVerificationProvider(env);
+    if (!provider) {
+      return error("verification provider unavailable", 500);
+    }
+    const turnstileResult = await provider.verify({
       token: body.turnstileToken,
-      secret: turnstileSecret,
       expectedAction: "fireraid_signup",
       // FR-R6-019: hostname + remote IP enforcement restored.
       expectedHostname: env.TURNSTILE_EXPECTED_HOSTNAME,
       remoteip: req.headers.get("cf-connecting-ip") ?? undefined,
     });
-    // FR-R6-022: every verification attempt is recorded.
+    // FR-R6-022 + FR-R7-021: every verification attempt is recorded.
+    // FR-R7-021: in PRODUCTION we only persist the row on FAILURE unless the
+    // operator explicitly opted into full audit logging via
+    // FIRERAID_AUDIT_VERIFICATION_ATTEMPTS=1 — successful production
+    // signups already record turnstile_ok on the submission, so an extra
+    // row per signup is pure D1 amplification. Lab mode keeps full records
+    // because research auditability is part of the experimental contract.
     await recordVerificationAttempt(
       env,
       sessionId,
       turnstileResult.ok,
-      turnstileResult.ok ? undefined : (turnstileResult.errorCodes?.join(",") ?? "verification_failed")
+      turnstileResult.ok ? undefined : (turnstileResult.errorCodes?.join(",") ?? "verification_failed"),
+      isLabMode(env) || !turnstileResult.ok || env.FIRERAID_AUDIT_VERIFICATION_ATTEMPTS === "1"
     ).catch(() => {});
     if (!turnstileResult.ok) {
       // Do NOT finalize session on Turnstile failure.
@@ -208,22 +225,27 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   // 7. reconstruct profile via the canonical service (FR-R6-004): lab recipe
   //    + persisted profile key id are honored, so reconciliation sees the
   //    profile that was actually issued.
+  // FR-R7-018: pass the loaded session's key id straight through — no
+  // second session SELECT.
+  // FR-R7-019: lab_runs query only in lab mode.
   let profile;
   {
     let recipeJson: string | undefined;
     let holdoutMode: boolean | undefined;
-    try {
-      const row = await env.DB.prepare(
-        `SELECT recipe_json, holdout_mode FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
-      )
-        .bind(sessionId)
-        .first<{ recipe_json: string | null; holdout_mode: number | null }>();
-      const raw = row?.recipe_json;
-      if (typeof raw === "string" && raw.length > 0) recipeJson = raw;
-      // FR-POST-R6-P5: holdout flag is part of the treatment identity.
-      if (row && row.holdout_mode !== null) holdoutMode = row.holdout_mode === 1;
-    } catch {
-      recipeJson = undefined; // unbound session — random lab/production profile
+    if (isLabMode(env)) {
+      try {
+        const row = await env.DB.prepare(
+          `SELECT recipe_json, holdout_mode FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
+        )
+          .bind(sessionId)
+          .first<{ recipe_json: string | null; holdout_mode: number | null }>();
+        const raw = row?.recipe_json;
+        if (typeof raw === "string" && raw.length > 0) recipeJson = raw;
+        // FR-POST-R6-P5: holdout flag is part of the treatment identity.
+        if (row && row.holdout_mode !== null) holdoutMode = row.holdout_mode === 1;
+      } catch {
+        recipeJson = undefined; // unbound session — random lab/production profile
+      }
     }
     let recipe: DefenseRecipe | undefined;
     if (recipeJson !== undefined) {
@@ -233,11 +255,11 @@ export async function submit(req: Request, env: Env): Promise<Response> {
         recipe = undefined;
       }
     }
-    const reconstructed = await reconstructFromSessionId(env, sessionId, {
+    const reconstructed = await reconstructIssuedProfile(env, {
+      id: sessionId,
       profileVersion: session.profileVersion,
-      recipe,
-      holdoutMode,
-    });
+      profileKeyId: session.profileKeyId ?? null,
+    }, recipe, { holdoutMode });
     if (!reconstructed.ok) {
       console.error("submit reconstruction failed:", reconstructed.code, reconstructed.detail);
       return error("profile reconstruction failed", 500);
@@ -262,14 +284,19 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   }
 
   // 9. inspect canary evidence (causal hits recorded during this session)
-  const canaryRow = await env.DB
-    .prepare(
-      `SELECT COUNT(*) AS hits FROM canary_hits WHERE session_id = ? AND verified = 1`
-    )
-    .bind(sessionId)
-    .first<{ hits: number }>();
-  if (canaryRow && canaryRow.hits > 0) {
-    observations.canaryEndpointHit = true;
+  // FR-R7-020: skip the canary_hits COUNT when the profile has no
+  // decoyRoute — the answer is necessarily zero and the query is wasted
+  // work on every defended submission.
+  if (profile.decoyRoute) {
+    const canaryRow = await env.DB
+      .prepare(
+        `SELECT COUNT(*) AS hits FROM canary_hits WHERE session_id = ? AND verified = 1`
+      )
+      .bind(sessionId)
+      .first<{ hits: number }>();
+    if (canaryRow && canaryRow.hits > 0) {
+      observations.canaryEndpointHit = true;
+    }
   }
 
   // FIX: 10. Process eventBatch from submit (FR-R2-008, FR-R2-009)
@@ -303,12 +330,26 @@ export async function submit(req: Request, env: Env): Promise<Response> {
 
   // FR-R6-018: interaction evidence — aggregate the session's telemetry and
   // populate the observation set when the interaction family is scoring.
+  // FR-R7-022: production reads the compact per-session metrics row in
+  // ONE D1 hit instead of scanning every event_batches row; lab mode still
+  // uses the raw aggregator for research fidelity.
   if (profile.interaction?.scoringEnabled) {
-    try {
-      const metrics = await aggregateSessionTelemetry(env.DB, sessionId, {
-        capturePointer: profile.telemetry.capturePointer,
-        captureKey: profile.telemetry.captureKey,
-      });
+    let metrics: TelemetryMetrics | null = !isLabMode(env)
+      ? await loadSessionMetrics(env.DB, sessionId).catch(() => null)
+      : null;
+    if (!metrics) {
+      try {
+        metrics = await aggregateSessionTelemetry(env.DB, sessionId, {
+          capturePointer: profile.telemetry.capturePointer,
+          captureKey: profile.telemetry.captureKey,
+        });
+      } catch (err) {
+        // Telemetry aggregation failure must not block submission.
+        console.warn("interaction aggregation failed:", err instanceof Error ? err.message : err);
+        metrics = null;
+      }
+    }
+    if (metrics) {
       observations.directFill = metrics.directFill;
       // veryShortCompletion: no dedicated metric field — completionMs < 3s is
       // the definition used by the aggregator's own thresholds.
@@ -320,9 +361,6 @@ export async function submit(req: Request, env: Env): Promise<Response> {
       // against the user.
       if (metrics.noPointerEvents === true) observations.noPointerEvents = true;
       if (metrics.missingInteractionSequence === true) observations.missingInteractionSequence = true;
-    } catch (err) {
-      // Telemetry aggregation failure must not block submission.
-      console.warn("interaction aggregation failed:", err instanceof Error ? err.message : err);
     }
   }
 
@@ -413,15 +451,19 @@ function projectDecisionResponse(env: Env, decision: { disposition: string; scor
 }
 
 /**
- * FR-R6-022: record a Turnstile verification attempt for research
- * auditability. Best-effort — recording failure never blocks submission.
+ * FR-R6-022 + FR-R7-021: record a Turnstile verification attempt.
+ * `persist` defaults to true; FR-R7-021 flips it false for successful
+ * production signups unless full audit logging is explicitly enabled.
+ * Best-effort — recording failure never blocks submission.
  */
 async function recordVerificationAttempt(
   env: Env,
   sessionId: string,
   ok: boolean,
-  errorCode: string | undefined
+  errorCode: string | undefined,
+  persist: boolean = true
 ): Promise<void> {
+  if (!persist) return;
   await env.DB.prepare(
     `INSERT INTO verification_attempts (session_id, created_at, provider, result, error_codes_json) VALUES (?, ?, ?, ?, ?)`
   )

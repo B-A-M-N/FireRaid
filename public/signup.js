@@ -8,9 +8,21 @@
  *   pointer events client-side; randomized telemetry conditions are real.
  *   Fail-safe default when the config is absent/invalid: capture only submit.
  * FR-R6-037: retry-safe outbox — events leave the queue only after the
- *   submit/events request is ACKNOWLEDGED. On verification_required, network
- *   failure, or telemetry 409, in-flight events return to the FRONT of the
- *   queue in original order. Turnstile resets for a fresh token on retry.
+ *   submit/events request is ACKNOWLEDGED. On verification_required or
+ *   network failure, in-flight events return to the FRONT of the queue in
+ *   original order. Turnstile resets for a fresh token on retry.
+ * FR-R7-014: when interactionScoring is OFF (the production default for
+ *   most profiles), the client creates NO outbox, NEVER pushes page_ready,
+ *   NEVER schedules a periodic flush, and NEVER calls /api/events from
+ *   the page. A profile that does not score interaction does not need the
+ *   telemetry stream at all.
+ * FR-R7-015: the outbox represents UNSENT events only — the redundant
+ *   keep-alive flush is removed; events leave the queue exactly when the
+ *   server's acceptedThrough confirms receipt (or before submit, or on
+ *   pagehide).
+ * FR-R7-016: 409 is no longer treated as "drop everything"; the server
+ *   returns the current watermark (acceptedThrough) so the client trims
+ *   only the prefix the server actually has.
  */
 (function () {
   "use strict";
@@ -54,69 +66,190 @@
 
   const MASK = readClientConfig();
 
+  const form = document.getElementById("signup-form");
+  if (!form) return;
+
+  let turnstileToken = null;
+  let submitInFlight = false;
+
+  // ── Shared helpers used by both branches below ─────────────────────────
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function renderResult(result) {
+    const existing = document.getElementById("fr-result");
+    if (existing) existing.remove();
+    const div = document.createElement("div");
+    div.id = "fr-result";
+    div.className = "fr-result";
+    if (result.error) {
+      div.innerHTML = `<p class="fr-result-error">${escapeHtml(result.error)}</p>`;
+    } else if (result.status === "received") {
+      const disposition = result.disposition || "REVIEW";
+      div.innerHTML = `
+        <p class="fr-result-status">Submission received.</p>
+        <p class="fr-result-disposition">Status: ${escapeHtml(disposition)}</p>
+      `;
+    }
+    form.after(div);
+  }
+
+  function renderVerificationRequired(result) {
+    const existing = document.getElementById("fr-result");
+    if (existing) existing.remove();
+    const div = document.createElement("div");
+    div.id = "fr-result";
+    div.className = "fr-result";
+    const message = result.message || "Verification required. Please complete the challenge and retry.";
+    div.innerHTML =
+      `<p class="fr-result-status">${escapeHtml(message)}</p>` +
+      `<button type="button" id="fr-retry-btn" class="fr-retry">Retry submission</button>`;
+    form.after(div);
+    document.getElementById("fr-retry-btn")?.addEventListener("click", () => {
+      div.remove();
+      form.requestSubmit();
+    });
+  }
+
+  function resetTurnstile() {
+    turnstileToken = null;
+    try {
+      if (window.turnstile && typeof window.turnstile.reset === "function") {
+        window.turnstile.reset();
+      }
+    } catch {
+      // Widget may not exist (Turnstile-disabled environments)
+    }
+  }
+
+  // ── FR-R7-014: telemetry OFF branch — no outbox, no listeners, no flush.
+  if (!MASK.interactionScoring) {
+    // Turnstile callbacks still needed so the form actually works; they
+    // just don't push telemetry.
+    window.turnstileOnSuccess = function (token) { turnstileToken = token; };
+    window.turnstileOnError = function () {};
+    window.turnstileOnExpired = function () { turnstileToken = null; };
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (submitInFlight) return;
+      submitInFlight = true;
+      try {
+        const formData = new FormData(form);
+        const formObj = {};
+        formData.forEach((value, key) => {
+          if (key !== "csrf") formObj[key] = value;
+        });
+        const csrfToken = form.querySelector('[name="csrf"]')?.value || "";
+        const resp = await fetch("/api/submit", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            csrf: csrfToken,
+            turnstileToken,
+            form: formObj,
+            eventBatch: [],
+          }),
+        });
+        const result = await resp.json();
+        if (resp.ok && result.status === "received") {
+          renderResult(result);
+        } else if (resp.status === 403 && result.status === "verification_required") {
+          resetTurnstile();
+          renderVerificationRequired(result);
+        } else {
+          renderResult(result);
+        }
+      } catch {
+        renderResult({ error: "Submission failed. Please try again." });
+      } finally {
+        submitInFlight = false;
+      }
+    });
+    return;
+  }
+
+  // ── Interaction-scoring ON: outbox, listeners, drain on submit / pagehide.
   const events = [];
   let seq = 0;
   const startTime = Date.now();
-  let turnstileToken = null;
-  // FR-R6-037: last seq the server has acknowledged (via any accepted batch
-  // or a submit that carried events successfully). Used to keep the outbox
-  // consistent across retries.
+  // FR-R6-037 + FR-R7-016: last seq the server has acknowledged; used as a
+  // debug-visible metric only — the queue itself is the source of truth
+  // (and trimAcknowledgedPrefix keeps it minimal).
   let acknowledgedSeq = 0;
-  let submitInFlight = false;
 
   function push(kind, target, meta) {
     events.push({ seq: ++seq, dt: Date.now() - startTime, kind, target, meta });
   }
 
   /**
-   * FR-R6-026 follow-up: the server rejects ANY batch over 64 events
-   * (MAX_EVENTS_PER_BATCH in src/types/telemetry.ts — 413 TOO_MANY_EVENTS,
-   * whole batch, no truncation). A heavy typist easily outruns the 5s
-   * periodic flush, so the submit outbox MUST drain in bounded chunks via
-   * /api/events instead of carrying everything in the submit request.
-   * Keep in sync with the server constant.
+   * FR-R7-023: server-side MAX_EVENTS_PER_BATCH is 256 (re-benchmarked
+   * against the 16 KiB byte budget). Keep this constant in sync with
+   * src/types/telemetry.ts.
    */
-  const MAX_EVENTS_PER_BATCH = 64;
+  const MAX_EVENTS_PER_BATCH = 256;
 
   /**
-   * Drain queued events to /api/events in server-legal batches. Called
-   * opportunistically (before submit); the watermark makes redundant
-   * deliveries harmless. Returns when the queue fits in one batch (or the
-   * sends were attempted).
+   * FR-R7-015 / 016: send one batch and return the server's acceptedThrough
+   * seq on success, the same on 409 (trim only what the server actually
+   * has), or null on any other failure (leave the queue).
    */
-  async function drainToBatches() {
-    while (events.length > MAX_EVENTS_PER_BATCH) {
-      const batch = events.slice(0, MAX_EVENTS_PER_BATCH);
-      try {
-        const resp = await fetch("/api/events", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ events: batch }),
-          keepalive: true,
-        });
-        if (resp.ok) {
-          events.splice(0, MAX_EVENTS_PER_BATCH);
-          acknowledgedSeq = Math.max(acknowledgedSeq, batch[batch.length - 1].seq);
-        } else if (resp.status === 409) {
-          // Server ahead of us (a previous submit carried these). Drop prefix.
-          events.splice(0, MAX_EVENTS_PER_BATCH);
-        } else {
-          // Rejected: leave the queue; submit will surface the failure.
-          break;
-        }
-      } catch {
-        break; // network issue — submit path will surface it
+  async function tryAcknowledge(batch) {
+    try {
+      const resp = await fetch("/api/events", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ events: batch }),
+        keepalive: true,
+      });
+      if (resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        return typeof body.acceptedThrough === "number"
+          ? body.acceptedThrough
+          : batch[batch.length - 1].seq;
       }
+      if (resp.status === 409) {
+        const body = await resp.json().catch(() => ({}));
+        if (typeof body.acceptedThrough === "number") {
+          return body.acceptedThrough;
+        }
+        return batch[batch.length - 1].seq;
+      }
+      return null;
+    } catch {
+      return null;
     }
   }
 
-  // Page ready
+  function trimAcknowledgedPrefix(throughSeq) {
+    while (events.length > 0 && events[0].seq <= throughSeq) {
+      events.shift();
+    }
+    acknowledgedSeq = Math.max(acknowledgedSeq, throughSeq);
+  }
+
+  async function drainToBatches() {
+    while (events.length > MAX_EVENTS_PER_BATCH) {
+      const batch = events.slice(0, MAX_EVENTS_PER_BATCH);
+      const acked = await tryAcknowledge(batch);
+      if (acked === null) break;
+      trimAcknowledgedPrefix(acked);
+    }
+  }
+
+  function requeueInFlight(inFlight) {
+    if (inFlight.length > 0) {
+      events.unshift(...inFlight);
+    }
+  }
+
+  // Page ready (the first event in every telemetry-on session).
   push("page_ready");
 
   // Form events — FR-R6-036: each listener gated by its mask flag.
-  const form = document.getElementById("signup-form");
-  if (!form) return;
-
   const fields = form.querySelectorAll("input, textarea, select");
   fields.forEach((el) => {
     if (MASK.telemetry.captureFocus) {
@@ -133,7 +266,7 @@
     }
   });
 
-  // Pointer / key — FR-R6-036: gated
+  // Pointer / key — FR-R6-036: gated.
   if (MASK.telemetry.capturePointer) {
     document.addEventListener("pointerdown", (e) => {
       push("pointer", e.target.name || e.target.id || e.target.tagName);
@@ -146,7 +279,7 @@
     });
   }
 
-  // Turnstile callbacks
+  // Turnstile callbacks.
   window.turnstileOnSuccess = function (token) {
     turnstileToken = token;
     push("turnstile_success");
@@ -159,176 +292,76 @@
     push("turnstile_expired");
   };
 
-  /** FR-R6-037: reset the Turnstile widget so a retry gets a fresh token. */
-  function resetTurnstile() {
-    turnstileToken = null;
+  // FR-R7-015: one final keep-alive on pagehide (no periodic timer).
+  window.addEventListener("pagehide", () => {
+    if (events.length === 0) return;
+    const batch = events.slice();
     try {
-      if (window.turnstile && typeof window.turnstile.reset === "function") {
-        window.turnstile.reset();
-      }
+      fetch("/api/events", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ events: batch }),
+        keepalive: true,
+      })
+        .then(async (resp) => {
+          if (resp.ok) {
+            const body = await resp.json().catch(() => ({}));
+            if (typeof body.acceptedThrough === "number") {
+              trimAcknowledgedPrefix(body.acceptedThrough);
+            }
+          }
+        })
+        .catch(() => {});
     } catch {
-      // Widget may not exist (Turnstile-disabled environments)
+      // pagehide is best-effort; nothing to do.
     }
-  }
+  });
 
-  /** FR-R6-037: put in-flight events back at the FRONT, original order. */
-  function requeueInFlight(inFlight) {
-    if (inFlight.length > 0) {
-      events.unshift(...inFlight);
-    }
-  }
-
-  // Submit handler - FIX: prevent default, serialize form, post JSON
-  // FR-R2-008: Include buffered events in the submit request.
-  // FR-R6-037: events move to in-flight, not out of existence — a failed
-  // submit (verification_required, network error, 409) puts them back.
+  // Submit handler.
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (submitInFlight) return;
     submitInFlight = true;
     push("submit_attempt");
-
-    // FR-R6-026 follow-up: drain any over-batch backlog first so the submit
-    // body itself carries at most one server-legal batch (≤64 events). A
-    // rejection here leaves the queue for the failure branches below.
     await drainToBatches();
+    const inFlight = events.slice();
 
-    // In-flight = everything buffered (the submit carries the final batch).
-    const inFlight = events.splice(0, events.length);
-
-    // Collect form data
     const formData = new FormData(form);
     const formObj = {};
     formData.forEach((value, key) => {
-      if (key !== "csrf") {
-        formObj[key] = value;
-      }
+      if (key !== "csrf") formObj[key] = value;
     });
-
-    // Get CSRF token
     const csrfToken = form.querySelector('[name="csrf"]')?.value || "";
-
-    const body = {
-      csrf: csrfToken,
-      turnstileToken: turnstileToken,
-      form: formObj,
-      eventBatch: inFlight,
-    };
 
     try {
       const resp = await fetch("/api/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          csrf: csrfToken,
+          turnstileToken,
+          form: formObj,
+          eventBatch: inFlight,
+        }),
       });
       const result = await resp.json();
 
       if (resp.ok && result.status === "received") {
-        // Acknowledged: the server has the batch.
-        acknowledgedSeq = seq;
+        trimAcknowledgedPrefix(inFlight[inFlight.length - 1]?.seq ?? seq);
         renderResult(result);
       } else if (resp.status === 403 && result.status === "verification_required") {
-        // FR-R6-037: dedicated handling — requeue, reset widget, surface, retry.
         requeueInFlight(inFlight);
         resetTurnstile();
         renderVerificationRequired(result);
       } else {
-        // Any other rejection (CSRF, validation, 4xx/5xx): requeue and show.
         requeueInFlight(inFlight);
         renderResult(result);
       }
     } catch {
-      // Network failure: requeue everything, keep the user's state.
       requeueInFlight(inFlight);
       renderResult({ error: "Submission failed. Please try again." });
     } finally {
       submitInFlight = false;
     }
   });
-
-  /**
-   * FR-R6-037: verification_required UI — distinct from a generic error:
-   * tells the user what happened, offers a retry that resubmits the same
-   * form (with the requeued telemetry) after the widget resets.
-   */
-  function renderVerificationRequired(result) {
-    const existing = document.getElementById("fr-result");
-    if (existing) existing.remove();
-
-    const div = document.createElement("div");
-    div.id = "fr-result";
-    div.className = "fr-result";
-    const message = result.message || "Verification required. Please complete the challenge and retry.";
-    div.innerHTML =
-      `<p class="fr-result-status">${escapeHtml(message)}</p>` +
-      `<button type="button" id="fr-retry-btn" class="fr-retry">Retry submission</button>`;
-    form.after(div);
-    document.getElementById("fr-retry-btn")?.addEventListener("click", () => {
-      div.remove();
-      form.requestSubmit();
-    });
-  }
-
-  function renderResult(result) {
-    // Remove existing result if any
-    const existing = document.getElementById("fr-result");
-    if (existing) existing.remove();
-
-    const div = document.createElement("div");
-    div.id = "fr-result";
-    div.className = "fr-result";
-
-    if (result.error) {
-      div.innerHTML = `<p class="fr-result-error">${escapeHtml(result.error)}</p>`;
-    } else if (result.status === "received") {
-      const disposition = result.disposition || "REVIEW";
-      div.innerHTML = `
-        <p class="fr-result-status">Submission received.</p>
-        <p class="fr-result-disposition">Status: ${escapeHtml(disposition)}</p>
-      `;
-    }
-
-    form.after(div);
-  }
-
-  function escapeHtml(str) {
-    const div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML;
-  }
-
-  // Periodic flush (best-effort, non-blocking) for events before submit.
-  // FR-R6-037: only events above the acknowledged watermark are flushed
-  // here, and a 409 clears conservatively (the server watermark is ahead of
-  // what we believed — never replay across it).
-  setInterval(flush, 5000);
-
-  function flush() {
-    if (events.length === 0) return;
-    // Do not flush the tail of the queue that submit will carry anyway;
-    // flush only acknowledged-prefix-safe batches (all events are
-    // monotonically sequenced, so the whole queue is safe to send as-is).
-    const batch = events.slice();
-    fetch("/api/events", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ events: batch }),
-      keepalive: true,
-    })
-      .then(async (resp) => {
-        if (resp.ok) {
-          // Keep them queued — submit carries the final batch; periodic
-          // flush is a redundancy copy the watermark dedupes.
-          acknowledgedSeq = Math.max(acknowledgedSeq, batch[batch.length - 1].seq);
-        } else if (resp.status === 409) {
-          // Watermark conflict: the server is AHEAD of us (a submit already
-          // carried these events). Drop the accepted prefix conservatively.
-          events.splice(0, events.length);
-        }
-        // Other failures: leave the queue intact for the submit path.
-      })
-      .catch(() => {
-        // Network failure: leave the queue intact.
-      });
-  }
 })();

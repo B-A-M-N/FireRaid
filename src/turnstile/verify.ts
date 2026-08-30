@@ -25,6 +25,12 @@ export interface TurnstileVerifyRequest {
 
 const SITEVERIFY = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
+import type {
+  VerificationProvider,
+  VerificationRequest,
+  VerificationResult,
+} from "../security/verification.js";
+
 /**
  * Verify a Turnstile token. Always calls the real Siteverify API — there is
  * no runtime test-mode path. Local/e2e environments run without
@@ -121,4 +127,38 @@ export function looksLikeTestSiteKey(sitekey: string): boolean {
  */
 export function looksLikeTestKey(secret: string): boolean {
   return looksLikeTestSecret(secret);
+}
+
+/**
+ * FR-R7-026: Turnstile-backed VerificationProvider for the Cloudflare
+ * reference deployment. Operators can implement their own
+ * VerificationProvider and inject it instead — the core submit route no
+ * longer assumes Turnstile.
+ */
+export class TurnstileVerificationProvider implements VerificationProvider {
+  readonly name = "turnstile";
+  constructor(private readonly secret: string) {}
+
+  async verify(req: VerificationRequest): Promise<VerificationResult> {
+    return verifyTurnstile({
+      token: req.token,
+      secret: this.secret,
+      remoteip: req.remoteip,
+      expectedAction: req.expectedAction,
+      expectedHostname: req.expectedHostname,
+    });
+  }
+}
+
+/**
+ * Factory used by submit.ts to obtain the configured provider. The Cloudflare
+ * deployment defaults to Turnstile when TURNSTILE_SECRET_KEY is set; if a
+ * deployer ever supplies a different provider implementation via env /
+ * plugin, this factory is the swap point.
+ */
+export function defaultVerificationProvider(env: {
+  TURNSTILE_SECRET_KEY?: string;
+}): VerificationProvider | null {
+  if (!env.TURNSTILE_SECRET_KEY) return null;
+  return new TurnstileVerificationProvider(env.TURNSTILE_SECRET_KEY);
 }

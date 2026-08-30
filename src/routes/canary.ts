@@ -7,6 +7,7 @@
  */
 import { noContent, error } from "../security/headers.js";
 import type { Env } from "../env.js";
+import { isLabMode } from "../env.js";
 import {
   getSessionId,
   isExpired,
@@ -15,7 +16,7 @@ import {
 import {
   loadSession,
 } from "../cloudflare/session.js";;
-import { reconstructFromSessionId } from "../core/reconstruct.js";
+import { reconstructIssuedProfile } from "../core/reconstruct.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
 
 /** Hash a token for storage (SHA-256 hex). */
@@ -61,28 +62,35 @@ export async function canary(req: Request, env: Env): Promise<Response> {
   // or the reconstructed decoyRoute token differs from the RENDERED token
   // and every legitimate REQUESTED→VERIFIED causal hit 403s. Found by the
   // Phase 4 perception-chain integration test (render/reconstruct drift).
+  // FR-R7-019: production has no bound research runs; the lab_runs query
+  // is gated behind isLabMode(env) so a production /c/ is one session
+  // SELECT + one reconstruction, not three D1 round-trips.
   let recipe: DefenseRecipe | undefined;
   let holdoutMode: boolean | undefined;
-  try {
-    const row = await env.DB.prepare(
-      `SELECT recipe_json, holdout_mode FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
-    )
-      .bind(sessionId)
-      .first<{ recipe_json: string | null; holdout_mode: number | null }>();
-    const raw = row?.recipe_json;
-    if (typeof raw === "string" && raw.length > 0) {
-      recipe = JSON.parse(raw) as DefenseRecipe;
+  if (isLabMode(env)) {
+    try {
+      const row = await env.DB.prepare(
+        `SELECT recipe_json, holdout_mode FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
+      )
+        .bind(sessionId)
+        .first<{ recipe_json: string | null; holdout_mode: number | null }>();
+      const raw = row?.recipe_json;
+      if (typeof raw === "string" && raw.length > 0) {
+        recipe = JSON.parse(raw) as DefenseRecipe;
+      }
+      // FR-POST-R6-P5: holdout flag is part of the treatment identity.
+      if (row && row.holdout_mode !== null) holdoutMode = row.holdout_mode === 1;
+    } catch {
+      recipe = undefined; // unbound session — random lab/production profile
     }
-    // FR-POST-R6-P5: holdout flag is part of the treatment identity.
-    if (row && row.holdout_mode !== null) holdoutMode = row.holdout_mode === 1;
-  } catch {
-    recipe = undefined; // unbound session — random lab/production profile
   }
-  const reconstructed = await reconstructFromSessionId(env, sessionId, {
+  // FR-R7-018: pass the already-loaded session's key id straight into the
+  // canonical reconstructor — no second session SELECT.
+  const reconstructed = await reconstructIssuedProfile(env, {
+    id: sessionId,
     profileVersion: session.profileVersion,
-    recipe,
-    holdoutMode,
-  });
+    profileKeyId: session.profileKeyId ?? null,
+  }, recipe, { holdoutMode });
   if (!reconstructed.ok) {
     console.error("canary reconstruction failed:", reconstructed.code, reconstructed.detail);
     return error("profile reconstruction failed", 500);

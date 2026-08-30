@@ -236,3 +236,134 @@ export async function aggregateSessionTelemetry(
 
   return aggregateTelemetry(allEvents, capture);
 }
+
+/**
+ * FR-R7-022: compact server-side interaction state.
+ *
+ * Merge a freshly-validated batch into the session's metrics row in one
+ * transactional UPSERT. The aggregate is computed against (existing-events
+ * for the range not yet seen ∪ new batch), but in practice a session sees
+ * batches in seq order (the watermark gate enforces this) — so we can
+ * recompute incrementally: counts grow monotonically, while booleans
+ * (directFill, noPointerEvents, noKeyEvents) take the OR of the per-batch
+ * results and the cumulative state.
+ *
+ * Lab mode does NOT call this — research needs the raw batch rows intact,
+ * and the existing aggregateSessionTelemetry path remains authoritative.
+ */
+export async function mergeSessionMetrics(
+  db: D1Database,
+  sessionId: string,
+  events: ValidatedEvent[],
+  capture: CaptureConfig
+): Promise<void> {
+  if (events.length === 0) return;
+  // Aggregate this batch alone — combine with the stored row via OR /
+  // additive arithmetic in the SQL UPDATE below.
+  const batch = aggregateTelemetry(events, capture);
+  const firstSeq = events[0].seq;
+  const lastSeq = events[events.length - 1].seq;
+  const now = Date.now();
+
+  await db
+    .prepare(
+      `INSERT INTO session_metrics (
+         session_id, direct_fill, completion_ms, page_to_submit_ms,
+         pointer_count, focus_transitions, key_count,
+         missing_interaction_sequence, no_pointer_events, no_key_events,
+         capture_pointer, capture_key,
+         first_event_seq, last_event_seq, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         direct_fill = MAX(direct_fill, excluded.direct_fill),
+         pointer_count = pointer_count + excluded.pointer_count,
+         focus_transitions = focus_transitions + excluded.focus_transitions,
+         key_count = key_count + excluded.key_count,
+         no_pointer_events = CASE
+           WHEN excluded.no_pointer_events IS NULL THEN no_pointer_events
+           WHEN no_pointer_events IS NULL THEN excluded.no_pointer_events
+           ELSE MAX(no_pointer_events, excluded.no_pointer_events)
+         END,
+         no_key_events = CASE
+           WHEN excluded.no_key_events IS NULL THEN no_key_events
+           WHEN no_key_events IS NULL THEN excluded.no_key_events
+           ELSE MAX(no_key_events, excluded.no_key_events)
+         END,
+         missing_interaction_sequence = CASE
+           WHEN excluded.missing_interaction_sequence IS NULL THEN missing_interaction_sequence
+           WHEN missing_interaction_sequence IS NULL THEN excluded.missing_interaction_sequence
+           ELSE MAX(missing_interaction_sequence, excluded.missing_interaction_sequence)
+         END,
+         first_event_seq = MIN(first_event_seq, excluded.first_event_seq),
+         last_event_seq  = MAX(last_event_seq,  excluded.last_event_seq),
+         updated_at = excluded.updated_at`
+    )
+    .bind(
+      sessionId,
+      batch.directFill ? 1 : 0,
+      batch.completionMs,
+      batch.pageToSubmitMs,
+      batch.pointerCount,
+      batch.focusTransitions,
+      batch.keyCount,
+      batch.missingInteractionSequence === undefined ? null : (batch.missingInteractionSequence ? 1 : 0),
+      batch.noPointerEvents === undefined ? null : (batch.noPointerEvents ? 1 : 0),
+      batch.noKeyEvents === undefined ? null : (batch.noKeyEvents ? 1 : 0),
+      batch.capturePointer ? 1 : 0,
+      batch.captureKey ? 1 : 0,
+      firstSeq,
+      lastSeq,
+      now
+    )
+    .run();
+}
+
+/**
+ * FR-R7-022: read the compact metrics row for a session, if present. When
+ * the row is absent (lab-only run, or production session that never sent a
+ * batch), returns null so callers can fall back to aggregateSessionTelemetry.
+ */
+export async function loadSessionMetrics(
+  db: D1Database,
+  sessionId: string
+): Promise<TelemetryMetrics | null> {
+  const row = await db
+    .prepare(
+      `SELECT direct_fill, completion_ms, page_to_submit_ms,
+              pointer_count, focus_transitions, key_count,
+              missing_interaction_sequence, no_pointer_events, no_key_events,
+              capture_pointer, capture_key
+         FROM session_metrics WHERE session_id = ?`
+    )
+    .bind(sessionId)
+    .first<{
+      direct_fill: number;
+      completion_ms: number;
+      page_to_submit_ms: number;
+      pointer_count: number;
+      focus_transitions: number;
+      key_count: number;
+      missing_interaction_sequence: number | null;
+      no_pointer_events: number | null;
+      no_key_events: number | null;
+      capture_pointer: number;
+      capture_key: number;
+    }>();
+  if (!row) return null;
+  return {
+    directFill: row.direct_fill === 1,
+    completionMs: row.completion_ms,
+    pageToSubmitMs: row.page_to_submit_ms,
+    pointerCount: row.pointer_count,
+    focusTransitions: row.focus_transitions,
+    keyCount: row.key_count,
+    missingInteractionSequence:
+      row.missing_interaction_sequence === null ? undefined : row.missing_interaction_sequence === 1,
+    noPointerEvents:
+      row.no_pointer_events === null ? undefined : row.no_pointer_events === 1,
+    noKeyEvents:
+      row.no_key_events === null ? undefined : row.no_key_events === 1,
+    capturePointer: row.capture_pointer === 1,
+    captureKey: row.capture_key === 1,
+  };
+}

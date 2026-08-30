@@ -29,19 +29,19 @@ function mkEvent(
 // ── validateTelemetryBatch (FR-R4-015) ──────────────────────────────
 
 describe("validateTelemetryBatch (FR-R4-015)", () => {
-  it("64 valid events → {ok:true}", () => {
+  it("256 valid events → {ok:true} (FR-R7-023 cap)", () => {
     const events: unknown[] = [];
-    for (let i = 1; i <= 64; i++) {
+    for (let i = 1; i <= 256; i++) {
       events.push({ seq: i, dt: i * 100, kind: "focus", target: `f${i}` });
     }
     const result = validateTelemetryBatch(events);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.events.length).toBe(64);
+    if (result.ok) expect(result.events.length).toBe(256);
   });
 
-  it("65 events → {ok:false, code:'TOO_MANY_EVENTS'}", () => {
+  it("257 events → {ok:false, code:'TOO_MANY_EVENTS'} (FR-R7-023 cap)", () => {
     const events: unknown[] = [];
-    for (let i = 1; i <= 65; i++) {
+    for (let i = 1; i <= 257; i++) {
       events.push({ seq: i, dt: i * 100, kind: "focus", target: `f${i}` });
     }
     const result = validateTelemetryBatch(events);

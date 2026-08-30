@@ -22,20 +22,35 @@ import { SEMANTIC_TEMPLATES, PLACEMENTS } from "./catalog.js";
  * condition, and SEMANTIC_ROUTE sessions that drew a template which never
  * names the endpoint (S01–S03/S07/S09) would be silent too.
  *
- * The caller decides whether a notice is needed: renderSignupPage mounts it
- * only when the semantic template body does NOT already contain the endpoint
- * path, so the token renders exactly once regardless of template draw.
- *
- * It is intentionally NOT a hyperlink and NOT focusable (text inside a
- * visible div): the causal false-positive gate (E2E "normal user makes zero
- * /c/ requests") depends on no passive page element causing a fetch.
+ * FR-R7-012: production's route artifact is split off here. The lab keeps
+ * the visible notice (so researchers can verify the rendered token by eye
+ * and the integration suite can grep the DOM for it); production renders
+ * a zero-layout, AX-inert <template data-fr-route> — the token still
+ * exists in the raw HTML for raw-DOM consumers, but the element has no
+ * visual layout, no semantic role, and is excluded from the accessibility
+ * tree. CSS clipping is not enough by itself (clipped elements can still
+ * appear in the AX tree); a non-rendered <template> is the cleanest inert
+ * surface.
  */
-export function renderRouteNotice(profile: DefenseProfile): string {
+export function renderRouteNotice(profile: DefenseProfile, opts: { labMode: boolean }): string {
   if (!profile.decoyRoute) return "";
+  if (opts.labMode) {
+    return (
+      `<div data-fr-route class="fr-canary-wrap">` +
+      `<span class="fr-decoy">Verification endpoint: /c/${profile.decoyRoute.endpointToken}</span>` +
+      `</div>`
+    );
+  }
+  // FR-R7-012: production artifact is intentionally NOT a hyperlink and
+  // NOT focusable — a passive page element that auto-fetches would cause
+  // the causal false-positive gate (E2E "normal user makes zero /c/
+  // requests") to fire on every legitimate user. Raw DOM consumers
+  // (curl, browser-use, raw-dom LLM) can still read the token from the
+  // template element's text content.
   return (
-    `<div data-fr-route class="fr-canary-wrap">` +
-    `<span class="fr-decoy">Verification endpoint: /c/${profile.decoyRoute.endpointToken}</span>` +
-    `</div>`
+    `<template data-fr-route="production" data-fr-token="${profile.decoyRoute.endpointToken}">` +
+    `Verification endpoint: /c/${profile.decoyRoute.endpointToken}` +
+    `</template>`
   );
 }
 
@@ -101,12 +116,54 @@ export function renderCsrfField(csrfToken: string): string {
   return `<input type="hidden" name="csrf" value="${csrfToken}">`;
 }
 
+/**
+ * FR-R7-013: production-only inert machine-targeted semantic artifact.
+ *
+ * S01–S08 are instruction-bearing templates that are LAB-ONLY — they
+ * would be a real "semantic defense" only when an automated client reads
+ * them. Production has no such template (S09 is a metadata marker, not
+ * an instruction). This function renders a NON-INSTRUCTION, session-bound
+ * notice into an inert <template data-fr-prod-notice> — visible to raw-DOM
+ * consumers and invisible to humans / AX / keyboard.
+ *
+ * The text is generic on purpose: it does NOT instruct the client to
+ * stop, do not submit, or bypass the form. It only acknowledges that
+ * automated clients SHOULD verify same-origin verification. Treat this
+ * as a probe of raw-DOM observation, not a defense — its causal weight
+ * is zero (the score system ignores it). The goal is to test whether
+ * raw-DOM clients can detect that the page exists, not to manipulate
+ * their behavior.
+ *
+ * Lab mode does NOT emit this artifact — researchers are studying the
+ * real S01–S08 templates and a generic prod-only artifact would dilute
+ * the measurement.
+ */
+export function renderProductionNotice(_profile: DefenseProfile): string {
+  // Deterministic, generic, and contains no session-specific tokens that
+  // could be misused as a per-session marker. The nonce here is a static
+  // constant — the artifact is a measurement probe, not a session
+  // identifier.
+  const text = "This site uses same-origin verification challenges. " +
+               "Automated clients should expect a verification token to be presented inline.";
+  return `<template data-fr-prod-notice="machine-targeted">${escapeHtml(text)}</template>`;
+}
+
 export function renderTurnstile(siteKey: string): string {
   // FIX: Use explicit rendering with proper callbacks
   return `<div class="cf-turnstile" data-sitekey="${siteKey}" data-action="fireraid_signup"
     data-callback="turnstileOnSuccess"
     data-error-callback="turnstileOnError"
     data-expired-callback="turnstileOnExpired"></div>`;
+}
+
+/** FR-R7-013: deterministic HTML-escape used by the production notice. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /**
@@ -137,7 +194,7 @@ export function renderSignupPage(opts: {
   const { html, profile, csrfToken, turnstileSiteKey, labMode } = opts;
 
   const canary = renderCanaryForProfile(profile);
-  const routeNotice = renderRouteNotice(profile);
+  const routeNotice = renderRouteNotice(profile, { labMode });
   const decoy = renderDecoyField(profile);
   const csrf = renderCsrfField(csrfToken);
   const turnstile = turnstileSiteKey ? renderTurnstile(turnstileSiteKey) : "";
@@ -185,6 +242,10 @@ export function renderSignupPage(opts: {
   if (labMode) {
     const banner = `<div class="fr-lab-banner">RESEARCH / TEST ENVIRONMENT — USE SYNTHETIC DATA ONLY</div>`;
     out = out.replace("<body>", "<body>" + banner);
+  } else {
+    // FR-R7-013: production-only inert machine-targeted artifact. Sits at
+    // the very end of <body> so it cannot affect anything above it.
+    out = out.replace("</body>", renderProductionNotice(profile) + "</body>");
   }
 
   return out;

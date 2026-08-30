@@ -11,11 +11,12 @@ import { submit } from "./routes/submit.js";
 import { canary } from "./routes/canary.js";
 import { events } from "./routes/telemetry.js";
 import { adminLogin, adminSummary, adminSessions, adminSessionDetail, adminExperiments, adminExperimentDetail, adminExport, adminLogout, adminCleanup } from "./routes/admin.js";
-import { createLabRun, getLabRun, associateLabRun, ingestLabRuns, postLabRunOutcome } from "./routes/lab.js";
+import { createLabRun, getLabRun, ingestLabRuns, postLabRunOutcome } from "./routes/lab.js";
 import { error, html } from "./security/headers.js";
 import { readAdminHtml } from "./core/static.js";
 import { looksLikeTestSiteKey, looksLikeTestSecret } from "./turnstile/verify.js";
 import { isLabMode, validateProfileVersionConfig } from "./env.js";
+import { validateProfileKeyRing } from "./core/session.js";
 
 /**
  * Validate configuration at startup.
@@ -34,6 +35,13 @@ function validateConfig(env: Env): string | null {
   // FR-R5-044: PROFILE_VERSION must be valid at startup, not first derivation
   const versionError = validateProfileVersionConfig(env);
   if (versionError) return versionError;
+
+  // FR-R7-002: malformed key-ring configuration is a startup failure, not a
+  // silent degradation. A session written today must still reconstruct after
+  // rotation tomorrow — a silently-discarded PREVIOUS map (resolved by an
+  // older resolveProfileKey) would corrupt historical sessions.
+  const keyRingError = validateProfileKeyRing(env);
+  if (keyRingError) return keyRingError;
 
   // Production-specific restrictions
   if (!isLabMode(env)) {
@@ -72,6 +80,31 @@ function validateConfig(env: Env): string | null {
 let configError: string | null | undefined;
 
 export default {
+  /**
+   * FR-R7-025: Cloudflare scheduled handler — retention sweep.
+   * Triggered by a cron expression in wrangler.jsonc (`triggers.crons`).
+   * Runs the same SQL as the admin /cleanup endpoint but without admin
+   * auth, on a tighter cutoff derived from the env-supplied retention
+   * days. Manual /api/admin/cleanup remains available as a fallback.
+   */
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // FR-R7-025: defer the work so the scheduled invocation returns even
+    // on cold-start latency; failures show up in the worker logs.
+    ctx.waitUntil((async () => {
+      try {
+        const retentionDays = Math.max(
+          1,
+          Math.min(Number(env.FIRERAID_RETENTION_DAYS ?? "30") || 30, 365)
+        );
+        const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+        const sweep = await runRetentionSweep(env.DB, cutoff);
+        console.log("fireraid retention sweep", { retentionDays, cutoff, ...sweep });
+      } catch (err) {
+        console.error("fireraid retention sweep failed:", err);
+      }
+    })());
+  },
+
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     // Validate config once on first request
     if (configError === undefined) {
@@ -126,8 +159,6 @@ export default {
       if (labOutcomeMatch && req.method === "POST") return postLabRunOutcome(req, env, labOutcomeMatch[1]);
       const labRunMatch = path.match(/^\/api\/lab\/runs\/([^/]+)$/);
       if (labRunMatch && req.method === "GET") return getLabRun(req, env, labRunMatch[1]);
-      const labAssociateMatch = path.match(/^\/api\/lab\/runs\/([^/]+)\/associate$/);
-      if (labAssociateMatch && req.method === "POST") return associateLabRun(req, env, labAssociateMatch[1]);
 
       // Admin UI (FR-R3-070: use html() helper for security headers)
       if (path === "/admin" || path === "/admin/") {
@@ -148,3 +179,81 @@ export default {
     }
   },
 };
+
+/**
+ * FR-R7-025: shared retention sweep used by both the admin cleanup
+ * endpoint and the scheduled handler. Returns per-table change counts.
+ */
+async function runRetentionSweep(
+  db: D1Database,
+  cutoff: number
+): Promise<{
+  telemetryBatches: number;
+  canaryHits: number;
+  verificationAttempts: number;
+  submissionEvidence: number;
+  submissions: number;
+  abandonedSessions: number;
+  finalizedSessions: number;
+  sessionMetrics: number;
+  expiredLabRuns: number;
+}> {
+  const results = {
+    telemetryBatches: 0,
+    canaryHits: 0,
+    verificationAttempts: 0,
+    submissionEvidence: 0,
+    submissions: 0,
+    abandonedSessions: 0,
+    finalizedSessions: 0,
+    sessionMetrics: 0,
+    expiredLabRuns: 0,
+  };
+  const r1 = await db.prepare(`DELETE FROM event_batches WHERE created_at < ?`).bind(cutoff).run();
+  results.telemetryBatches = r1.meta?.changes ?? 0;
+  const r2 = await db.prepare(`DELETE FROM canary_hits WHERE created_at < ?`).bind(cutoff).run();
+  results.canaryHits = r2.meta?.changes ?? 0;
+  const r3 = await db.prepare(`DELETE FROM verification_attempts WHERE created_at < ?`).bind(cutoff).run();
+  results.verificationAttempts = r3.meta?.changes ?? 0;
+  const r4 = await db
+    .prepare(
+      `DELETE FROM submission_evidence WHERE submission_id IN (
+         SELECT id FROM submissions WHERE created_at < ?
+       )`
+    )
+    .bind(cutoff)
+    .run();
+  results.submissionEvidence = r4.meta?.changes ?? 0;
+  const r5 = await db.prepare(`DELETE FROM submissions WHERE created_at < ?`).bind(cutoff).run();
+  results.submissions = r5.meta?.changes ?? 0;
+  const r6 = await db
+    .prepare(
+      `DELETE FROM sessions WHERE created_at < ? AND submitted = 0 AND id NOT IN (
+         SELECT session_id FROM submissions
+       )`
+    )
+    .bind(cutoff)
+    .run();
+  results.abandonedSessions = r6.meta?.changes ?? 0;
+  const r7 = await db.prepare(`DELETE FROM sessions WHERE created_at < ? AND submitted = 1`).bind(cutoff).run();
+  results.finalizedSessions = r7.meta?.changes ?? 0;
+  // FR-R7-022: drop compact metrics rows for sessions whose parent session
+  // row has been pruned — orphaned rows would otherwise accumulate.
+  const r8 = await db
+    .prepare(
+      `DELETE FROM session_metrics WHERE session_id NOT IN (SELECT id FROM sessions)`
+    )
+    .run();
+  results.sessionMetrics = r8.meta?.changes ?? 0;
+  // Lab runs that expired before BOUND: drop them outright, they have no
+  // session and never will. Terminal-state rows are kept until their
+  // created_at + retention cutoff to remain auditable.
+  const r9 = await db
+    .prepare(
+      `DELETE FROM lab_runs WHERE status = 'PENDING' AND expires_at IS NOT NULL AND expires_at < ?`
+    )
+    .bind(cutoff)
+    .run();
+  results.expiredLabRuns = r9.meta?.changes ?? 0;
+  return results;
+}

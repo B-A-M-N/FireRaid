@@ -626,17 +626,6 @@ export async function postLabRunOutcome(req: Request, env: Env, runId: string): 
 }
 
 /**
- * POST /api/lab/runs/:id/associate — browser bind, one-time capability.
- * Uses bind token (not runner bearer secret) — the browser agent's context.
- *
- * FR-R6-012: This endpoint was removed (double-bind). The stub below returns
- * 410 Gone so the export remains compatible with src/index.ts imports.
- */
-export async function associateLabRun(_req: Request, _env: Env, _runId: string): Promise<Response> {
-  return error("removed: bind happens via GET /signup?lab_run=&bind= (FR-R6-012)", 410);
-}
-
-/**
  * POST /api/lab/runs/ingest — publish harness RunRecordV1 results to the D1
  * run index (FR-R4-070). Full artifacts stay local to the runner; this stores
  * the compact run metadata that admin experiment pages query.
