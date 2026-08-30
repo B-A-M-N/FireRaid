@@ -1,0 +1,5 @@
+
+> fireraid@0.1.0 lint
+> eslint "src/**/*.ts" "harness/**/*.ts" "tests/**/*.ts" --max-warnings 0
+
+lint exit=0

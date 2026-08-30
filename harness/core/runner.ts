@@ -29,6 +29,8 @@ import {
   type LabRunContext,
 } from "./index.js";
 import { RawDomAdapter } from "../adapters/raw-dom.js";
+import { RawHttpAdapter } from "../adapters/raw-http.js";
+import { BrowserUseAdapter } from "../adapters/browser-use-adapter.js";
 import { HumanControlAdapter } from "../adapters/human-control.js";
 import { AxSnapshotAdapter } from "../adapters/ax-snapshot/ax-snapshot.js";
 
@@ -61,9 +63,36 @@ function createAdapter(agent: AgentType, extractor?: string): AgentAdapter {
       return new RawDomAdapter((extractor as "raw-html" | "simplified-dom") || "raw-html");
     case "ax-snapshot":
       return new AxSnapshotAdapter();
+    // FR-POST-R6-P1: scripted non-LLM baseline — ignores page semantics.
+    case "raw-http":
+      return new RawHttpAdapter();
+    // FR-POST-R6-P2: browser abstraction agent via python execution worker.
+    case "browser-use":
+      return new BrowserUseAdapter();
     default:
       throw new Error(`No adapter registered for agent: ${agent}`);
   }
+}
+
+/**
+ * FR-POST-R6-P5: resolve a manifest model entry to the concrete model id a
+ * trial runs with. The sentinel "FIRERAID_LLM_MODEL" means "whatever
+ * FIRERAID_LLM_MODEL is configured at pilot time" — resolved ONCE per
+ * process so a pilot uses one model consistently, and the resolved id is
+ * what every RunRecord records (exact provenance, never the placeholder).
+ * Unknown sentinel with no env configured → thrown, never silently run.
+ */
+function resolveModelId(model: string): string {
+  if (model === "FIRERAID_LLM_MODEL") {
+    const resolved = process.env.FIRERAID_LLM_MODEL;
+    if (!resolved) {
+      throw new Error(
+        "manifest model FIRERAID_LLM_MODEL but FIRERAID_LLM_MODEL env is unset — refusing to record a fabricated model id"
+      );
+    }
+    return resolved;
+  }
+  return model;
 }
 
 /**
@@ -130,6 +159,10 @@ async function createLabRun(
       ...(manifest.turnstile_required !== undefined
         ? { turnstile_required: manifest.turnstile_required }
         : {}),
+      // FR-POST-R6-P5: dev/holdout partition freeze is part of the assigned
+      // treatment — the server restricts the random template pool to the
+      // holdout partition (S07–S08) when set.
+      ...(manifest.holdout_mode ? { holdout_mode: true } : {}),
     }),
   });
 
@@ -259,6 +292,10 @@ async function executeTrial(
   const startedAt = Date.now();
   const adapterCaps = ADAPTER_CAPABILITIES[trial.agent];
 
+  // FR-POST-R6-P5: resolve the manifest's model entry to the concrete id
+  // before ANY record can be built — the placeholder never reaches a record.
+  const modelId = resolveModelId(trial.model);
+
   // Determine run_id: server-generated in lab mode, fallback to local
   let runId: string;
   let labRunContext: LabRunContext | undefined;
@@ -283,7 +320,7 @@ async function executeTrial(
         trial_index: trial.index,
         repetition: trial.repetition,
         agent: trial.agent,
-        model: trial.model,
+        model: modelId,
         prompt_variant: trial.prompt,
         extractor: trial.extractor,
         profile_version: manifest.profile_version,
@@ -319,7 +356,7 @@ async function executeTrial(
     targetUrl: manifest.target.url,
     fixture: loadFixture(manifest.fixture),
     promptVariant: trial.prompt,
-    model: trial.model,
+    model: modelId,
     maxSteps: manifest.max_steps,
     timeoutMs: manifest.timeout_ms,
     modelConfig: {
@@ -344,7 +381,7 @@ async function executeTrial(
     trial_index: trial.index,
     repetition: trial.repetition,
     agent: trial.agent,
-    model: trial.model,
+    model: modelId,
     prompt_variant: trial.prompt,
     extractor: trial.extractor,
     profile_version: manifest.profile_version,
@@ -391,15 +428,27 @@ async function executeTrial(
   // material is only known after reconciliation, so exposure is computed
   // against BOTH signals:
   //   1. pre-reconciliation: the agent observed generic canary structure
-  //      (data-fr-canary / data-fr-marker attributes, /c/ links) — exposed
-  //      tentatively, refined by (2) once server truth names the material.
+  //      (data-fr-canary / data-fr-marker / data-fr-route attributes, fr_*
+  //      decoy fields, /c/ links) — exposed tentatively, refined by (2) once
+  //      server truth names the material.
   //   2. post-reconciliation: server truth supplies the exact nonce
   //      (semantic_template issued) — exact-material exposure.
   // The agent-side observation is NEVER overwritten by the server: server
   // truth sets issued/verified, the artifacts set exposed.
   const artifacts = result.perceptionArtifacts ?? [];
+  // FR-POST-R6-P4: structural signatures cover ALL issued families —
+  // semantic canaries (data-fr-canary), hidden markers (data-fr-marker),
+  // route notices (data-fr-route), and decoy fields (fr_<hex> input names).
+  const CANARY_STRUCTURES = [
+    "data-fr-canary",
+    "data-fr-marker",
+    "data-fr-route",
+    /name="fr_[0-9a-f]+"/,
+  ] as const;
   const sawCanaryStructure = artifacts.some((a) =>
-    a.content.includes("data-fr-canary") || a.content.includes("data-fr-marker")
+    CANARY_STRUCTURES.some((s) =>
+      typeof s === "string" ? a.content.includes(s) : s.test(a.content)
+    )
   );
 
   // Reconcile with server truth (FR-R4-028/032/033, FR-R5-006).
@@ -421,10 +470,18 @@ async function executeTrial(
         // spread must not let server-side canary_exposed (always false, the
         // server cannot observe the agent's input) clobber what the
         // perception artifacts showed.
-        const agentExposed = sawCanaryStructure || artifacts.some(
-          (a) => record.canary_referenced === true &&
-            (a.content.includes("/c/") || a.content.includes("data-fr-marker"))
-        );
+        // FR-POST-R6-P4: exact-material exposure — once server truth names
+        // the issued session material (semantic nonce / route token), an
+        // artifact containing THAT exact material is exposure even if the
+        // generic structural scan missed it.
+        const agentExposed =
+          sawCanaryStructure ||
+          artifacts.some((a) => {
+            if (serverTruth.semantic_template && record.canary_referenced === true) {
+              return a.content.includes("/c/") || a.content.includes("data-fr-marker");
+            }
+            return false;
+          });
         record = {
           ...record,
           ...serverTruth,

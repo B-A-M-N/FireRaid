@@ -9,6 +9,7 @@
  * canaryReferenced is set from the canaryExposed flag (page contains canary markers).
  */
 
+import { createHash } from "node:crypto";
 import type { AgentAdapter, AgentRunResult, Scenario } from "../core/run-schema.js";
 
 export interface RawHttpConfig {
@@ -28,11 +29,30 @@ export interface RawHttpResult {
   sessionCookie?: string;
 }
 
+export interface RawHttpResult {
+  outcome: "submitted" | "error";
+  submitted: boolean;
+  disposition?: string;
+  score?: number;
+  canaryTriggered: boolean;
+  canaryExposed: boolean;
+  sessionCookie?: string;
+  /** FR-POST-R6-P1: transport bytes of the signup GET (bounded) for exposure artifacts. */
+  signupHtml?: string;
+  /** HTTP status of the signup GET. */
+  signupStatus?: number;
+  /** HTTP status of the submit POST (undefined if it never got a response). */
+  submitStatus?: number;
+}
+
 export async function runRawHttpAgent(config: RawHttpConfig): Promise<RawHttpResult> {
   const { baseUrl, fixture, labRun } = config;
   const canaryTriggered = false;
   let canaryExposed = false;
   let sessionCookie: string | undefined;
+  let signupHtml = "";
+  let signupStatus: number | undefined;
+  let submitStatus: number | undefined;
   let csrfToken = "";
 
   try {
@@ -47,6 +67,7 @@ export async function runRawHttpAgent(config: RawHttpConfig): Promise<RawHttpRes
     })();
     // Step 1: GET /signup to create session and get CSRF token
     const signupResp = await fetch(signupUrlStr);
+    signupStatus = signupResp.status;
 
     let html = "";
     if (signupResp.ok) {
@@ -56,6 +77,7 @@ export async function runRawHttpAgent(config: RawHttpConfig): Promise<RawHttpRes
       canaryExposed =
         html.includes("data-fr-canary-id") || html.includes("fr-canary");
     }
+    signupHtml = html.slice(0, 20000); // bounded artifact payload
 
     // Extract session cookie
     const setCookie = signupResp.headers.get("set-cookie") || "";
@@ -91,6 +113,7 @@ export async function runRawHttpAgent(config: RawHttpConfig): Promise<RawHttpRes
       }),
     });
 
+    submitStatus = submitResp.status;
     if (!submitResp.ok) {
       return {
         outcome: "error",
@@ -98,6 +121,9 @@ export async function runRawHttpAgent(config: RawHttpConfig): Promise<RawHttpRes
         canaryTriggered,
         canaryExposed,
         sessionCookie,
+        signupHtml,
+        signupStatus,
+        submitStatus,
       };
     }
 
@@ -115,6 +141,9 @@ export async function runRawHttpAgent(config: RawHttpConfig): Promise<RawHttpRes
       canaryTriggered,
       canaryExposed,
       sessionCookie,
+      signupHtml,
+      signupStatus,
+      submitStatus,
     };
   } catch {
     return {
@@ -122,6 +151,9 @@ export async function runRawHttpAgent(config: RawHttpConfig): Promise<RawHttpRes
       submitted: false,
       canaryTriggered,
       canaryExposed,
+      signupHtml,
+      signupStatus,
+      submitStatus,
     };
   }
 }
@@ -155,6 +187,30 @@ export class RawHttpAdapter implements AgentAdapter {
 
       const elapsedMs = Date.now() - start;
 
+      // FR-POST-R6-P1: the transport bytes ARE this agent's entire
+      // perception. Record them as a perception artifact so the runner's
+      // EXPOSED computation (which scans artifacts) works uniformly for
+      // this architecture, and so exposure is measured against what the
+      // agent actually received — not what the server rendered somewhere.
+      const artifacts: AgentRunResult["perceptionArtifacts"] = [];
+      if (rawResult.signupHtml) {
+        artifacts.push({
+          step: 1,
+          type: "raw-html",
+          content: rawResult.signupHtml,
+          hash: createHash("sha256").update(rawResult.signupHtml).digest("hex"),
+        });
+      }
+
+      // Transcript: wire-level observations only. NOTE: submit status is
+      // deliberately included — the server response is what the agent
+      // "observed" (blind POST → status code).
+      transcript.push(
+        `[GET /signup] ${rawResult.signupStatus ?? "no-response"}`,
+        `[POST /api/submit] ${rawResult.submitStatus ?? "no-response"}`,
+        `[SUBMIT RESPONSE] disposition=${rawResult.disposition ?? "n/a"} score=${rawResult.score ?? "n/a"}`,
+      );
+
       // Map RawHttpResult → AgentRunResult.
       // FR-R6-064: exposure and reference are DIFFERENT concepts. Raw HTTP
       // can observe canary markers in the transport bytes (canaryExposed)
@@ -172,6 +228,7 @@ export class RawHttpAdapter implements AgentAdapter {
         canaryTriggered: false, // raw-http never navigates, never hits /c/
         canaryReferenced: false,
         canaryGenericReferenced: false,
+        perceptionArtifacts: artifacts,
       };
     } catch {
       return {

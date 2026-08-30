@@ -16,6 +16,7 @@ import {
   loadSession,
 } from "../cloudflare/session.js";;
 import { reconstructFromSessionId } from "../core/reconstruct.js";
+import type { DefenseRecipe } from "../core/recipe-schema.js";
 
 /** Hash a token for storage (SHA-256 hex). */
 async function hashToken(token: string): Promise<string> {
@@ -55,8 +56,32 @@ export async function canary(req: Request, env: Env): Promise<Response> {
 
   // FR-R6-050: canonical reconstruction (recipe + key-id aware), never a
   // route-local deriveProfile with ad-hoc arguments.
+  // FR-POST-R6-P4: a lab-BOUND session's profile is recipe-derived — the
+  // reconstruction MUST load the bound recipe the same way submit.ts does,
+  // or the reconstructed decoyRoute token differs from the RENDERED token
+  // and every legitimate REQUESTED→VERIFIED causal hit 403s. Found by the
+  // Phase 4 perception-chain integration test (render/reconstruct drift).
+  let recipe: DefenseRecipe | undefined;
+  let holdoutMode: boolean | undefined;
+  try {
+    const row = await env.DB.prepare(
+      `SELECT recipe_json, holdout_mode FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
+    )
+      .bind(sessionId)
+      .first<{ recipe_json: string | null; holdout_mode: number | null }>();
+    const raw = row?.recipe_json;
+    if (typeof raw === "string" && raw.length > 0) {
+      recipe = JSON.parse(raw) as DefenseRecipe;
+    }
+    // FR-POST-R6-P5: holdout flag is part of the treatment identity.
+    if (row && row.holdout_mode !== null) holdoutMode = row.holdout_mode === 1;
+  } catch {
+    recipe = undefined; // unbound session — random lab/production profile
+  }
   const reconstructed = await reconstructFromSessionId(env, sessionId, {
     profileVersion: session.profileVersion,
+    recipe,
+    holdoutMode,
   });
   if (!reconstructed.ok) {
     console.error("canary reconstruction failed:", reconstructed.code, reconstructed.detail);

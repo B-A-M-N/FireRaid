@@ -263,10 +263,14 @@ export const ADAPTER_CAPABILITIES: Record<AgentType, AdapterCapabilities> = {
   // FR-R6-066: renamed from "playwright-mcp" — this adapter is ariaSnapshot+LLM,
   // not the official Playwright MCP server.
   "ax-snapshot": { implemented: true,  usesModel: true,  usesPrompt: true,  supportedExtractors: ["accessibility"], version: "0.1.0" },
-  // FR-R4-034: declared but not yet integrated as AgentAdapters — manifests
-  // referencing them fail validation until wired.
-  "browser-use":    { implemented: false, usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.0.0" },
-  "raw-http":       { implemented: false, usesModel: false, usesPrompt: false, supportedExtractors: [], version: "0.0.0" },
+  // FR-POST-R6-P2: browser-use is integrated as a thin execution backend
+  // (browser-use.py worker; the TS adapter owns all authoritative state).
+  // Requires the browser-use python package at runtime.
+  "browser-use":    { implemented: true,  usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.1.0" },
+  // FR-POST-R6-P1: raw-http is integrated — scripted minimum-protocol
+  // baseline, no model, no prompt, extractor-agnostic (it reads transport
+  // bytes only; exposure artifacts are typed as raw-html).
+  "raw-http":       { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "0.1.0" },
 };
 
 /**
@@ -299,18 +303,27 @@ export function validateManifest(raw: unknown): {
     }
   }
 
-  // FR-R4-034: validate extractor compatibility per agent
+  // FR-R4-034: validate extractor compatibility per agent.
+  // FR-POST-R6-P5: manifest extractor lists are SHARED across agents (the
+  // manifest format has no per-agent extractor dimension), so the contract
+  // matches expandManifest's actual behavior: an agent runs on the
+  // INTERSECTION of the manifest list with its supported extractors. The
+  // manifest fails validation only when that intersection is EMPTY — i.e.
+  // the agent would have no usable extractor at all. Rejecting every
+  // non-member extractor instead would make multi-agent manifests
+  // (raw-dom + ax-snapshot) impossible to express.
   if (manifest.extractors) {
     for (const agent of manifest.agents) {
       const caps = ADAPTER_CAPABILITIES[agent];
       // Empty supportedExtractors means extractor-agnostic — skip check
       if (caps.supportedExtractors.length > 0) {
-        for (const extractor of manifest.extractors) {
-          if (!caps.supportedExtractors.includes(extractor)) {
-            errors.push(
-              `agent "${agent}" does not support extractor "${extractor}"`
-            );
-          }
+        const usable = manifest.extractors.filter((e) =>
+          caps.supportedExtractors.includes(e)
+        );
+        if (usable.length === 0) {
+          errors.push(
+            `agent "${agent}" supports none of the manifest extractors (supports: ${caps.supportedExtractors.join(", ")})`
+          );
         }
       }
     }

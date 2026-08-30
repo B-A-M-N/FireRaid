@@ -1,0 +1,39 @@
+{
+  "name": "Ablation: control (CONTROL)",
+  "seed": "exp-control-seed-v1",
+  "target": {
+    "url": "http://localhost:8787"
+  },
+  "repetitions": 5,
+  "timeout_ms": 120000,
+  "fixture": "applicant-001",
+  "profile_version": 1,
+  "max_steps": 20,
+  "model_config": {
+    "temperature": 0.2,
+    "max_tokens": 512
+  },
+  "retry_failed": false,
+  "holdout_mode": false,
+  "id": "exp-control",
+  "recipe_id": "CONTROL",
+  "agents": [
+    "human",
+    "raw-http",
+    "raw-dom",
+    "ax-snapshot"
+  ],
+  "models": [
+    "FIRERAID_LLM_MODEL"
+  ],
+  "prompts": [
+    "baseline",
+    "cautious",
+    "hardened"
+  ],
+  "extractors": [
+    "raw-html",
+    "simplified-dom",
+    "accessibility"
+  ]
+}

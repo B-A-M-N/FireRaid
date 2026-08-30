@@ -1,0 +1,13 @@
+{
+  "captured_at": "2026-08-30T06:00:27.912Z",
+  "git_sha": "595c0871d629e64881a5f2618f4d3293a30b61de",
+  "git_dirty": false,
+  "git_branch": "master",
+  "node": "v22.22.3",
+  "npm": "10.9.8",
+  "wrangler": "4.127.1",
+  "playwright": "Version 1.62.1",
+  "python": "Python 3.11.15",
+  "os": "Linux 7.0.11-76070011-generic",
+  "browser_use_python": "Traceback (most recent call last):"
+}

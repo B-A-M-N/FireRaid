@@ -79,13 +79,17 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
   // rendered page provably matches the named condition. Unbound lab and
   // production sessions use the engine's random profile as before.
   let recipe: DefenseRecipe | undefined;
+  // FR-POST-R6-P5: holdout_mode rides with the recipe — it changes the
+  // random template pool, so issuance and every later reconstruction must
+  // see the same value (persisted on the lab run row).
+  let holdoutMode = false;
   if (labBindRequested && bindToken && bindHash) {
     try {
       const row = await env.DB.prepare(
-        `SELECT recipe_json FROM lab_runs WHERE id = ?`
+        `SELECT recipe_json, holdout_mode FROM lab_runs WHERE id = ?`
       )
         .bind(labRunId)
-        .first<{ recipe_json: string | null }>();
+        .first<{ recipe_json: string | null; holdout_mode: number | null }>();
       const raw = row?.recipe_json;
       if (typeof raw === "string" && raw.length > 0) {
         try { recipe = JSON.parse(raw) as DefenseRecipe; } catch {
@@ -94,12 +98,13 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
           return error("lab run bind failed: recipe unreadable", 500);
         }
       }
+      holdoutMode = row?.holdout_mode === 1;
     } catch {
       // recipe_json lookup error → treat as a failed bind (fail closed, FR-R5 Pass C).
       return error("lab run bind failed: recipe unreadable", 500);
     }
   }
-  const profile = await deriveProfile(env, sessionId, undefined, recipe);
+  const profile = await deriveProfile(env, sessionId, undefined, recipe, holdoutMode);
   // FR-R6-003: belt-and-braces — a bound lab run whose recipe requested
   // families somehow derived zero families would silently dilute the
   // experiment condition (deriveProfilePure already throws INVALID_RECIPE

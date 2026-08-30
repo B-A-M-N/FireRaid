@@ -211,14 +211,17 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   let profile;
   {
     let recipeJson: string | undefined;
+    let holdoutMode: boolean | undefined;
     try {
       const row = await env.DB.prepare(
-        `SELECT recipe_json FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
+        `SELECT recipe_json, holdout_mode FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
       )
         .bind(sessionId)
-        .first<{ recipe_json: string | null }>();
+        .first<{ recipe_json: string | null; holdout_mode: number | null }>();
       const raw = row?.recipe_json;
       if (typeof raw === "string" && raw.length > 0) recipeJson = raw;
+      // FR-POST-R6-P5: holdout flag is part of the treatment identity.
+      if (row && row.holdout_mode !== null) holdoutMode = row.holdout_mode === 1;
     } catch {
       recipeJson = undefined; // unbound session — random lab/production profile
     }
@@ -233,6 +236,7 @@ export async function submit(req: Request, env: Env): Promise<Response> {
     const reconstructed = await reconstructFromSessionId(env, sessionId, {
       profileVersion: session.profileVersion,
       recipe,
+      holdoutMode,
     });
     if (!reconstructed.ok) {
       console.error("submit reconstruction failed:", reconstructed.code, reconstructed.detail);

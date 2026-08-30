@@ -1,0 +1,36 @@
+{
+  "name": "Pilot: CONTROL (human + raw-http + raw-dom)",
+  "seed": "exp-pilot-control-seed-v1",
+  "target": {
+    "url": "http://localhost:8787"
+  },
+  "repetitions": 10,
+  "timeout_ms": 120000,
+  "fixture": "applicant-001",
+  "profile_version": 1,
+  "max_steps": 20,
+  "model_config": {
+    "temperature": 0.2,
+    "max_tokens": 512
+  },
+  "retry_failed": false,
+  "holdout_mode": false,
+  "id": "exp-pilot-control",
+  "recipe_id": "CONTROL",
+  "agents": [
+    "human",
+    "raw-http",
+    "raw-dom"
+  ],
+  "models": [
+    "FIRERAID_LLM_MODEL"
+  ],
+  "prompts": [
+    "baseline"
+  ],
+  "extractors": [
+    "raw-html",
+    "simplified-dom",
+    "accessibility"
+  ]
+}

@@ -49,9 +49,9 @@ export type ReconstructionResult =
 export async function reconstructIssuedProfile(
   env: Env,
   session: ReconstructableSession,
-  recipe?: DefenseRecipe
+  recipe?: DefenseRecipe,
+  options?: { holdoutMode?: boolean }
 ): Promise<ReconstructionResult> {
-  // 1. Resolve the key that derived this session's profile.
   let ring: ProfileKeyRing;
   try {
     ring = resolveProfileKey(env);
@@ -86,11 +86,17 @@ export async function reconstructIssuedProfile(
   const version = session.profileVersion ?? profileVersion(env);
 
   // 3. Derive with the resolved secret + the bound recipe (if any).
+  // FR-POST-R6-P5: holdoutMode is part of the issued treatment identity —
+  // it changes the random template pool, so reconstruction MUST see the
+  // same value the issuing render saw or a holdout session reconstructs a
+  // different profile (the same drift class the canary.ts recipe fix
+  // addressed). Persisted per lab run; callers pass what the run stored.
   const opts: DeriveProfileOptions = {
     secret,
     version,
     sessionId: session.id,
     mode: isLabMode(env) ? "lab" : "production",
+    holdoutMode: options?.holdoutMode === true,
   };
   try {
     const profile = await deriveProfilePure(opts, recipe);
@@ -112,7 +118,12 @@ export async function reconstructIssuedProfile(
 export async function reconstructFromSessionId(
   env: Env,
   sessionId: string,
-  opts?: { profileVersion?: number; recipe?: DefenseRecipe }
+  opts?: {
+    profileVersion?: number;
+    recipe?: DefenseRecipe;
+    /** FR-POST-R6-P5: the bound run's persisted holdout_mode. */
+    holdoutMode?: boolean;
+  }
 ): Promise<ReconstructionResult> {
   const profileKeyId = await loadSessionKey(env.DB, sessionId);
   return reconstructIssuedProfile(
@@ -122,6 +133,7 @@ export async function reconstructFromSessionId(
       profileVersion: opts?.profileVersion ?? profileVersion(env),
       profileKeyId,
     },
-    opts?.recipe
+    opts?.recipe,
+    { holdoutMode: opts?.holdoutMode }
   );
 }

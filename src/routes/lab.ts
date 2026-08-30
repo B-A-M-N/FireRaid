@@ -159,6 +159,7 @@ function validateCreateBody(raw: unknown): {
   recipe?: DefenseRecipe;
   recipe_id?: string;
   turnstile_required?: boolean;
+  holdout_mode?: boolean;
   experiment_id?: string;
   trial_key?: string;
 } | null {
@@ -171,6 +172,7 @@ function validateCreateBody(raw: unknown): {
     recipe?: DefenseRecipe;
     recipe_id?: string;
     turnstile_required?: boolean;
+    holdout_mode?: boolean;
     experiment_id?: string;
     trial_key?: string;
   } = {};
@@ -185,6 +187,14 @@ function validateCreateBody(raw: unknown): {
   if (body.turnstile_required !== undefined) {
     if (typeof body.turnstile_required !== "boolean") return null;
     result.turnstile_required = body.turnstile_required;
+  }
+
+  // FR-POST-R6-P5: holdout_mode — optional boolean. Part of the issued
+  // treatment identity: restricts the random template pool to the holdout
+  // partition (FR-R5-034). Persisted so reconstruction matches issuance.
+  if (body.holdout_mode !== undefined) {
+    if (typeof body.holdout_mode !== "boolean") return null;
+    result.holdout_mode = body.holdout_mode;
   }
 
   // experiment_id: optional string ≤ 128 chars
@@ -276,6 +286,7 @@ export async function createLabRun(req: Request, env: Env): Promise<Response> {
   const expiresAt = createdAt + 86_400_000; // 24h
   const recipeJson = buildRecipeJson(validated.recipe, validated.recipe_id);
   const turnstileRequired = validated.turnstile_required ? 1 : 0;
+  const holdoutMode = validated.holdout_mode ? 1 : 0;
 
   // Generate one-time bind token and store only its SHA-256 hash
   const bindToken = generateHex(16);
@@ -283,14 +294,15 @@ export async function createLabRun(req: Request, env: Env): Promise<Response> {
 
   try {
     await env.DB.prepare(
-      `INSERT INTO lab_runs (id, bind_token_hash, session_id, recipe_json, turnstile_required, status, created_at, expires_at, experiment_id, trial_key, recipe_id)
-       VALUES (?, ?, NULL, ?, ?, 'PENDING', ?, ?, ?, ?, ?)`
+      `INSERT INTO lab_runs (id, bind_token_hash, session_id, recipe_json, turnstile_required, holdout_mode, status, created_at, expires_at, experiment_id, trial_key, recipe_id)
+       VALUES (?, ?, NULL, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?)`
     )
       .bind(
         runId,
         bindTokenHash,
         recipeJson,
         turnstileRequired,
+        holdoutMode,
         createdAt,
         expiresAt,
         validated.experiment_id ?? null,
@@ -333,6 +345,7 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
     session_id: string | null;
     recipe_json: string | null;
     turnstile_required: number | null;
+    holdout_mode: number | null;
     status: string;
     created_at: number;
     reconciled_at: number | null;
@@ -348,7 +361,7 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
 
   try {
     record = await env.DB.prepare(
-      `SELECT id, session_id, recipe_json, turnstile_required, status, created_at, reconciled_at,
+      `SELECT id, session_id, recipe_json, turnstile_required, holdout_mode, status, created_at, reconciled_at,
               experiment_id, trial_key, recipe_id, outcome, expires_at, terminal_reason,
               bound_at, completed_at
        FROM lab_runs WHERE id = ?`
@@ -369,7 +382,10 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
       status: record.status,
       submitted: false,
       experiment_id: record.experiment_id,
+      trial_key: record.trial_key,
       recipe_id: record.recipe_id,
+      turnstile_required: record.turnstile_required ?? 0,
+      holdout_mode: record.holdout_mode ?? 0,
       outcome: record.outcome,
       expires_at: record.expires_at,
       terminal_reason: record.terminal_reason,
@@ -405,6 +421,9 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
     const reconstructed = await reconstructFromSessionId(env, record.session_id, {
       profileVersion: session?.profileVersion,
       recipe: parsedRecipe,
+      // FR-POST-R6-P5: the run's persisted holdout flag is part of the
+      // treatment identity — reconstruction must match issuance.
+      holdoutMode: record.holdout_mode === 1,
     });
     if (!reconstructed.ok) {
       console.error("Profile reconstruction failed in getLabRun", { detail: reconstructed.detail });
@@ -481,8 +500,16 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
     return error("internal server error", 500);
   }
 
-  // FR-R4-031: canary_issued — server truth (harness recorder decides actual exposure)
-  const canary_issued = profile.semantic ? true : false;
+  // FR-R4-031: canary_issued — server truth (harness recorder decides actual
+  // exposure). FR-POST-R6-P4: ISSUED means the server placed perceivable
+  // treatment material of ANY family, not just semantic: a semantic canary,
+  // a decoy field, and a decoy route notice are all "issued" session
+  // material an agent could observe. Interaction is a scoring policy with no
+  // page material, so it never counts as issued.
+  const canary_issued =
+    profile.semantic !== undefined ||
+    profile.decoyField !== undefined ||
+    profile.decoyRoute !== undefined;
   const canary_verified_server = (canaryHits?.count ?? 0) > 0;
   const submitted = session?.submitted === 1;
 
@@ -501,9 +528,11 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
     semantic_template: profile.semantic?.templateId ?? null,
     placement: profile.semantic?.placementId ?? null,
     turnstile_required: record.turnstile_required ?? 0,
+    holdout_mode: record.holdout_mode ?? 0,
     canary_issued,
     canary_verified_server,
     experiment_id: record.experiment_id,
+    trial_key: record.trial_key,
     recipe_id: record.recipe_id,
     outcome: record.outcome,
     status: record.outcome ? "COMPLETE" : record.status,

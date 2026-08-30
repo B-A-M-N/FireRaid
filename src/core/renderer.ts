@@ -15,6 +15,30 @@
 import type { DefenseProfile } from "../types/profile.js";
 import { SEMANTIC_TEMPLATES, PLACEMENTS } from "./catalog.js";
 
+/**
+ * FR-POST-R6-P3: the decoy-route family must be observable by an agent to be
+ * a measurable treatment — a route token that exists server-side but renders
+ * nowhere can never be REQUESTED, so DECOY_ROUTE_ONLY would be a null
+ * condition, and SEMANTIC_ROUTE sessions that drew a template which never
+ * names the endpoint (S01–S03/S07/S09) would be silent too.
+ *
+ * The caller decides whether a notice is needed: renderSignupPage mounts it
+ * only when the semantic template body does NOT already contain the endpoint
+ * path, so the token renders exactly once regardless of template draw.
+ *
+ * It is intentionally NOT a hyperlink and NOT focusable (text inside a
+ * visible div): the causal false-positive gate (E2E "normal user makes zero
+ * /c/ requests") depends on no passive page element causing a fetch.
+ */
+export function renderRouteNotice(profile: DefenseProfile): string {
+  if (!profile.decoyRoute) return "";
+  return (
+    `<div data-fr-route class="fr-canary-wrap">` +
+    `<span class="fr-decoy">Verification endpoint: /c/${profile.decoyRoute.endpointToken}</span>` +
+    `</div>`
+  );
+}
+
 export function renderCanaryForProfile(profile: DefenseProfile): string {
   if (!profile.semantic) return "";
   const template = SEMANTIC_TEMPLATES.find((t) => t.id === profile.semantic!.templateId);
@@ -113,6 +137,7 @@ export function renderSignupPage(opts: {
   const { html, profile, csrfToken, turnstileSiteKey, labMode } = opts;
 
   const canary = renderCanaryForProfile(profile);
+  const routeNotice = renderRouteNotice(profile);
   const decoy = renderDecoyField(profile);
   const csrf = renderCsrfField(csrfToken);
   const turnstile = turnstileSiteKey ? renderTurnstile(turnstileSiteKey) : "";
@@ -145,6 +170,15 @@ export function renderSignupPage(opts: {
       const formOpen = '<form id="signup-form"';
       out = out.replace(formOpen, canary + formOpen);
     }
+  }
+
+  // FR-POST-R6-P3: guarantee the route token is rendered EXACTLY once —
+  // mount the standalone notice only when no template body already carried
+  // the endpoint path (route-only sessions, or semantic templates that never
+  // name the endpoint, e.g. S01–S03/S07/S09).
+  if (routeNotice && !out.includes("/c/" + (profile.decoyRoute?.endpointToken ?? ""))) {
+    const formOpen = '<form id="signup-form"';
+    out = out.replace(formOpen, routeNotice + formOpen);
   }
 
   // Lab banner

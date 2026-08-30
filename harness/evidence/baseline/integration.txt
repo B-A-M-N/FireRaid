@@ -1,0 +1,290 @@
+
+> fireraid@0.1.0 test:integration
+> node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.integration.config.ts
+
+[test-worker] suite=test-integration persistence=/home/bamn/FireRaid/.wrangler/test-integration port=8799
+[test-worker] migrations present: 0001_initial.sql, 0002_decision_records.sql, 0003_canary_dedup.sql, 0004_lab_runs.sql, 0005_lab_lifecycle.sql, 0006_profile_key_id.sql, 0007_lab_bound_at.sql, 0008_telemetry_integrity.sql
+[test-worker] applying migrations (single `d1 migrations apply`)…
+
+ ⛅️ wrangler 4.127.1
+────────────────────
+Resource location: local 
+
+Use --remote if you want to access the remote instance.
+
+Migrations to be applied:
+┌──────────────────────────────┐
+│ name                         │
+├──────────────────────────────┤
+│ 0001_initial.sql             │
+├──────────────────────────────┤
+│ 0002_decision_records.sql    │
+├──────────────────────────────┤
+│ 0003_canary_dedup.sql        │
+├──────────────────────────────┤
+│ 0004_lab_runs.sql            │
+├──────────────────────────────┤
+│ 0005_lab_lifecycle.sql       │
+├──────────────────────────────┤
+│ 0006_profile_key_id.sql      │
+├──────────────────────────────┤
+│ 0007_lab_bound_at.sql        │
+├──────────────────────────────┤
+│ 0008_telemetry_integrity.sql │
+└──────────────────────────────┘
+? About to apply 8 migration(s)
+Your database may not be available to serve requests during the migration, continue?
+🤖 Using fallback value in non-interactive context: yes
+🌀 Executing on local database fireraid (REPLACE_AFTER_CREATE) from .wrangler/test-integration/v3/d1:
+🌀 To execute on your remote database, add a --remote flag to your wrangler command.
+🚣 12 commands executed successfully.
+┌──────────────────────────────┬────────┐
+│ name                         │ status │
+├──────────────────────────────┼────────┤
+│ 0001_initial.sql             │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0002_decision_records.sql    │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0003_canary_dedup.sql        │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0004_lab_runs.sql            │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0005_lab_lifecycle.sql       │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0006_profile_key_id.sql      │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0007_lab_bound_at.sql        │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0008_telemetry_integrity.sql │ 🕒️    │
+└──────────────────────────────┴────────┘
+🌀 Executing on local database fireraid (REPLACE_AFTER_CREATE) from .wrangler/test-integration/v3/d1:
+🌀 To execute on your remote database, add a --remote flag to your wrangler command.
+🚣 10 commands executed successfully.
+┌──────────────────────────────┬────────┐
+│ name                         │ status │
+├──────────────────────────────┼────────┤
+│ 0001_initial.sql             │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0002_decision_records.sql    │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0003_canary_dedup.sql        │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0004_lab_runs.sql            │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0005_lab_lifecycle.sql       │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0006_profile_key_id.sql      │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0007_lab_bound_at.sql        │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0008_telemetry_integrity.sql │ 🕒️    │
+└──────────────────────────────┴────────┘
+🌀 Executing on local database fireraid (REPLACE_AFTER_CREATE) from .wrangler/test-integration/v3/d1:
+🌀 To execute on your remote database, add a --remote flag to your wrangler command.
+🚣 2 commands executed successfully.
+┌──────────────────────────────┬────────┐
+│ name                         │ status │
+├──────────────────────────────┼────────┤
+│ 0001_initial.sql             │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0002_decision_records.sql    │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0003_canary_dedup.sql        │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0004_lab_runs.sql            │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0005_lab_lifecycle.sql       │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0006_profile_key_id.sql      │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0007_lab_bound_at.sql        │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0008_telemetry_integrity.sql │ 🕒️    │
+└──────────────────────────────┴────────┘
+🌀 Executing on local database fireraid (REPLACE_AFTER_CREATE) from .wrangler/test-integration/v3/d1:
+🌀 To execute on your remote database, add a --remote flag to your wrangler command.
+🚣 9 commands executed successfully.
+┌──────────────────────────────┬────────┐
+│ name                         │ status │
+├──────────────────────────────┼────────┤
+│ 0001_initial.sql             │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0002_decision_records.sql    │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0003_canary_dedup.sql        │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0004_lab_runs.sql            │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0005_lab_lifecycle.sql       │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0006_profile_key_id.sql      │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0007_lab_bound_at.sql        │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0008_telemetry_integrity.sql │ 🕒️    │
+└──────────────────────────────┴────────┘
+🌀 Executing on local database fireraid (REPLACE_AFTER_CREATE) from .wrangler/test-integration/v3/d1:
+🌀 To execute on your remote database, add a --remote flag to your wrangler command.
+🚣 10 commands executed successfully.
+┌──────────────────────────────┬────────┐
+│ name                         │ status │
+├──────────────────────────────┼────────┤
+│ 0001_initial.sql             │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0002_decision_records.sql    │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0003_canary_dedup.sql        │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0004_lab_runs.sql            │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0005_lab_lifecycle.sql       │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0006_profile_key_id.sql      │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0007_lab_bound_at.sql        │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0008_telemetry_integrity.sql │ 🕒️    │
+└──────────────────────────────┴────────┘
+🌀 Executing on local database fireraid (REPLACE_AFTER_CREATE) from .wrangler/test-integration/v3/d1:
+🌀 To execute on your remote database, add a --remote flag to your wrangler command.
+🚣 2 commands executed successfully.
+┌──────────────────────────────┬────────┐
+│ name                         │ status │
+├──────────────────────────────┼────────┤
+│ 0001_initial.sql             │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0002_decision_records.sql    │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0003_canary_dedup.sql        │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0004_lab_runs.sql            │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0005_lab_lifecycle.sql       │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0006_profile_key_id.sql      │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0007_lab_bound_at.sql        │ 🕒️    │
+├──────────────────────────────┼────────┤
+│ 0008_telemetry_integrity.sql │ 🕒️    │
+└──────────────────────────────┴────────┘
+🌀 Executing on local database fireraid (REPLACE_AFTER_CREATE) from .wrangler/test-integration/v3/d1:
+🌀 To execute on your remote database, add a --remote flag to your wrangler command.
+🚣 3 commands executed successfully.
+┌──────────────────────────────┬────────┐
+│ name                         │ status │
+├──────────────────────────────┼────────┤
+│ 0001_initial.sql             │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0002_decision_records.sql    │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0003_canary_dedup.sql        │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0004_lab_runs.sql            │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0005_lab_lifecycle.sql       │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0006_profile_key_id.sql      │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0007_lab_bound_at.sql        │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0008_telemetry_integrity.sql │ 🕒️    │
+└──────────────────────────────┴────────┘
+🌀 Executing on local database fireraid (REPLACE_AFTER_CREATE) from .wrangler/test-integration/v3/d1:
+🌀 To execute on your remote database, add a --remote flag to your wrangler command.
+🚣 3 commands executed successfully.
+┌──────────────────────────────┬────────┐
+│ name                         │ status │
+├──────────────────────────────┼────────┤
+│ 0001_initial.sql             │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0002_decision_records.sql    │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0003_canary_dedup.sql        │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0004_lab_runs.sql            │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0005_lab_lifecycle.sql       │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0006_profile_key_id.sql      │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0007_lab_bound_at.sql        │ ✅     │
+├──────────────────────────────┼────────┤
+│ 0008_telemetry_integrity.sql │ ✅     │
+└──────────────────────────────┴────────┘
+[test-worker] schema verified via sqlite .wrangler/test-integration/v3/d1/miniflare-D1DatabaseObject/f24e8d7b54658c2b20bf0562f68bebe67a2ad5d80b2a4033246efd655415eb07.sqlite: sessions, lab_runs, event_batches, submissions, canary_hits present
+[test-worker] wrangler dev pid=1581311 group=1581311 (/home/bamn/.nvm/versions/node/v22.22.3/bin/node)
+(node:1580676) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[wrangler] 
+ ⛅️ wrangler 4.127.1
+────────────────────
+[wrangler] Using secrets defined in .dev.vars.test
+[wrangler] Your Worker has access to the following bindings:
+[wrangler] Binding                                       Resource                  Mode
+[wrangler] env.DB (fireraid)                             D1 Database               local
+[wrangler] env.ASSETS                                    Assets                    local
+[wrangler] env.PROFILE_VERSION ("1")                     Environment Variable      local
+[wrangler] env.LAB_MODE ("true")                         Environment Variable      local
+[wrangler] env.FIRERAID_PROFILE_SECRET ("(hidden)")      Environment Variable      local
+[wrangler] env.FIRERAID_CSRF_SECRET ("(hidden)")         Environment Variable      local
+[wrangler] env.ADMIN_SECRET ("(hidden)")                 Environment Variable      local
+[wrangler] env.FIRERAID_LAB_API_SECRET ("(hidden)")      Environment Variable      local
+[wrangler] 
+[wrangler] ⎔ Starting local server...
+[wrangler] Wrangler detected this dev session is running in an AI agent.
+The Local Explorer API is available at http://localhost:8799/cdn-cgi/local/explorer/api
+Useful routes:
+  GET http://localhost:8799/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings
+  GET http://localhost:8799/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces
+  GET http://localhost:8799/cdn-cgi/local/explorer/api/d1/database - D1 databases
+  GET http://localhost:8799/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets
+  GET http://localhost:8799/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces
+  GET http://localhost:8799/cdn-cgi/local/explorer/api/workflows - Workflows
+  POST http://localhost:8799/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:
+    curl -X POST http://localhost:8799/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{"sql":"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20"}'
+If the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):
+  GET http://localhost:8799/cdn-cgi/local/explorer/api - OpenAPI schema
+[wrangler] [wrangler:info] Ready on http://localhost:8799
+[test-worker] healthy at http://localhost:8799
+[wrangler] [wrangler:info] GET /health 200 OK (625ms)
+[wrangler] [wrangler:info] POST /api/submit 403 Forbidden (42ms)
+[test-worker] turnstile disabled (probe: HTTP 403 {"error":"invalid session"})
+[test-worker] suite pid=1581506: vitest run --config vitest.integration.config.ts
+
+ RUN  v3.2.7 /home/bamn/FireRaid
+
+[wrangler] [wrangler:info] GET /health 200 OK (15ms)
+[wrangler] [wrangler:info] GET /signup 200 OK (30ms)
+[wrangler] [wrangler:info] GET /signup 200 OK (22ms)
+[wrangler] [wrangler:info] GET /signup 200 OK (29ms)
+[wrangler] [wrangler:info] POST /api/submit 403 Forbidden (23ms)
+[wrangler] [wrangler:info] GET /signup 200 OK (25ms)
+[wrangler] [wrangler:info] GET /signup 200 OK (25ms)
+[wrangler] [wrangler:info] GET /signup 200 OK (31ms)
+[wrangler] [wrangler:info] GET /c/72dad6439cec 204 No Content (39ms)
+[wrangler] [wrangler:info] POST /api/submit 200 OK (67ms)
+ ✓ tests/integration/signup.test.ts (7 tests) 424ms
+[wrangler] [wrangler:info] GET /health 200 OK (13ms)
+[wrangler] [wrangler:info] POST /api/admin/login 403 Forbidden (12ms)
+[wrangler] [wrangler:info] POST /api/admin/login 200 OK (13ms)
+[wrangler] [wrangler:info] GET /api/admin/summary 401 Unauthorized (12ms)
+[wrangler] [wrangler:info] POST /api/admin/login 200 OK (12ms)
+[wrangler] [wrangler:info] GET /api/admin/summary 200 OK (45ms)
+[wrangler] [wrangler:info] POST /api/admin/login 200 OK (12ms)
+[wrangler] [wrangler:info] GET /api/admin/sessions 200 OK (19ms)
+[wrangler] [wrangler:info] POST /api/admin/login 200 OK (10ms)
+[wrangler] [wrangler:info] GET /api/admin/sessions 200 OK (19ms)
+[wrangler] [wrangler:info] GET /api/admin/sessions/XC5nSxcnERkV6TzS5bCuVg 200 OK (54ms)
+[wrangler] [wrangler:info] POST /api/admin/login 200 OK (9ms)
+[wrangler] [wrangler:info] GET /api/admin/export 200 OK (18ms)
+[wrangler] [wrangler:info] POST /api/admin/login 200 OK (13ms)
+[wrangler] [wrangler:info] POST /api/admin/logout 200 OK (13ms)
+ ✓ tests/integration/admin.test.ts (8 tests) 332ms
+
+ Test Files  2 passed (2)
+      Tests  15 passed (15)
+   Start at  01:01:16
+   Duration  1.24s (transform 121ms, setup 0ms, collect 108ms, tests 756ms, environment 0ms, prepare 104ms)
+
+[test-worker] shutting down (exit 0, reason suite-exit)
+integration exit=0

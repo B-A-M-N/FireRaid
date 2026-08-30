@@ -417,7 +417,8 @@ export async function deriveProfile(
   env: Env,
   sessionId: string,
   version?: number,
-  recipe?: DefenseRecipe
+  recipe?: DefenseRecipe,
+  holdoutMode?: boolean
 ): Promise<DefenseProfile> {
   const ver = version ?? profileVersion(env);
   const isLab = env.LAB_MODE === "true";
@@ -427,6 +428,9 @@ export async function deriveProfile(
       version: ver,
       sessionId,
       mode: isLab ? "lab" : "production",
+      // FR-POST-R6-P5: part of the issued treatment identity — restricts
+      // the random template pool to the holdout partition (FR-R5-034).
+      holdoutMode: holdoutMode === true,
     },
     recipe
   );

@@ -1,0 +1,32 @@
+
+> fireraid@0.1.0 test:unit
+> vitest run tests/unit
+
+
+ RUN  v3.2.7 /home/bamn/FireRaid
+
+ ✓ tests/unit/security.test.ts (9 tests) 475ms
+   ✓ correctness: semantic canary with requiresRoute implies decoy-route > profile with semantic template requiring route also has decoy-route  456ms
+ ✓ tests/unit/profile.test.ts (21 tests) 334ms
+ ✓ tests/unit/pass-b-regression.test.ts (21 tests) 215ms
+(node:1580051) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/unit/schema-migration.test.ts (10 tests) 43ms
+ ✓ tests/unit/profile-recipe.test.ts (17 tests) 75ms
+ ✓ tests/unit/telemetry-watermark-sqlite.test.ts (6 tests) 44ms
+ ✓ tests/unit/ablation-recipes.test.ts (11 tests) 20ms
+ ✓ tests/unit/admin-auth.test.ts (20 tests) 16ms
+ ✓ tests/unit/lab-runs.test.ts (15 tests) 8ms
+ ✓ tests/unit/pass-a-regression.test.ts (13 tests) 11ms
+ ✓ tests/unit/turnstile.test.ts (15 tests) 6ms
+ ✓ tests/unit/telemetry-integrity.test.ts (42 tests) 6ms
+ ✓ tests/unit/manifests.test.ts (6 tests) 4ms
+ ✓ tests/unit/lab-lifecycle.test.ts (6 tests) 2ms
+ ✓ tests/unit/canary.test.ts (8 tests) 2ms
+
+ Test Files  15 passed (15)
+      Tests  220 passed (220)
+   Start at  01:00:54
+   Duration  2.51s (transform 626ms, setup 0ms, collect 885ms, tests 1.26s, environment 0ms, prepare 77ms)
+
+unit exit=0

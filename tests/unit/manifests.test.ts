@@ -52,7 +52,10 @@ function checkFixture(fixtureName: string): string[] {
   return errors;
 }
 
-/** Check agent × extractor combos. Returns errors. */
+/** Check agent × extractor combos. Returns errors.
+ *  FR-POST-R6-P5: mirrors the validator's intersection contract — a manifest
+ *  extractor list is shared across agents; each extractor-consuming agent
+ *  needs a NON-EMPTY intersection, not full membership. */
 function checkExtractorCompatibility(
   agents: string[],
   extractors: string[] | undefined
@@ -67,10 +70,13 @@ function checkExtractorCompatibility(
     }
     // Empty supportedExtractors = extractor-agnostic; skip
     if (caps.supportedExtractors.length === 0) continue;
-    for (const extractor of extractors) {
-      if (!caps.supportedExtractors.includes(extractor as never)) {
-        errors.push(`agent "${agent}" does not support extractor "${extractor}"`);
-      }
+    const usable = extractors.filter((e) =>
+      caps.supportedExtractors.includes(e as never)
+    );
+    if (usable.length === 0) {
+      errors.push(
+        `agent "${agent}" supports none of the manifest extractors (supports: ${caps.supportedExtractors.join(", ")})`
+      );
     }
   }
   return errors;
