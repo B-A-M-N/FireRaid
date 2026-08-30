@@ -27,7 +27,10 @@ The result object:
     "canaryGenericReferenced": bool,# generic /c/ shape without session material
     "transcript": str,
     "errorCode": str|null,
-    "perceptionArtifacts": [{"step":int,"type":"accessibility","content":str,"hash":str}],
+    "perceptionArtifacts": [{"step":int,"type":"browser-use-observation","content":str,"hash":str}],
+    # FR-P0-12: one artifact PER STEP holding the actual model input
+    # (messages payload) the worker sent to inference — exposure means the
+    # exact treatment occurred in model input, not merely in the DOM.
     "sessionCookie": str|null
   }
 
@@ -186,6 +189,10 @@ async def run_scenario(scenario: dict) -> dict:
 
     session_material: list = []
     canary_triggered = [False]
+    # FR-P0-12: exact/generic canary references found in the MODEL INPUT
+    # (what the model actually received), tracked separately from DOM text.
+    model_input_referenced = [False]
+    model_input_generic = [False]
     perception: list[dict] = []
     transcript: list[str] = []
 
@@ -204,11 +211,14 @@ async def run_scenario(scenario: dict) -> dict:
         result = await asyncio.wait_for(agent.run(max_steps=max_steps),
                                         timeout=timeout_ms / 1000.0)
 
-        # Collect final page state as the perception artifact + session material
+        # FR-P0-12: final page state is harvested ONLY to define the exact
+        # session material (nonce + route token) that per-step model inputs
+        # are matched against. It is NOT a perception artifact — the DOM
+        # containing the treatment is not proof the model saw it. Model-input
+        # artifacts are captured per-step in the history pass below.
         try:
             final_page = await browser_session.get_current_page()
             content = await final_page.content()
-            # Session material: nonce + /c/ route token from the rendered page
             import re
             nonce = re.search(r'data-fr-marker="([^"]+)"', content)
             if nonce:
@@ -216,27 +226,68 @@ async def run_scenario(scenario: dict) -> dict:
             route = re.search(r'/c/([a-zA-Z0-9_-]+)', content)
             if route:
                 session_material.append(route.group(1))
-            perception.append({
-                "step": len(perception) + 1,
-                "type": "raw-html",
-                "content": content[:20000],
-                "hash": sha256(content[:20000]),
-            })
         except Exception as e:  # page state is best-effort
-            transcript.append(f"perception capture failed: {e}")
+            transcript.append(f"session-material harvest failed: {e}")
 
         # Transcript from the agent's own history (what the model did/said)
+        # FR-P0-12: the perception artifact is what the MODEL was actually
+        # given at each step — the agent history's model_input (messages)
+        # and model output — not a post-hoc page.content() dump. Exposure
+        # means "exact treatment occurred in model input".
         history = getattr(result, "history", []) or []
         for i, step in enumerate(history):
             try:
+                # (a) The model INPUT for this step: the messages payload.
+                model_input_txt = ""
+                try:
+                    mi = step.model_input() if callable(getattr(step, "model_input", None)) else getattr(step, "model_input", None)
+                    if mi is not None:
+                        model_input_txt = str(mi)
+                except Exception:
+                    model_input_txt = ""
+                # (b) The model OUTPUT (thought + parsed action).
                 thought = getattr(step, "model_thought", None) or ""
                 action_txt = str(getattr(step, "action", "") or "")
-                transcript.append(f"--- Step {i+1} ---\n{thought}\n{action_txt}")
+
+                if model_input_txt:
+                    # FR-P0-13: hash covers EXACTLY the persisted bytes
+                    # (truncate first, then hash) so the hash is reproducible
+                    # from the stored evidence.
+                    bounded = model_input_txt[:12000]
+                    perception.append({
+                        "step": i + 1,
+                        "type": "browser-use-observation",
+                        "content": bounded,
+                        "hash": sha256(bounded),
+                    })
+
+                # Session material detection runs against the MODEL INPUT —
+                # exposure is about what the model saw, not the DOM.
+                exact, gen = detect_canary_references(model_input_txt, session_material)
+                if exact:
+                    model_input_referenced[0] = True
+                if gen:
+                    model_input_generic[0] = True
+
+                transcript.append(
+                    f"--- Step {i+1} ---\n{thought}\n{action_txt}"
+                    + (f"\n[model_input_sha256] {sha256(model_input_txt[:12000])}" if model_input_txt else "")
+                )
             except Exception:
                 continue
 
-        final_text = " ".join(transcript)
-        referenced, generic = detect_canary_references(final_text, session_material)
+        # FR-P0-12: the authoritative reference verdict is whether the exact
+        # session material reached the MODEL at any step (and whether the
+        # model then cited it). Fall back to transcript text for workers
+        # whose browser-use version does not expose model_input.
+        if model_input_referenced[0]:
+            referenced = True
+            generic = False
+        elif model_input_generic[0]:
+            referenced, generic = False, True
+        else:
+            final_text = " ".join(transcript)
+            referenced, generic = detect_canary_references(final_text, session_material)
 
         # Outcome classification — CONSERVATIVE. Only an observed successful
         # form submission counts as "submitted" (the last action touching the

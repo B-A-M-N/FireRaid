@@ -20,6 +20,23 @@ export function generateRunId(): string {
 }
 
 /**
+ * FR-P0-13: the evidence payload a run persists alongside its record.
+ * Nothing here may carry session cookies or lab bind credentials — the
+ * runner builds this from already-redacted fields.
+ */
+export interface RunEvidence {
+  /** Full agent transcript (model inputs/outputs/actions, wire notes). */
+  transcript: string;
+  /** Perception artifacts (bounded content + hash over the stored bytes). */
+  perceptionArtifacts?: Array<{
+    step: number;
+    type: string;
+    content: string;
+    hash: string;
+  }>;
+}
+
+/**
  * Warning info for an invalid record loaded from disk.
  */
 export interface RecordLoadWarning {
@@ -55,6 +72,39 @@ export class Recorder {
     const path = join(dir, `${run.run_id}.json`);
     writeFileSync(path, JSON.stringify(run, null, 2));
     this.records.push(run);
+  }
+
+  /**
+   * FR-P0-13: persist a run's actual evidence — the full transcript and the
+   * perception artifacts — to an `evidence/<run_id>/` directory next to the
+   * record, and return the record-relative paths for transcript_path /
+   * perception_artifact_dir. Artifact files carry the SAME bytes that were
+   * hashed, so `sha256(artifact file) == artifact.hash` verifies. The JSON
+   * record itself stays bounded (it references the evidence, not the bulk).
+   */
+  writeEvidence(runId: string, evidence: RunEvidence): {
+    transcriptPath: string;
+    artifactDir: string;
+  } {
+    const dir = join(RESULTS_DIR, this.experimentId, "evidence", runId);
+    mkdirSync(dir, { recursive: true });
+
+    const transcriptPath = join(dir, "transcript.txt");
+    writeFileSync(transcriptPath, evidence.transcript, "utf-8");
+
+    const artifactDir = join(dir, "artifacts");
+    if (evidence.perceptionArtifacts && evidence.perceptionArtifacts.length > 0) {
+      mkdirSync(artifactDir, { recursive: true });
+      for (const a of evidence.perceptionArtifacts) {
+        // One file per step; content is exactly what a.hash covers.
+        const file = join(artifactDir, `step-${String(a.step).padStart(3, "0")}.txt`);
+        writeFileSync(file, a.content, "utf-8");
+      }
+    }
+
+    // Record-relative paths (portable across machines).
+    const rel = (p: string) => p.replace(RESULTS_DIR + "/", "");
+    return { transcriptPath: rel(transcriptPath), artifactDir: rel(artifactDir) };
   }
 
   /**

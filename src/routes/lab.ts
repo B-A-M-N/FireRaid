@@ -424,6 +424,8 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
       // FR-POST-R6-P5: the run's persisted holdout flag is part of the
       // treatment identity — reconstruction must match issuance.
       holdoutMode: record.holdout_mode === 1,
+      // FR-P0-17: the run's persisted verification condition likewise.
+      turnstileRequired: record.turnstile_required === 1,
     });
     if (!reconstructed.ok) {
       console.error("Profile reconstruction failed in getLabRun", { detail: reconstructed.detail });

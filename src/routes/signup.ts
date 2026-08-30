@@ -83,13 +83,18 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
   // random template pool, so issuance and every later reconstruction must
   // see the same value (persisted on the lab run row).
   let holdoutMode = false;
+  // FR-P0-17: the run's assigned verification condition is part of the
+  // treatment identity (hashed into profileVariantId). Read from the SAME
+  // row as the recipe; null means the run never specified (resolves false
+  // at derivation, matching the pre-turnstile default).
+  let turnstileRequired = false;
   if (labBindRequested && bindToken && bindHash) {
     try {
       const row = await env.DB.prepare(
-        `SELECT recipe_json, holdout_mode FROM lab_runs WHERE id = ?`
+        `SELECT recipe_json, holdout_mode, turnstile_required FROM lab_runs WHERE id = ?`
       )
         .bind(labRunId)
-        .first<{ recipe_json: string | null; holdout_mode: number | null }>();
+        .first<{ recipe_json: string | null; holdout_mode: number | null; turnstile_required: number | null }>();
       const raw = row?.recipe_json;
       if (typeof raw === "string" && raw.length > 0) {
         try { recipe = JSON.parse(raw) as DefenseRecipe; } catch {
@@ -99,12 +104,13 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
         }
       }
       holdoutMode = row?.holdout_mode === 1;
+      turnstileRequired = row?.turnstile_required === 1;
     } catch {
       // recipe_json lookup error → treat as a failed bind (fail closed, FR-R5 Pass C).
       return error("lab run bind failed: recipe unreadable", 500);
     }
   }
-  const profile = await deriveProfile(env, sessionId, undefined, recipe, holdoutMode);
+  const profile = await deriveProfile(env, sessionId, undefined, recipe, holdoutMode, turnstileRequired);
   // FR-R6-003: belt-and-braces — a bound lab run whose recipe requested
   // families somehow derived zero families would silently dilute the
   // experiment condition (deriveProfilePure already throws INVALID_RECIPE

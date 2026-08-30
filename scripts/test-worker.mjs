@@ -288,6 +288,37 @@ const child = spawn(devCmd, devArgv, {
 });
 log(`wrangler dev pid=${child.pid} group=${child.pid} (${devCmd})`);
 
+/**
+ * FR-P0-14 (found in practice): every in-process teardown path — signal
+ * handlers, 'exit', uncaughtException — only runs while THIS supervisor is
+ * alive. Playwright escalates webServer teardown to SIGKILL against our
+ * process GROUP after its graceful timeout; SIGKILL runs no handlers, so the
+ * detached wrangler group (a different pgid) survived as an orphan holding
+ * the port — the exact orphan-workerd failure FR-R6-002 was meant to close.
+ *
+ * Fix: an independent watchdog (its own session, stdio discarded) that
+ * SIGKILLs the wrangler group the moment this supervisor's pid disappears —
+ * whatever the cause. It self-terminates right after, so it never outlives
+ * the run by more than one poll interval.
+ */
+function spawnGroupReaper(supervisorPid, groupPid, label) {
+  // NB: dash (sh) rejects `kill -KILL -- -PGID` ("Illegal number: -") — the
+  // `--` makes it treat the negative pid as an option-operand. Without `--`
+  // the builtin accepts "-PGID" and signals the whole group. The first live
+  // SIGKILL drill proved this: the `--` form failed rc=2, the pid fallback
+  // killed only the group leader, and workerd survived. No `--`, ever.
+  const script =
+    `sup=${supervisorPid}; grp=${groupPid}; ` +
+    `while kill -0 "$sup" 2>/dev/null; do sleep 0.3; done; ` +
+    `kill -KILL "-$grp" 2>/dev/null; ` +
+    `kill -KILL "$grp" 2>/dev/null; exit 0`;
+  const reaper = spawn("sh", ["-c", script], { detached: true, stdio: "ignore" });
+  reaper.unref?.();
+  log(`group reaper (${label}): pid=${reaper.pid} watches supervisor=${supervisorPid} group=${groupPid}`);
+  return reaper;
+}
+const wranglerReaper = spawnGroupReaper(process.pid, child.pid, "wrangler");
+
 // Keep a tail of wrangler output for diagnostics, and watch for the line that
 // names which .dev.vars file it actually loaded.
 const OUTPUT_TAIL_LINES = 200;
@@ -431,6 +462,31 @@ function watchWranglerExit() {
   return wranglerExitPromise;
 }
 
+/**
+ * FR-P0-14: wait until nothing is listening on our port (best effort).
+ * Killing the wrangler process group can leave the kernel a moment to close
+ * the listener; a sequential suite (e2e then a11y on distinct ports, or a
+ * rerun on the same port) must not race a half-closed socket. Falls back
+ * after the deadline so a wedged socket can't hang teardown forever.
+ */
+function portClosed(port, deadlineMs = 8000) {
+  const deadline = Date.now() + deadlineMs;
+  return new Promise((res) => {
+    const probe = () => {
+      const s = spawnSync(
+        "bash",
+        ["-c", `(exec 3<>/dev/tcp/127.0.0.1/${port}) 2>/dev/null && echo OPEN || echo CLOSED`],
+        { encoding: "utf8", timeout: 2000 }
+      );
+      const out = (s.stdout || "").trim();
+      if (out === "CLOSED") { res(true); return; }
+      if (Date.now() > deadline) { res(false); return; }
+      setTimeout(probe, 250);
+    };
+    probe();
+  });
+}
+
 async function shutdown(code, reason = "done") {
   if (exiting) return;
   exiting = true;
@@ -456,6 +512,10 @@ async function shutdown(code, reason = "done") {
   if (suiteChild && typeof suiteChild.pid === "number") {
     try { process.kill(-suiteChild.pid, "SIGKILL"); } catch { /* already gone */ }
   }
+  // FR-P0-14: hold the process until the port is actually released (bounded)
+  // so a following suite never meets our orphaned listener.
+  const closed = await portClosed(port);
+  if (!closed) log(`WARNING: port ${port} still listening after teardown`);
   process.exit(code);
 }
 
@@ -481,16 +541,15 @@ process.on("unhandledRejection", (err) => {
   shutdown(1, "unhandledRejection");
 });
 
-// FR-R6-002: detect parent death several ways.
+// FR-R6-002: detect parent death.
 // (a) Node IPC channel closing — only present when spawned with an IPC fd.
 process.on("disconnect", () => shutdown(143, "parent-disconnect"));
-// (b) stdin closing — Playwright pipes our stdio, so EOF means it is gone.
-if (process.stdin && process.stdin.readable) {
-  const onStdinGone = () => shutdown(143, "stdin-closed");
-  process.stdin.on("end", onStdinGone);
-  process.stdin.on("close", onStdinGone);
-  process.stdin.resume?.();
-}
+// (b) FR-P0-14: stdin is NO LONGER a liveness signal. Playwright/CI invoke
+// this script with stdin closed or at EOF (< /dev/null, FIFO holders,
+// detached automation) — reading EOF there as "parent died" killed healthy
+// runs with exit 143 and forced shell workarounds. Parent liveness is (c)'s
+// ppid poll plus (a)'s IPC disconnect; both are reliable and neither
+// depends on our stdio plumbing.
 // (c) ppid reparented to init/launchd — poll, cheap and unconditional.
 const parentPid = process.ppid;
 const parentWatch = setInterval(() => {
@@ -527,11 +586,17 @@ if (args.command.length === 0) {
       ...process.env,
       NODE_TLS_REJECT_UNAUTHORIZED: "",
       FIRERAID_BASE_URL: baseUrl,
+      // FR-P0-14: the a11y spec derives its lab API base from this — always
+      // the port THIS bootstrap actually bound, never a hardcoded default.
+      FIRERAID_TEST_BASE_URL: baseUrl,
       FIRERAID_TEST_LAB_SECRET: labSecret,
       FIRERAID_TEST_ADMIN_SECRET: adminSecret,
     },
   });
   log(`suite pid=${suiteChild.pid}: ${args.command.join(" ")}`);
+  // Same watchdog contract as the wrangler group: if the supervisor is
+  // SIGKILLed, the detached suite group must not outlive it either.
+  spawnGroupReaper(process.pid, suiteChild.pid, "suite");
   suiteChild.on("exit", (code) => shutdown(code ?? 1, "suite-exit"));
   suiteChild.on("error", (err) => { console.error(err); shutdown(1, "suite-spawn-error"); });
 }

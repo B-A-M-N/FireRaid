@@ -26,7 +26,7 @@ async function createPinnedRun(
 ) {
   // FR-R5-041: deterministic defaults — bootstrap always sets these.
   // FIRERAID_TEST_BASE_URL is exported by scripts/test-worker.mjs (https).
-  const labBase = process.env.FIRERAID_TEST_BASE_URL ?? "https://localhost:9999";
+  const labBase = process.env.FIRERAID_TEST_BASE_URL ?? "https://localhost:9998";
   const labSecret = process.env.FIRERAID_TEST_LAB_SECRET ?? "local-lab-secret-do-not-use-in-prod";
   const createResp = await request.post(`${labBase}/api/lab/runs`, {
     headers: { authorization: `Bearer ${labSecret}` },

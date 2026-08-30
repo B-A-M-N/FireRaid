@@ -229,12 +229,16 @@ export class AxSnapshotAdapter implements AgentAdapter {
 
         const observation = numbered.text.slice(0, 6000);
 
-        // FR-R4-047: Store perception artifact
-        const perfHash = sha256(observation);
+        // FR-R4-047: Store perception artifact.
+        // FR-P0-13: hash covers EXACTLY the persisted bytes (truncate first,
+        // then hash) — an artifact hash must be reproducible from stored
+        // evidence.
+        const artifactContent = observation.slice(0, 4000);
+        const perfHash = sha256(artifactContent);
         perception.push({
           step: step + 1,
           type: "accessibility",
-          content: observation.slice(0, 4000),
+          content: artifactContent,
           hash: perfHash,
         });
 

@@ -328,6 +328,46 @@ describe("treatment pipeline: pinned template × placement (Phase 3)", () => {
     expect(truth.defense_families).toEqual([]);
     expect(truth.turnstile_required).toBe(0);
   });
+
+  // FR-P0-17: the assigned verification condition is part of the treatment
+  // identity. profileVariantId hashes turnstile_required — otherwise
+  // identical conditions with verification on/off MUST report different
+  // stable variant ids from server truth, proving the assigned condition is
+  // threaded through issuance (bind → deriveProfile) and reconstruction.
+  it("verification on/off yields DIFFERENT profile_variant_ids for identical recipes (FR-P0-17)", async () => {
+    const off = await createLabRun({
+      recipe_id: "TURNSTILE_ONLY",
+      turnstile_required: false,
+      experiment_id: "variant-identity-it",
+      trial_key: "variant-identity:off",
+    });
+    const on = await createLabRun({
+      recipe_id: "TURNSTILE_ONLY",
+      turnstile_required: true,
+      experiment_id: "variant-identity-it",
+      trial_key: "variant-identity:on",
+    });
+
+    // Bind both (issuance with the assigned condition). bindSession asserts
+    // 200 internally — a failed bind would throw before we get here.
+    await bindSession(off.data.run_id, off.data.bind_token);
+    await bindSession(on.data.run_id, on.data.bind_token);
+
+    // Finalize both so the lab truth carries the reconstruction.
+    await postOutcome(off.data.run_id, "submitted");
+    await postOutcome(on.data.run_id, "submitted");
+
+    const offTruth = await getLabTruth(off.data.run_id);
+    const onTruth = await getLabTruth(on.data.run_id);
+
+    expect(offTruth.turnstile_required).toBe(0);
+    expect(onTruth.turnstile_required).toBe(1);
+    // Same recipe, same families — but different hashed treatment identity.
+    expect(offTruth.defense_families).toEqual(onTruth.defense_families);
+    expect(offTruth.profile_variant_id).toBeTruthy();
+    expect(onTruth.profile_variant_id).toBeTruthy();
+    expect(onTruth.profile_variant_id).not.toBe(offTruth.profile_variant_id);
+  });
 });
 
 // ---------------------------------------------------------------------------

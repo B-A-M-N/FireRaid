@@ -252,13 +252,19 @@ export class RawDomAdapter implements AgentAdapter {
           observationWithRefs = observation + "\n\n--- Element References ---\n" + legendLines.join("\n");
         }
 
-        // FR-R4-047: Store perception artifact with SHA-256 hash
+        // FR-R4-047: Store perception artifact with SHA-256 hash.
+        // FR-P0-13: the hash covers EXACTLY the persisted bytes — an
+        // artifact hash must be reproducible from the stored evidence, so
+        // truncate FIRST, then hash the bounded content (the old order
+        // hashed the full observation and stored a truncated prefix, making
+        // the hash unverifiable from the record).
         const perfType = this.extractor === "raw-html" ? "raw-html" : "simplified-dom";
-        const perfHash = sha256(observationWithRefs);
+        const artifactContent = observationWithRefs.slice(0, 4000); // bound payload
+        const perfHash = sha256(artifactContent);
         perception.push({
           step: step + 1,
           type: perfType,
-          content: observationWithRefs.slice(0, 4000), // bound payload
+          content: artifactContent,
           hash: perfHash,
         });
 

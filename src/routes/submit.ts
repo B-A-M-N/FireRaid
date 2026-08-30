@@ -243,17 +243,22 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   {
     let recipeJson: string | undefined;
     let holdoutMode: boolean | undefined;
+    // FR-P0-17: the run's verification condition — same treatment-identity
+    // rule as holdout_mode (part of the hashed variant id).
+    let turnstileRequired: boolean | undefined;
     if (isLabMode(env)) {
       try {
         const row = await env.DB.prepare(
-          `SELECT recipe_json, holdout_mode FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
+          `SELECT recipe_json, holdout_mode, turnstile_required FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
         )
           .bind(sessionId)
-          .first<{ recipe_json: string | null; holdout_mode: number | null }>();
+          .first<{ recipe_json: string | null; holdout_mode: number | null; turnstile_required: number | null }>();
         const raw = row?.recipe_json;
         if (typeof raw === "string" && raw.length > 0) recipeJson = raw;
         // FR-POST-R6-P5: holdout flag is part of the treatment identity.
         if (row && row.holdout_mode !== null) holdoutMode = row.holdout_mode === 1;
+        // FR-P0-17: verification condition likewise.
+        if (row && row.turnstile_required !== null) turnstileRequired = row.turnstile_required === 1;
       } catch {
         recipeJson = undefined; // unbound session — random lab/production profile
       }
@@ -270,7 +275,7 @@ export async function submit(req: Request, env: Env): Promise<Response> {
       id: sessionId,
       profileVersion: session.profileVersion,
       profileKeyId: session.profileKeyId ?? null,
-    }, recipe, { holdoutMode });
+    }, recipe, { holdoutMode, turnstileRequired });
     if (!reconstructed.ok) {
       console.error("submit reconstruction failed:", reconstructed.code, reconstructed.detail);
       return error("profile reconstruction failed", 500);

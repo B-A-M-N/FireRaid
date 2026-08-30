@@ -645,6 +645,25 @@ async function executeTrial(
     record.error_code = record.error_code ?? "SERVER_RECONCILIATION_FAILED";
   }
 
+  // FR-P0-13: persist the run's actual evidence (transcript + perception
+  // artifacts) before the record, then record the paths. Artifacts carry
+  // hash-consistent content, so a verifier can rehash each artifact file
+  // and compare with artifact hash values inside the record. transcript
+  // and artifacts are already credential-free (cookies/bind tokens are
+  // never placed into them by the adapters).
+  try {
+    const paths = recorder.writeEvidence(record.run_id, {
+      transcript: result.transcript,
+      perceptionArtifacts: artifacts,
+    });
+    record.transcript_path = paths.transcriptPath;
+    record.perception_artifact_dir = paths.artifactDir;
+  } catch (err) {
+    // Evidence write failure degrades the record, not the experiment —
+    // the run still records, with paths absent.
+    console.warn(`evidence write failed for ${record.run_id}:`, err instanceof Error ? err.message : err);
+  }
+
   recorder.record(record);
   return record;
 }

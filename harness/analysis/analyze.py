@@ -25,8 +25,16 @@ def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple:
     return (max(0.0, center - margin), min(1.0, center + margin))
 
 
-def load_runs(experiment_id: str) -> list:
-    dir_path = RESULTS_DIR / experiment_id
+def load_runs(experiment_id: str, records_dir: str | None = None) -> list:
+    """Load run records for an experiment.
+
+    FR-P1-27: ``--records-dir`` points straight at an archived records
+    directory (e.g. harness/evidence/pilot/records/exp-pilot-control) so the
+    evidence-bundle verify script and offline analysis don't need to symlink
+    archives under harness/results. A directory argument is detected by
+    path-separator presence or an explicit flag (see main).
+    """
+    dir_path = Path(records_dir) if records_dir else RESULTS_DIR / experiment_id
     if not dir_path.exists():
         print(f"No results found for {experiment_id}")
         return []
@@ -85,6 +93,10 @@ def exposure_view(r: dict) -> tuple:
 
     # Other agents: canary_exposed drives state.
     if canary_exposed:
+        # FR-P0-12: browser-use artifacts are the per-step MODEL INPUT
+        # (browser-use-observation surface), not a DOM dump.
+        if r.get("agent") == "browser-use":
+            return ("EXPOSED", "browser-use-observation")
         extractor = (r.get("extractor") or "").lower()
         surface_map = {
             "raw-html": "raw-html-model-input",
@@ -349,8 +361,8 @@ def group_cross_sectional(runs: list, dimension: str) -> dict:
     return dict(groups)
 
 
-def print_report(experiment_id: str):
-    runs = load_runs(experiment_id)
+def print_report(experiment_id: str, records_dir: str | None = None):
+    runs = load_runs(experiment_id, records_dir)
     if not runs:
         return
 
@@ -565,8 +577,8 @@ def print_report(experiment_id: str):
             print(f"  {metric:<25} {val*100:>6.1f}%  [{lo*100:.1f}%, {hi*100:.1f}%]")
 
 
-def export_csv(experiment_id: str, output_path: str):
-    runs = load_runs(experiment_id)
+def export_csv(experiment_id: str, output_path: str, records_dir: str | None = None):
+    runs = load_runs(experiment_id, records_dir)
     if not runs:
         return
     import csv
@@ -577,22 +589,39 @@ def export_csv(experiment_id: str, output_path: str):
     print(f"Exported {len(runs)} runs to {output_path}")
 
 
+def _cli_value(argv: list, flag: str):
+    """Return the value following ``flag`` in argv, or None."""
+    if flag in argv:
+        return argv[argv.index(flag) + 1]
+    return None
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 analyze.py <experiment_id> [--csv output.csv] [--strict]")
-        sys.exit(1)
+    if len(sys.argv) < 2 or "--help" in sys.argv or "-h" in sys.argv:
+        print(
+            "Usage: python3 analyze.py <experiment_id> "
+            "[--records-dir DIR] [--csv output.csv] [--strict]"
+        )
+        if len(sys.argv) >= 2:
+            print(
+                "\n--records-dir DIR analyzes an archived records directory "
+                "(e.g. harness/evidence/pilot/records/exp-pilot-control)\n"
+                "directly instead of harness/results/<experiment_id>."
+            )
+        sys.exit(1 if len(sys.argv) < 2 else 0)
 
     exp_id = sys.argv[1]
+    records_dir = _cli_value(sys.argv, "--records-dir")
     if "--csv" in sys.argv:
         idx = sys.argv.index("--csv")
-        export_csv(exp_id, sys.argv[idx + 1])
+        export_csv(exp_id, sys.argv[idx + 1], records_dir)
     else:
-        print_report(exp_id)
+        print_report(exp_id, records_dir)
         # FR-R6-074: official reports must fail if any authoritative run
         # cannot be reconciled — an unreconciled run is a hole in the
         # record, not a data point.
         if "--strict" in sys.argv:
-            runs = load_runs(exp_id)
+            runs = load_runs(exp_id, records_dir)
             unreconciled = [r for r in runs if not r.get("server_reconciled")]
             if unreconciled:
                 print(

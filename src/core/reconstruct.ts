@@ -49,7 +49,16 @@ export async function reconstructIssuedProfile(
   env: Env,
   session: ReconstructableSession,
   recipe?: DefenseRecipe,
-  options?: { holdoutMode?: boolean }
+  options?: {
+    holdoutMode?: boolean;
+    /**
+     * FR-P0-17: the run's assigned verification condition. Part of the
+     * hashed treatment identity (buildVariantId) — reconstruction without
+     * it derives a DIFFERENT variant id than issuance whenever the run
+     * required verification. Callers read the persisted lab_runs column.
+     */
+    turnstileRequired?: boolean;
+  }
 ): Promise<ReconstructionResult> {
   let ring: ProfileKeyRing;
   try {
@@ -96,6 +105,8 @@ export async function reconstructIssuedProfile(
     sessionId: session.id,
     mode: isLabMode(env) ? "lab" : "production",
     holdoutMode: options?.holdoutMode === true,
+    // FR-P0-17: same condition issuance hashed in.
+    turnstileRequired: options?.turnstileRequired === true,
   };
   try {
     const profile = await deriveProfilePure(opts, recipe);
@@ -127,6 +138,8 @@ export async function reconstructFromSessionId(
     recipe?: DefenseRecipe;
     /** FR-POST-R6-P5: the bound run's persisted holdout_mode. */
     holdoutMode?: boolean;
+    /** FR-P0-17: the bound run's persisted verification condition. */
+    turnstileRequired?: boolean;
   }
 ): Promise<ReconstructionResult> {
   // Lazily import to avoid a circular module-graph edge between core and
@@ -141,6 +154,6 @@ export async function reconstructFromSessionId(
       profileKeyId: loaded?.profileKeyId ?? null,
     },
     opts?.recipe,
-    { holdoutMode: opts?.holdoutMode }
+    { holdoutMode: opts?.holdoutMode, turnstileRequired: opts?.turnstileRequired }
   );
 }

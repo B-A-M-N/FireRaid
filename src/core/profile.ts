@@ -418,7 +418,11 @@ export async function deriveProfile(
   sessionId: string,
   version?: number,
   recipe?: DefenseRecipe,
-  holdoutMode?: boolean
+  holdoutMode?: boolean,
+  /** FR-P0-17: the session's assigned verification condition — part of the
+   *  treatment identity hashed into profileVariantId. Issuance and every
+   *  reconstruction MUST see the same value or the variant id drifts. */
+  turnstileRequired?: boolean
 ): Promise<DefenseProfile> {
   const ver = version ?? profileVersion(env);
   const isLab = env.LAB_MODE === "true";
@@ -431,6 +435,8 @@ export async function deriveProfile(
       // FR-POST-R6-P5: part of the issued treatment identity — restricts
       // the random template pool to the holdout partition (FR-R5-034).
       holdoutMode: holdoutMode === true,
+      // FR-P0-17: the Turnstile condition hashes into the variant id.
+      turnstileRequired: turnstileRequired === true,
     },
     recipe
   );

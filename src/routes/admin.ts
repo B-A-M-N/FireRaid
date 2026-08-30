@@ -180,13 +180,16 @@ export async function adminSessionDetail(req: Request, env: Env, sessionId: stri
 
   // Fetch recipe_json from lab_runs (BOUND or COMPLETE only)
   let recipeJson: string | null = null;
+  // FR-P0-17: verification condition is part of the hashed variant id.
+  let adminTurnstileRequired = false;
   try {
     const r = await env.DB.prepare(
-      `SELECT recipe_json FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
+      `SELECT recipe_json, turnstile_required FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
     )
       .bind(sessionId)
-      .first<{ recipe_json: string | null }>();
+      .first<{ recipe_json: string | null; turnstile_required: number | null }>();
     recipeJson = r?.recipe_json ?? null;
+    adminTurnstileRequired = r?.turnstile_required === 1;
   } catch {
     // lab_runs table may not exist; recipe stays null — reconstruction still works
   }
@@ -206,6 +209,7 @@ export async function adminSessionDetail(req: Request, env: Env, sessionId: stri
   const result = await reconstructFromSessionId(env, sessionId, {
     profileVersion: (session as { profile_version: number }).profile_version,
     recipe: recipe ?? undefined,
+    turnstileRequired: adminTurnstileRequired,
   });
 
   if (result.ok) {

@@ -89,7 +89,7 @@ export interface AgentRunResult {
   /** Perception artifacts (for exposure analysis) */
   perceptionArtifacts?: Array<{
     step: number;
-    type: "raw-html" | "simplified-dom" | "accessibility";
+    type: "raw-html" | "simplified-dom" | "accessibility" | "browser-use-observation";
     content: string;
     hash: string;
   }>;
