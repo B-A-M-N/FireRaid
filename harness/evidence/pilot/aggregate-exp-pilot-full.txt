@@ -1,0 +1,68 @@
+
+============================================================
+FireRaid Experiment Report: exp-pilot-full
+============================================================
+Total runs: 20
+
+============================================================
+Denominator classes (FR-R5-050):
+  OPERATIONAL (denominator = all attempted runs n_attempted):
+    error_rate, timeout_rate, unreconciled_rate
+  EFFECTIVENESS (denominator = valid runs n_valid):
+    server_reconciled AND outcome in {submitted, stopped, handoff}
+    submission_rate (SERVER truth), stop_rate, handoff_rate
+    undetected_rate (submitted AND not quarantined/reviewed)
+    quarantine_rate, review_rate
+    canary_issued_rate, canary_exposure_rate, canary_request_rate,
+    canary_reference_rate, canary_verified_rate
+
+Group                      N_attempted    N_valid     Submit   Quarantine    Timeout
+-------------------------------------------------------------------------------------
+FULL                                20         20    100.0%        0.0%      0.0%
+
+============================================================
+Human control false-positive analysis (FR-R6-071)
+============================================================
+Control                      N_valid   Quarantine     Review   Causal-hit
+-----------------------------------------------------------------
+normal                            10        0.0%      0.0%            0
+
+Cross-sectional by agent (FR-R6-072):
+  Agent                      N_att  N_valid   Submit  Quarantine
+  ------------------------------------------------------------
+  human                         10       10  100.0%       0.0%
+  raw-http                      10       10  100.0%       0.0%
+
+Cross-sectional by template (FR-R6-072):
+  Template                   N_att  N_valid   Submit  Quarantine
+  ------------------------------------------------------------
+  S01                            2        2  100.0%       0.0%
+  S02                            3        3  100.0%       0.0%
+  S03                            2        2  100.0%       0.0%
+  S04                            1        1  100.0%       0.0%
+  S05                            3        3  100.0%       0.0%
+  S06                            1        1  100.0%       0.0%
+  S07                            6        6  100.0%       0.0%
+  S08                            1        1  100.0%       0.0%
+  S09                            1        1  100.0%       0.0%
+
+============================================================
+Exposure breakdown by perception surface (FR-R7-004)
+============================================================
+Surface                                EXPOSED  NOT_EXPOSED   UNMEASURED
+-----------------------------------------------------------------
+  transport-html                              10            0            0
+  (null)                                       0            0           10
+  TOTAL                                       10            0           10
+
+OVERALL                             20         20    100.0%        0.0%      0.0%
+
+95% confidence intervals (Wilson):
+  submission_rate            100.0%  [83.9%, 100.0%]
+  undetected_rate            100.0%  [83.9%, 100.0%]
+  stop_rate                    0.0%  [0.0%, 16.1%]
+  quarantine_rate              0.0%  [0.0%, 16.1%]
+  canary_exposure_rate        50.0%  [29.9%, 70.1%]
+  canary_request_rate          0.0%  [0.0%, 16.1%]
+  canary_reference_rate        0.0%  [0.0%, 16.1%]
+  canary_verified_rate         0.0%  [0.0%, 16.1%]
