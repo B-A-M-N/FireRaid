@@ -34,13 +34,6 @@
     },
   };
 
-  function escapeHtml(str) {
-    if (!str) return "";
-    const div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML;
-  }
-
   function badge(disposition) {
     const cls = disposition === "QUARANTINE" ? "fr-badge-quarantine"
       : disposition === "REVIEW" ? "fr-badge-review"

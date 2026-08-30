@@ -21,16 +21,23 @@ const FIXTURE = {
   password: "synthetic-password-123",
 };
 
-export async function runNormalHuman(baseUrl: string): Promise<HumanRunResult> {
+export async function runNormalHuman(
+  baseUrl: string,
+  labRun?: { runId: string; bindToken: string },
+): Promise<HumanRunResult> {
   const browser = await chromium.launch();
   try {
-    return await performNormal(browser, baseUrl);
+    return await performNormal(browser, baseUrl, labRun);
   } finally {
     await browser.close();
   }
 }
 
-async function performNormal(browser: Awaited<ReturnType<typeof chromium.launch>>, baseUrl: string): Promise<HumanRunResult> {
+async function performNormal(
+  browser: Awaited<ReturnType<typeof chromium.launch>>,
+  baseUrl: string,
+  labRun?: { runId: string; bindToken: string },
+): Promise<HumanRunResult> {
   const start = Date.now();
   const page = await browser.newPage();
   let canaryTriggered = false;
@@ -43,7 +50,16 @@ async function performNormal(browser: Awaited<ReturnType<typeof chromium.launch>
   });
 
   try {
-    await page.goto(`${baseUrl}/signup`, { waitUntil: "networkidle" });
+    // FR-R5-005: Use bind-aware signup URL when labRun context is present
+    const signupUrlStr = (() => {
+      const url = new URL("/signup", baseUrl);
+      if (labRun) {
+        url.searchParams.set("lab_run", labRun.runId);
+        url.searchParams.set("bind", labRun.bindToken);
+      }
+      return url.toString();
+    })();
+    await page.goto(signupUrlStr, { waitUntil: "networkidle" });
 
     // Fill visible fields with realistic delays
     await page.fill("#name", FIXTURE.name);
@@ -74,7 +90,7 @@ async function performNormal(browser: Awaited<ReturnType<typeof chromium.launch>
       elapsedMs: Date.now() - start,
       disposition,
     };
-  } catch (err) {
+  } catch {
     return {
       outcome: "error",
       canaryTriggered,
@@ -86,7 +102,10 @@ async function performNormal(browser: Awaited<ReturnType<typeof chromium.launch>
   }
 }
 
-export async function runKeyboardOnly(baseUrl: string): Promise<HumanRunResult> {
+export async function runKeyboardOnly(
+  baseUrl: string,
+  labRun?: { runId: string; bindToken: string },
+): Promise<HumanRunResult> {
   const browser = await chromium.launch();
   const start = Date.now();
   const page = await browser.newPage();
@@ -98,7 +117,16 @@ export async function runKeyboardOnly(baseUrl: string): Promise<HumanRunResult> 
   });
 
   try {
-    await page.goto(`${baseUrl}/signup`, { waitUntil: "networkidle" });
+    // FR-R5-005: Use bind-aware signup URL when labRun context is present
+    const signupUrlStr = (() => {
+      const url = new URL("/signup", baseUrl);
+      if (labRun) {
+        url.searchParams.set("lab_run", labRun.runId);
+        url.searchParams.set("bind", labRun.bindToken);
+      }
+      return url.toString();
+    })();
+    await page.goto(signupUrlStr, { waitUntil: "networkidle" });
 
     // Tab through fields, type
     await page.keyboard.press("Tab");
@@ -128,7 +156,10 @@ export async function runKeyboardOnly(baseUrl: string): Promise<HumanRunResult> 
   }
 }
 
-export async function runAutofillLike(baseUrl: string): Promise<HumanRunResult> {
+export async function runAutofillLike(
+  baseUrl: string,
+  labRun?: { runId: string; bindToken: string },
+): Promise<HumanRunResult> {
   const browser = await chromium.launch();
   const start = Date.now();
   const page = await browser.newPage();
@@ -140,7 +171,16 @@ export async function runAutofillLike(baseUrl: string): Promise<HumanRunResult> 
   });
 
   try {
-    await page.goto(`${baseUrl}/signup`, { waitUntil: "networkidle" });
+    // FR-R5-005: Use bind-aware signup URL when labRun context is present
+    const signupUrlStr = (() => {
+      const url = new URL("/signup", baseUrl);
+      if (labRun) {
+        url.searchParams.set("lab_run", labRun.runId);
+        url.searchParams.set("bind", labRun.bindToken);
+      }
+      return url.toString();
+    })();
+    await page.goto(signupUrlStr, { waitUntil: "networkidle" });
 
     // Fast programmatic fill (simulating autofill)
     await page.evaluate((f) => {
@@ -168,5 +208,53 @@ export async function runAutofillLike(baseUrl: string): Promise<HumanRunResult> 
   } finally {
     await page.close();
     await browser.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AgentAdapter class (FR-R4-035)
+// ---------------------------------------------------------------------------
+
+import type { AgentAdapter, AgentRunResult, Scenario } from "../core/run-schema.js";
+
+/**
+ * Human-control adapter implementing AgentAdapter so the runner registry can
+ * load it like any other agent (FR-R4-035). Wraps the three interaction modes
+ * and maps HumanRunResult → AgentRunResult.
+ */
+export class HumanControlAdapter implements AgentAdapter {
+  readonly type = "human" as const;
+
+  async run(scenario: Scenario): Promise<AgentRunResult> {
+    const start = Date.now();
+    let sessionCookie: string | undefined;
+
+    // Capture session cookie via a one-off browser context wrapper is not
+    // available in the helper functions — approximate via page listener is
+    // already inside perform*(); here we surface what the helpers return.
+    try {
+      const result = await runNormalHuman(scenario.targetUrl, scenario.labRun);
+      return {
+        outcome: result.outcome,
+        actionCount: 6, // 5 fills + submit (human-mode fixed interaction script)
+        elapsedMs: result.elapsedMs,
+        transcript: `human-control: outcome=${result.outcome} quarantine=${result.quarantine}`,
+        sessionCookie,
+        canaryTriggered: result.canaryTriggered,
+        canaryReferenced: false,
+        errorCode: result.outcome === "error" ? "human_control_error" : undefined,
+      };
+    } catch (err) {
+      return {
+        outcome: "error",
+        actionCount: 0,
+        elapsedMs: Date.now() - start,
+        transcript: `human-control failed: ${err instanceof Error ? err.message : String(err)}`,
+        sessionCookie,
+        canaryTriggered: false,
+        canaryReferenced: false,
+        errorCode: "browser_error",
+      };
+    }
   }
 }

@@ -93,7 +93,7 @@
 
       // Render result
       renderResult(result);
-    } catch (err) {
+    } catch {
       renderResult({ error: "Submission failed. Please try again." });
     }
   });
@@ -139,6 +139,8 @@
         body: JSON.stringify({ events: batch }),
         keepalive: true,
       }).catch(() => {});
-    } catch {}
+    } catch {
+      // Best-effort flush — telemetry must never break submission UX.
+    }
   }
 })();

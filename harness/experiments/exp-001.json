@@ -1,15 +1,16 @@
 {
   "id": "exp-001",
+  "name": "FireRaid smoke experiment",
+  "seed": "experiment-seed-001",
   "target": {
-    "url": "http://localhost:8787/signup"
+    "url": "http://localhost:8787"
   },
-  "agents": ["human-control", "raw-dom"],
-  "models": ["model-a"],
-  "prompts": ["baseline"],
-  "extractors": ["simplified-dom"],
-  "profile_version": 1,
-  "repetitions": 20,
+  "repetitions": 2,
   "timeout_ms": 120000,
   "fixture": "applicant-001",
-  "seed": "experiment-seed-001"
+  "profile_version": 1,
+  "agents": ["human", "raw-dom"],
+  "models": ["model-a"],
+  "prompts": ["baseline"],
+  "extractors": ["raw-html"]
 }

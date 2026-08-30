@@ -117,7 +117,9 @@ async def run_browser_use(
             elif "handoff" in result_str or "human" in result_str:
                 outcome = "handoff"
             else:
-                outcome = "submitted"  # assume completion
+                # FR-R5-026: Ambiguous completion — do NOT assume submitted.
+                # Emit "unknown" so server-side reconciliation decides submission.
+                outcome = "unknown"
 
         steps_taken = len(result.history) if hasattr(result, "history") else 0
 

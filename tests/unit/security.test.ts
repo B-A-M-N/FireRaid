@@ -5,7 +5,7 @@ import { describe, it, expect } from "vitest";
 import { verifyCsrfToken, deriveCsrfToken } from "../../src/core/session.js";
 import { verifyAdminToken, verifyAdminSecret } from "../../src/security/admin-auth.js";
 import { deriveProfile, hashProfile } from "../../src/core/profile.js";
-import { looksLikeTestKey } from "../../src/turnstile/verify.js";
+import { looksLikeTestSiteKey, looksLikeTestSecret } from "../../src/turnstile/verify.js";
 import type { Env } from "../../src/env.js";
 
 const mockEnv = (overrides: Partial<Env> = {}): Env =>
@@ -16,7 +16,7 @@ const mockEnv = (overrides: Partial<Env> = {}): Env =>
     LAB_MODE: "true",
     FIRERAID_PROFILE_SECRET: "a".repeat(64),
     FIRERAID_CSRF_SECRET: "b".repeat(64),
-    ADMIN_SECRET: "test-admin-secret",
+    ADMIN_SECRET: "test-admin-secret-that-is-32-chars!",
     ...overrides,
   }) as unknown as Env;
 
@@ -34,15 +34,15 @@ describe("security: timing-safe comparisons", () => {
   });
 
   it("admin secret verify is constant-time", () => {
-    const env = mockEnv({ ADMIN_SECRET: "correct-secret" });
-    expect(verifyAdminSecret(env, "correct-secret")).toBe(true);
-    expect(verifyAdminSecret(env, "wrong-secret")).toBe(false);
+    const env = mockEnv({ ADMIN_SECRET: "correct-secret-that-is-32-chars!" });
+    expect(verifyAdminSecret(env, "correct-secret-that-is-32-chars!")).toBe(true);
+    expect(verifyAdminSecret(env, "wrong-secret-that-is-32-chars!")).toBe(false);
     expect(verifyAdminSecret(env, "")).toBe(false);
-    expect(verifyAdminSecret(env, "correct-secret-extra")).toBe(false);
+    expect(verifyAdminSecret(env, "correct-secret-that-is-32-chars!-extra")).toBe(false);
   });
 
   it("admin token verify rejects malformed tokens", async () => {
-    const env = mockEnv({ ADMIN_SECRET: "test" });
+    const env = mockEnv({ ADMIN_SECRET: "test-admin-secret-that-is-32-chars!" });
     expect(await verifyAdminToken(env, "")).toBe(false);
     expect(await verifyAdminToken(env, "no-dot")).toBe(false);
     expect(await verifyAdminToken(env, "a.b.c")).toBe(false);
@@ -50,32 +50,47 @@ describe("security: timing-safe comparisons", () => {
 });
 
 describe("security: test key detection", () => {
-  it("detects known test secrets", () => {
-    expect(looksLikeTestKey("1x00000000000000000000000000000000AA")).toBe(true);
-    expect(looksLikeTestKey("1x00000000000000000000000000000000BB")).toBe(true);
-    expect(looksLikeTestKey("1x00000000000000000000000000000000CC")).toBe(true);
+  // FR-R4-005: sitekey and secret namespaces are distinct Cloudflare values.
+  it("detects current Cloudflare test sitekeys", () => {
+    expect(looksLikeTestSiteKey("1x00000000000000000000AA")).toBe(true); // always passes
+    expect(looksLikeTestSiteKey("2x00000000000000000000AA")).toBe(true); // invisible
+    expect(looksLikeTestSiteKey("3x00000000000000000000AA")).toBe(true); // forced-interactive
+  });
+
+  it("detects current Cloudflare dummy secrets", () => {
+    expect(looksLikeTestSecret("1x0000000000000000000000000000000AA")).toBe(true); // always passes
+    expect(looksLikeTestSecret("2x0000000000000000000000000000000AA")).toBe(true); // always fails
+    expect(looksLikeTestSecret("3x0000000000000000000000000000000AA")).toBe(true); // duplicate/spent
+  });
+
+  it("namespaces do not cross-match", () => {
+    expect(looksLikeTestSecret("1x00000000000000000000AA")).toBe(false);
+    expect(looksLikeTestSiteKey("1x0000000000000000000000000000000AA")).toBe(false);
   });
 
   it("accepts non-test secrets", () => {
-    expect(looksLikeTestKey("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")).toBe(false);
+    expect(looksLikeTestSecret("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")).toBe(false);
+    expect(looksLikeTestSiteKey("0aaaaaaaaaaaaaaaaaaAAA")).toBe(false);
   });
 });
 
-describe("correctness: semantic canary implies decoy-route", () => {
-  it("profile with semantic family also has decoy-route", async () => {
+describe("correctness: semantic canary with requiresRoute implies decoy-route", () => {
+  it("profile with semantic template requiring route also has decoy-route", async () => {
     const env = mockEnv();
-    // Test many sessions — some will get semantic
-    let foundSemantic = false;
+    let foundRouteSemantic = false;
     for (let i = 0; i < 200; i++) {
       const p = await deriveProfile(env, `sid-${i}`);
       if (p.semantic) {
-        foundSemantic = true;
-        expect(p.families).toContain("decoy-route");
-        expect(p.decoy).toBeDefined();
-        expect(p.decoy!.endpointToken).toBeTruthy();
+        // S04, S05, S08 require route; S01, S02, S03, S06, S07 do not
+        if (["S04", "S05", "S08"].includes(p.semantic.templateId)) {
+          foundRouteSemantic = true;
+          expect(p.families).toContain("decoy-route");
+          expect(p.decoyRoute).toBeDefined();
+          expect(p.decoyRoute!.endpointToken).toBeTruthy();
+        }
       }
     }
-    expect(foundSemantic).toBe(true); // statistical certainty
+    expect(foundRouteSemantic).toBe(true);
   });
 
   it("hashProfile is deterministic", async () => {

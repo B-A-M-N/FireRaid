@@ -4,6 +4,7 @@
  * FIX: Persists full decision/evidence (FR-R2-005).
  * FIX: Atomic final submission (FR-R2-007).
  * FIX: eventBatch is now consumed (FR-R2-009).
+ * FR-R5-013: Per-run Turnstile requirement for lab-bound sessions.
  */
 import { json, error } from "../security/headers.js";
 import type { Env } from "../env.js";
@@ -20,7 +21,7 @@ import { decide } from "../core/decision.js";
 import { MAX_SUBMIT_BODY_BYTES } from "../types/telemetry.js";
 import type { ObservationSet } from "../core/correlation.js";
 import { isLabMode } from "../env.js";
-import { validateTelemetryBatch } from "./telemetry.js";
+import { validateTelemetryBatch, persistTelemetryBatch } from "./telemetry.js";
 
 interface SubmitBody {
   csrf?: string;
@@ -81,8 +82,24 @@ export async function submit(req: Request, env: Env): Promise<Response> {
 
   // FIX: 6. Turnstile is now an EXPLICIT GATE, not a heuristic
   // FR-R2-003: Turnstile failure does NOT finalize session
-  const turnstileSecret = env.TURNSTILE_SECRET_KEY;
-  if (turnstileSecret) {
+  // FR-R5-013: per-run Turnstile requirement for lab-bound sessions.
+  const turnstileSecret: string | undefined = env.TURNSTILE_SECRET_KEY;
+  let turnstileRequired = Boolean(turnstileSecret);
+  if (isLabMode(env)) {
+    try {
+      const run = await env.DB.prepare(
+        `SELECT turnstile_required FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
+      )
+        .bind(sessionId)
+        .first<{ turnstile_required: number | null }>();
+      if (run) {
+        turnstileRequired = run.turnstile_required === 1;
+      }
+    } catch {
+      // DB error → treat as not found, use global config
+    }
+  }
+  if (turnstileRequired && turnstileSecret) {
     if (!body.turnstileToken) {
       return error("Turnstile verification required", 403);
     }
@@ -130,23 +147,21 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   }
 
   // FIX: 10. Process eventBatch from submit (FR-R2-008, FR-R2-009)
+  // FR-R5-018: watermark-gated persist; oversized batches rejected wholesale.
   if (body.eventBatch && Array.isArray(body.eventBatch)) {
-    const validEvents = validateTelemetryBatch(body.eventBatch);
-    if (validEvents.length > 0) {
-      // Persist final telemetry batch
-      await env.DB.prepare(
-        `INSERT INTO event_batches (session_id, created_at, first_seq, last_seq, event_count, payload_json)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      )
-        .bind(
-          sessionId,
-          Date.now(),
-          validEvents[0].seq,
-          validEvents[validEvents.length - 1].seq,
-          validEvents.length,
-          JSON.stringify(validEvents)
-        )
-        .run();
+    const validated = validateTelemetryBatch(body.eventBatch);
+    if (validated.ok && validated.events.length > 0) {
+      // Persist final telemetry batch (watermark semantics may reject stale
+      // replays — the submission itself must not fail for telemetry reasons,
+      // so violations are logged and swallowed here).
+      try {
+        await persistTelemetryBatch(env.DB, sessionId, validated.events);
+      } catch (err) {
+        if (err instanceof Error && err.message === "PAYLOAD_TOO_LARGE") {
+          return error("payload too large", 413);
+        }
+        console.warn("telemetry persist at submit failed:", err instanceof Error ? err.message : err);
+      }
     }
   }
 

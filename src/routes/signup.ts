@@ -1,5 +1,9 @@
 /**
  * GET /signup — main entry. Creates session, derives profile, injects defenses.
+ * FR-R5-005/028: consumes ?lab_run=<id>&bind=<token> — server-side one-time
+ * bind of the session to a lab run BEFORE the page renders. Fails closed in
+ * lab mode: an invalid/expired/used bind token renders an error, never an
+ * unbound session that would silently dilute the experiment condition.
  */
 import { html, error } from "../security/headers.js";
 import type { Env } from "../env.js";
@@ -11,14 +15,85 @@ import {
   persistSession,
   now,
 } from "../core/session.js";
-import { deriveProfile, hashProfile } from "../core/profile.js";
+import { deriveProfile, hashProfile, type DefenseRecipe } from "../core/profile.js";
 import { renderSignupPage } from "../core/renderer.js";
 import { makeCsrfToken } from "../security/csrf.js";
 import { readSignupHtml } from "../core/static.js";
+import { constantTimeEqualStr } from "./lab.js";
 
-export async function signup(_req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+/** SHA-256 hex of a bind token (mirrors lab.ts storage format). */
+async function hashBindToken(token: string): Promise<string> {
+  const data = new TextEncoder().encode(token);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(req.url);
+  const labRunId = url.searchParams.get("lab_run");
+  const bindToken = url.searchParams.get("bind");
+  const labBindRequested = isLabMode(env) && labRunId !== null;
+
+  // FR-R5-005/028: validate the bind BEFORE creating any state. Fails closed
+  // on: unknown run, non-PENDING status, expired run, missing/wrong token.
+  let bindHash: string | null = null;
+  if (labBindRequested) {
+    if (!bindToken) {
+      return error("lab run bind failed: missing bind token", 403);
+    }
+    let row: { status: string; bind_token_hash: string | null; expires_at: number | null } | null;
+    try {
+      row = await env.DB.prepare(
+        `SELECT status, bind_token_hash, expires_at FROM lab_runs WHERE id = ?`
+      )
+        .bind(labRunId)
+        .first<{ status: string; bind_token_hash: string | null; expires_at: number | null }>();
+    } catch {
+      return error("lab run bind failed: lookup error", 500);
+    }
+    if (!row) return error("lab run bind failed: unknown run", 403);
+    if (row.status !== "PENDING") {
+      return error(`lab run bind failed: run is ${row.status}, not PENDING`, 403);
+    }
+    if (row.expires_at !== null && row.expires_at < now()) {
+      return error("lab run bind failed: run expired", 403);
+    }
+    if (!row.bind_token_hash) {
+      return error("lab run bind failed: bind token not available", 403);
+    }
+    const provided = await hashBindToken(bindToken);
+    if (!constantTimeEqualStr(provided, row.bind_token_hash)) {
+      return error("lab run bind failed: invalid bind token", 403);
+    }
+    bindHash = row.bind_token_hash;
+  }
+
   const sessionId = generateSessionId();
-  const profile = await deriveProfile(env, sessionId);
+  // FR-R5 Pass C (experimental conditions): a bound lab run's recipe IS the
+  // experiment condition — derive this session's profile from it so the
+  // rendered page provably matches the named condition. Unbound lab and
+  // production sessions use the engine's random profile as before.
+  let recipe: DefenseRecipe | undefined;
+  if (labBindRequested && bindToken && bindHash) {
+    try {
+      const row = await env.DB.prepare(
+        `SELECT recipe_json FROM lab_runs WHERE id = ?`
+      )
+        .bind(labRunId)
+        .first<{ recipe_json: string | null }>();
+      const raw = row?.recipe_json;
+      if (typeof raw === "string" && raw.length > 0) {
+        try { recipe = JSON.parse(raw) as DefenseRecipe; } catch { recipe = undefined; }
+      }
+    } catch {
+      // recipe_json unreadable → treat as a failed bind rather than silently
+      // rendering a condition-less page (fail closed, FR-R5 Pass C).
+      return error("lab run bind failed: recipe unreadable", 500);
+    }
+  }
+  const profile = await deriveProfile(env, sessionId, undefined, recipe);
   const profileHash = await hashProfile(profile);
   const csrfToken = await makeCsrfToken(env, sessionId);
 
@@ -27,6 +102,27 @@ export async function signup(_req: Request, env: Env, _ctx: ExecutionContext): P
     createdAt: now(),
     profileVersion: profileVersion(env),
   }, profile.profileId, profileHash);
+
+  // FR-R5-005/028: one-time conditional bind — the WHERE clause repeats the
+  // token-hash check so a raced concurrent bind leaves this UPDATE a no-op,
+  // which we treat as a failure (fail closed, orphan session expires by TTL).
+  if (labBindRequested && bindToken && bindHash) {
+    let claimed = false;
+    try {
+      const result = await env.DB.prepare(
+        `UPDATE lab_runs SET session_id = ?, bind_token_hash = NULL, status = 'BOUND'
+         WHERE id = ? AND bind_token_hash = ? AND status = 'PENDING'`
+      )
+        .bind(sessionId, labRunId, bindHash)
+        .run();
+      claimed = (result.meta?.changes ?? 0) === 1;
+    } catch {
+      claimed = false;
+    }
+    if (!claimed) {
+      return error("lab run bind failed: token already consumed", 409);
+    }
+  }
 
   let staticHtml: string;
   try {

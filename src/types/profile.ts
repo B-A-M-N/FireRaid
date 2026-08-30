@@ -1,6 +1,8 @@
 /**
  * FR-INV-002: Defense profiles MUST be deterministic from server-controlled state.
  * Canonical DefenseProfile — the central FireRaid primitive.
+ * FIX: Split decoy-field/decoy-route into independent families (FR-R3-010).
+ * FIX: Interaction family now has scoringEnabled flag (FR-R3-011).
  */
 export type DefenseFamilyName =
   | "semantic"
@@ -17,10 +19,13 @@ export interface SemanticConfig {
   mode: SemanticMode;
 }
 
-export interface DecoyConfig {
+export interface DecoyFieldConfig {
   fieldName: string;
-  endpointToken: string;
   elementId: string;
+}
+
+export interface DecoyRouteConfig {
+  endpointToken: string;
 }
 
 export interface TelemetryConfig {
@@ -32,13 +37,27 @@ export interface TelemetryConfig {
   captureSubmit: boolean;
 }
 
+export interface DecoyConfig {
+  fieldName: string;
+  endpointToken: string;
+  elementId: string;
+}
+
 export interface DefenseProfile {
   version: number;
   profileId: string;
+  /** Variant ID for grouping experimental treatments (FR-R3-049). */
+  profileVariantId?: string;
   sessionId: string;
   families: DefenseFamilyName[];
   semantic?: SemanticConfig;
+  /** Aggregate decoy config (field + route together). */
   decoy?: DecoyConfig;
+  decoyField?: DecoyFieldConfig;
+  decoyRoute?: DecoyRouteConfig;
+  interaction?: {
+    scoringEnabled: boolean;
+  };
   telemetry: TelemetryConfig;
   scoringPolicy: string;
 }

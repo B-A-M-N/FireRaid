@@ -24,6 +24,22 @@ async function hashToken(token: string): Promise<string> {
     .join("");
 }
 
+/**
+ * Constant-time string comparison. Length difference is folded into the
+ * accumulator so timing does not leak token length or match position.
+ */
+export function constantTimeTokenEqual(token: string, expected: string): boolean {
+  const len = Math.max(token.length, expected.length);
+  let diff = 0;
+  for (let i = 0; i < len; i++) {
+    const x = i < token.length ? token.charCodeAt(i) : 0;
+    const y = i < expected.length ? expected.charCodeAt(i) : 0;
+    diff |= x ^ y;
+  }
+  diff |= token.length ^ expected.length;
+  return diff === 0;
+}
+
 export async function canary(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
   const token = url.pathname.replace(/^\/c\//, "");
@@ -41,16 +57,9 @@ export async function canary(req: Request, env: Env): Promise<Response> {
 
   // Constant-time comparison (no early return on length mismatch)
   const expected = profile.decoy.endpointToken;
-  const len = Math.max(token.length, expected.length);
-  let diff = 0;
-  for (let i = 0; i < len; i++) {
-    const a = i < token.length ? token.charCodeAt(i) : 0;
-    const b = i < expected.length ? expected.charCodeAt(i) : 0;
-    diff |= a ^ b;
+  if (!constantTimeTokenEqual(token, expected)) {
+    return error("invalid token", 403);
   }
-  diff |= (token.length ^ expected.length);
-
-  if (diff !== 0) return error("invalid token", 403);
 
   // FIX: Store hashed tokens, not raw (FR-013)
   const expectedHash = await hashToken(expected);

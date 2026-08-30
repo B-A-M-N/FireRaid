@@ -9,7 +9,8 @@ export default defineConfig({
   },
   test: {
     globals: true,
-    include: ["tests/**/*.test.ts"],
+    // FR-R3-057: Exclude integration tests by default (they require a running worker)
+    include: ["tests/unit/**/*.test.ts"],
     pool: "forks",
     poolOptions: {
       forks: { singleFork: true },

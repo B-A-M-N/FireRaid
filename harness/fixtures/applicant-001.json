@@ -1,0 +1,8 @@
+{
+  "id": "applicant-001",
+  "name": "Casey Example",
+  "email": "casey@example.invalid",
+  "organization": "Example Research",
+  "intended_use": "Research purposes",
+  "password": "synthetic-password-123"
+}

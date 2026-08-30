@@ -1,7 +1,10 @@
 /**
- * E2E — normal visible user. Required gate: zero causal canary hits, zero accidental quarantine.
+ * E2E - normal visible user. Required gate: zero causal canary hits, zero accidental quarantine.
  * FIX: Now verifies actual API response (FR-002).
- * FIX: Injects fake Turnstile token for testing (test keys don't produce real tokens).
+ * FIX FR-R5-039: The Worker under test has no TURNSTILE_SECRET_KEY configured,
+ *   so the submit path skips Turnstile entirely. Removing the misleading
+ *   siteverify route mocks and the window.turnstileOnSuccess injection.
+ *   Submissions just fill and submit.
  */
 import { test, expect } from "@playwright/test";
 
@@ -30,19 +33,9 @@ test.describe("normal user", () => {
     await page.fill("#intended-use", FIXTURE.intended_use);
     await page.fill("#password", FIXTURE.password);
 
-    // Inject Turnstile token by executing JavaScript directly
-    await page.evaluate(() => {
-      // Set the turnstile token by calling the callback if it exists
-      if (typeof (window as any).turnstileOnSuccess === 'function') {
-        (window as any).turnstileOnSuccess("test-turnstile-token");
-      } else {
-        // If callback isn't ready, wait a bit and try again
-        console.warn("turnstileOnSuccess not ready");
-      }
-    });
-
-    // Wait for the submit button to be ready
-    await page.waitForSelector("#submit-btn");
+    // FIX FR-R5-039: No Turnstile mocking needed - the Worker has no site key,
+    // so the server-side submit path skips Turnstile validation entirely.
+    // The page has no Turnstile widget to intercept.
 
     // Set up response monitoring BEFORE clicking
     const responsePromise = page.waitForResponse(
@@ -51,7 +44,7 @@ test.describe("normal user", () => {
     );
 
     await page.click("#submit-btn");
-    
+
     const response = await responsePromise;
     expect(response.status()).toBe(200);
     const result = await response.json();
@@ -92,12 +85,7 @@ test.describe("keyboard-only user", () => {
     await page.keyboard.press("Tab");
     await page.keyboard.press("Tab");
 
-    // Inject Turnstile token
-    await page.evaluate(() => {
-      if (typeof (window as any).turnstileOnSuccess === 'function') {
-        (window as any).turnstileOnSuccess("test-turnstile-token");
-      }
-    });
+    // FIX FR-R5-039: No Turnstile mocking - server-side Turnstile is skipped.
 
     // Set up response monitoring BEFORE clicking
     const responsePromise = page.waitForResponse(
@@ -106,7 +94,7 @@ test.describe("keyboard-only user", () => {
     );
 
     await page.keyboard.press("Enter");
-    
+
     const response = await responsePromise;
     expect(response.status()).toBe(200);
     const result = await response.json();
@@ -140,12 +128,7 @@ test.describe("autofill-like user", () => {
       set("password", f.password);
     }, FIXTURE);
 
-    // Inject Turnstile token
-    await page.evaluate(() => {
-      if (typeof (window as any).turnstileOnSuccess === 'function') {
-        (window as any).turnstileOnSuccess("test-turnstile-token");
-      }
-    });
+    // FIX FR-R5-039: No Turnstile mocking - server-side Turnstile is skipped.
 
     // Set up response monitoring BEFORE clicking
     const responsePromise = page.waitForResponse(
@@ -154,7 +137,7 @@ test.describe("autofill-like user", () => {
     );
 
     await page.click("#submit-btn");
-    
+
     const response = await responsePromise;
     expect(response.status()).toBe(200);
     const result = await response.json();

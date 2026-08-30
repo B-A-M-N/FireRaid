@@ -1,6 +1,12 @@
 /**
  * Turnstile server-side verification (FR-INV: server authoritative).
- * FIX: Test mode uses structural validation without calling Cloudflare API.
+ * FIX: Single Siteverify path — no runtime mock/test-mode bypass.
+ *
+ * Namespace separation (FR-R3-004): Cloudflare's test credentials live in
+ * two DIFFERENT namespaces. Sitekeys (public, rendered client-side) are
+ * `1x00000000000000000000AA` (22 hex chars); secrets (server-side) are
+ * `1x0000000000000000000000000000000AA` (31 zeros + 2 hex). Conflating them
+ * is how test-mode sitekeys pass as secrets.
  */
 export interface TurnstileVerifyResult {
   ok: boolean;
@@ -20,23 +26,12 @@ export interface TurnstileVerifyRequest {
 const SITEVERIFY = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 /**
- * Verify a Turnstile token.
- * In test mode, validates structure without calling Cloudflare API.
- * In production, always uses real Siteverify API.
+ * Verify a Turnstile token. Always calls the real Siteverify API — there is
+ * no runtime test-mode path. Local/e2e environments run without
+ * TURNSTILE_SECRET_KEY, in which case the submit route skips Turnstile
+ * entirely (see routes/submit.ts).
  */
 export async function verifyTurnstile(
-  req: TurnstileVerifyRequest
-): Promise<TurnstileVerifyResult> {
-  // Test mode: validate structure without Cloudflare API call
-  if (TURNSTILE_TEST_MODE) {
-    return mockVerifyTurnstile(req);
-  }
-
-  // Production: real Cloudflare Siteverify
-  return realVerifyTurnstile(req);
-}
-
-async function realVerifyTurnstile(
   req: TurnstileVerifyRequest
 ): Promise<TurnstileVerifyResult> {
   const body = new URLSearchParams();
@@ -51,111 +46,79 @@ async function realVerifyTurnstile(
       body,
     });
     if (!resp.ok) {
-      return { ok: false, errorCodes:[`http_${resp.status}`] };
+      return { ok: false, errorCodes: [`http_${resp.status}`] };
     }
-    const json = (await resp.json()) as { success: boolean; hostname?: string; action?: string; "error-codes"?: string[] };
-    
+    const json = (await resp.json()) as {
+      success: boolean;
+      hostname?: string;
+      action?: string;
+      "error-codes"?: string[];
+    };
+
     // Validate action if expected
     if (req.expectedAction && json.success) {
       if (json.action !== req.expectedAction) {
         return { ok: false, errorCodes: ["wrong_action"] };
       }
     }
-    
+
     // Validate hostname if expected
     if (req.expectedHostname && json.success) {
       if (json.hostname !== req.expectedHostname) {
         return { ok: false, errorCodes: ["wrong_hostname"] };
       }
     }
-    
+
     return {
       ok: json.success === true,
       hostname: json.hostname,
       action: json.action,
       errorCodes: json["error-codes"],
     };
-  } catch (err) {
+  } catch {
     return { ok: false, errorCodes: ["fetch_error"] };
   }
 }
 
 /**
- * Mock verification for test mode.
- * Validates token structure without calling Cloudflare API.
- * 
- * Cloudflare test secrets behavior:
- * - always-pass: any non-empty token succeeds
- * - always-fail: any token fails
- * - duplicate: first call succeeds, subsequent fail
+ * Documented Cloudflare TEST SECRETS (server-side namespace, 31 zeros).
+ * Production config must reject these.
  */
-function mockVerifyTurnstile(
-  req: TurnstileVerifyRequest
-): TurnstileVerifyResult {
-  // Check for known test secrets
-  const isAlwaysPass = req.secret === "1x00000000000000000000000000000000AA";
-  const isAlwaysFail = req.secret === "1x00000000000000000000000000000000BB";
-  
-  // Validate token is non-empty
-  if (!req.token || req.token.length === 0) {
-    return { ok: false, errorCodes: ["missing_input_response"] };
-  }
-  
-  if (isAlwaysPass) {
-    // Always-pass secret: any non-empty token succeeds
-    return {
-      ok: true,
-      hostname: req.expectedHostname || "localhost",
-      action: req.expectedAction || "fireraid_signup",
-    };
-  }
-  
-  if (isAlwaysFail) {
-    return { ok: false, errorCodes: ["invalid_input_response"] };
-  }
-  
-  // For non-test secrets in test mode, validate token format
-  // Real tokens are ~200 chars, dummy test tokens are short
-  if (req.token.length < 10) {
-    return { ok: false, errorCodes: ["invalid_input_response"] };
-  }
-  
-  return {
-    ok: true,
-    hostname: req.expectedHostname || "localhost",
-    action: req.expectedAction || "fireraid_signup",
-  };
-}
-
-/**
- * Test mode flag.
- * Set via environment variable TURNSTILE_TEST_MODE=true
- */
-let TURNSTILE_TEST_MODE = false;
-
-export function setTurnstileTestMode(enabled: boolean): void {
-  TURNSTILE_TEST_MODE = enabled;
-}
-
-export function isTestMode(): boolean {
-  return TURNSTILE_TEST_MODE;
-}
-
-/**
- * Initialize test mode from environment.
- * Call this during Worker startup.
- */
-export function initTestMode(env: { TURNSTILE_TEST_MODE?: string }): void {
-  TURNSTILE_TEST_MODE = env.TURNSTILE_TEST_MODE === "true";
-}
-
-/** Known Cloudflare test secrets — production config must reject these. */
 export const KNOWN_TEST_SECRETS = new Set([
-  "1x00000000000000000000000000000000AA", // always passes
-  "1x00000000000000000000000000000000BB", // always fails
-  "1x00000000000000000000000000000000CC", // token already spent
+  "1x0000000000000000000000000000000AA", // always passes
+  "2x0000000000000000000000000000000AA", // always fails
+  "3x0000000000000000000000000000000AA", // token already spent
 ]);
 
+/**
+ * Documented Cloudflare TEST SITEKEYS (client-side namespace, 20 zeros).
+ * Used by client widgets; never valid as server secrets.
+ */
+export const KNOWN_TEST_SITEKEYS = new Set([
+  "1x00000000000000000000AA", // always passes
+  "2x00000000000000000000AA", // always fails (invisible)
+  "3x00000000000000000000AA", // forced interactive
+]);
+
+const TEST_SECRET_PATTERN = /^[123]x0{31}[A-Fa-f]{2}$/;
+// Documented sitekey form: 20 zeros + 2 hex (len 24). Legacy docs also used
+// 22 zeros + AA (len 26) — matched for defense-in-depth.
+const TEST_SITEKEY_PATTERN = /^[123]x0{20}[A-Fa-f]{2}$|^[123]x0{22}[A-Fa-f]{2}$/;
+
+/** Detects a Cloudflare test secret (server-side namespace). */
+export function looksLikeTestSecret(secret: string): boolean {
+  return KNOWN_TEST_SECRETS.has(secret) || TEST_SECRET_PATTERN.test(secret);
+}
+
+/** Detects a Cloudflare test sitekey (client-side namespace). */
+export function looksLikeTestSiteKey(sitekey: string): boolean {
+  return KNOWN_TEST_SITEKEYS.has(sitekey) || TEST_SITEKEY_PATTERN.test(sitekey);
+}
+
+/**
+ * Back-compat alias for the secret check (pre-R3 callers).
+ * Namespace-correct: only matches SECRETS, never sitekeys.
+ */
 export function looksLikeTestKey(secret: string): boolean {
-  return KNOWN_TEST_SECRETS.has(secret) || /^1x0{30}[A-Fa-f]{2}$/.test(secret);
+  return looksLikeTestSecret(secret);
 }

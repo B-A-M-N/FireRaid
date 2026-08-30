@@ -2,107 +2,626 @@
  * Experiment runner — executes declarative experiment manifests.
  * FR-INV-009: experiments must be reproducible.
  * FR-INV-010: measured results must not be confused with sample numbers.
+ * FIX: Full orchestration with manifest validation, matrix expansion, adapter loading (FR-R3-027).
+ * FIX: Server reconciliation via lab correlation API.
+ * FR-R4-028/032/033: real server correlation (lab runs).
+ * FR-R4-041/042: scenario.maxSteps = manifest.max_steps; modelConfig mapping.
+ * FR-R4-081: git provenance in every record.
+ * FR-R4-082: dirty-repo gate.
+ * FR-R4-083: per-adapter version from ADAPTER_CAPABILITIES.
+ * FR-R4-085: real resume with per-key status tracking.
+ * FR-R4-086: fail closed on missing non-default fixture.
  */
-import { randomUUID } from "node:crypto";
-import { writeFileSync, mkdirSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
-
-export interface ExperimentManifest {
-  id: string;
-  target: { url: string };
-  agents: string[];
-  models: string[];
-  prompts: string[];
-  extractors?: string[];
-  profile_version: number;
-  repetitions: number;
-  timeout_ms: number;
-  fixture: string;
-  seed: string;
-}
-
-export interface RunRecord {
-  schema_version: number;
-  run_id: string;
-  experiment_id: string;
-  agent: string;
-  model: string;
-  prompt: string;
-  extractor: string;
-  profile_version: number;
-  profile_id: string;
-  outcome: string;
-  submitted: boolean;
-  canary_exposed: boolean;
-  canary_referenced: boolean;
-  canary_triggered: boolean;
-  score: number;
-  disposition: string;
-  elapsed_ms: number;
-  action_count: number;
-  error_code: string | null;
-  artifact_path: string | null;
-}
+import { createHash } from "node:crypto";
+import {
+  validateManifest,
+  expandManifest,
+  Recorder,
+  generateRunId,
+  ADAPTER_CAPABILITIES,
+  type ExperimentManifest,
+  type RunRecordV1,
+  type AgentType,
+  type AgentAdapter,
+  type LabRunContext,
+} from "./index.js";
+import { RawDomAdapter } from "../adapters/raw-dom.js";
+import { HumanControlAdapter } from "../adapters/human-control.js";
+import { PlaywrightMcpAdapter } from "../adapters/playwright-mcp/playwright-mcp.js";
 
 const RESULTS_DIR = join(process.cwd(), "harness", "results");
 
-export function loadManifest(path: string): ExperimentManifest {
-  const raw = readFileSync(path, "utf-8");
-  // Simple YAML-ish parse (assume JSON for now)
-  return JSON.parse(raw) as ExperimentManifest;
+/**
+ * Resume state for a single experiment — per-key status tracking (FR-R4-085).
+ */
+interface ResumeState {
+  experiment_id: string;
+  manifest_hash: string;
+  trials_total: number;
+  trials_completed: number;
+  trials: Array<{
+    key: string; // "${agent}:${model}:${prompt}:${extractor ?? "-"}:${repetition}"
+    status: "COMPLETE" | "ERROR" | "TIMEOUT";
+  }>;
+  completed_at?: string;
 }
 
-export function listRuns(experimentId: string): RunRecord[] {
-  const dir = join(RESULTS_DIR, experimentId);
-  if (!existsSync(dir)) return [];
-  const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
-  return files.map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as RunRecord);
+/**
+ * Adapter registry — maps agent type to factory.
+ * FR-R4-085: stable trial key = "${manifest.id}:${agent}:${model}:${prompt}:${extractor ?? "-"}:${repetition}".
+ */
+function createAdapter(agent: AgentType, extractor?: string): AgentAdapter {
+  switch (agent) {
+    case "human":
+      return new HumanControlAdapter();
+    case "raw-dom":
+      return new RawDomAdapter((extractor as "raw-html" | "simplified-dom") || "raw-html");
+    case "playwright-mcp":
+      return new PlaywrightMcpAdapter();
+    default:
+      throw new Error(`No adapter registered for agent: ${agent}`);
+  }
 }
 
-export function saveRun(experimentId: string, run: RunRecord): void {
-  const dir = join(RESULTS_DIR, experimentId);
-  mkdirSync(dir, { recursive: true });
-  const path = join(dir, `${run.run_id}.json`);
-  writeFileSync(path, JSON.stringify(run, null, 2));
+/**
+ * Stable trial key for resume (FR-R4-085).
+ */
+function trialKey(manifestId: string, trial: {
+  agent: AgentType;
+  model: string;
+  prompt: string;
+  extractor?: string;
+  repetition: number;
+}): string {
+  return `${manifestId}:${trial.agent}:${trial.model}:${trial.prompt}:${trial.extractor ?? "-"}:${trial.repetition}`;
 }
 
-export function generateRunId(): string {
-  return `run-${randomUUID().slice(0, 8)}`;
+/**
+ * Git provenance helpers (FR-R4-081).
+ */
+function getGitSha(): string | undefined {
+  try {
+    return execSync("git rev-parse HEAD").toString().trim();
+  } catch {
+    return undefined;
+  }
 }
 
-export function computeMetrics(runs: RunRecord[]): {
-  attempts: number;
-  valid: number;
-  submitted: number;
-  stopped: number;
-  handoff: number;
-  canary_triggered: number;
-  quarantined: number;
-  review: number;
-  median_elapsed: number;
-  error_rate: number;
-} {
-  const valid = runs.filter((r) => !r.error_code);
-  const submitted = valid.filter((r) => r.outcome === "submitted");
-  const stopped = valid.filter((r) => r.outcome === "stopped");
-  const handoff = valid.filter((r) => r.outcome === "handoff");
-  const triggered = valid.filter((r) => r.canary_triggered);
-  const quarantined = valid.filter((r) => r.disposition === "QUARANTINE");
-  const review = valid.filter((r) => r.disposition === "REVIEW");
+function isGitDirty(): boolean | undefined {
+  try {
+    const output = execSync("git status --porcelain").toString();
+    return output.length > 0;
+  } catch {
+    return undefined;
+  }
+}
 
-  const elapsed = valid.map((r) => r.elapsed_ms).sort((a, b) => a - b);
-  const median = elapsed.length > 0 ? elapsed[Math.floor(elapsed.length / 2)] : 0;
+/**
+ * Create a lab run on the server and return { runId, bindToken }.
+ * FR-R4-028/033: server-generated run_id used instead of generateRunId().
+ */
+async function createLabRun(targetUrl: string, manifest: ExperimentManifest): Promise<{ runId: string; bindToken: string }> {
+  const secret = process.env.FIRERAID_LAB_API_SECRET;
+  if (!secret) throw new Error("FIRERAID_LAB_API_SECRET not set for lab mode");
 
-  return {
-    attempts: runs.length,
-    valid: valid.length,
-    submitted: submitted.length,
-    stopped: stopped.length,
-    handoff: handoff.length,
-    canary_triggered: triggered.length,
-    quarantined: quarantined.length,
-    review: review.length,
-    median_elapsed: median,
-    error_rate: runs.length > 0 ? (runs.length - valid.length) / runs.length : 0,
+  const resp = await fetch(`${targetUrl}/api/lab/runs`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${secret}`,
+    },
+    body: JSON.stringify({
+      experiment_id: manifest.id,
+      // FR-R5-015: only include recipe when the manifest names one — a null
+      // recipe is rejected by the lab API's create validation.
+      ...(manifest.recipe ? { recipe: manifest.recipe } : {}),
+    }),
+  });
+
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Lab run creation failed: ${resp.status} ${body}`);
+  }
+
+  const data = (await resp.json()) as { run_id: string; bind_token: string };
+  if (!data.run_id || !data.bind_token) {
+    throw new Error("Lab run response missing run_id or bind_token");
+  }
+
+  return { runId: data.run_id, bindToken: data.bind_token };
+}
+
+/**
+ * Read server truth for a lab run.
+ * FR-R4-033: GET with bearer auth. FR-R5-004: the run reaches status
+ * "COMPLETE" only after the explicit outcome POST (below) — never via an
+ * implicit auto-reconcile. A run still BOUND/PENDING yields its live truth
+ * but reports outcome: null so the record stays server_reconciled: false.
+ */
+async function fetchServerTruth(
+  targetUrl: string,
+  runId: string,
+  labSecret: string
+): Promise<Partial<RunRecordV1> | null> {
+  try {
+    const resp = await fetch(`${targetUrl}/api/lab/runs/${runId}`, {
+      headers: {
+        authorization: `Bearer ${labSecret}`,
+      },
+    });
+
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as {
+      status?: string;
+      session_id?: string;
+      submitted?: boolean;
+      disposition?: string;
+      score?: number;
+      profile_id?: string;
+      profile_version?: number;
+      profile_variant_id?: string;
+      defense_families?: string[];
+      semantic_template?: string | null;
+      placement?: string | null;
+      canary_issued?: boolean;
+      canary_exposed?: boolean;
+      canary_verified_server?: boolean;
+      outcome?: string | null;
+    };
+
+    // Server truth is only authoritative once the outcome has been recorded.
+    if (data.status === "COMPLETE" && data.outcome) {
+      return {
+        session_id: data.session_id,
+        submitted: data.submitted ?? false,
+        disposition: data.disposition as "ACCEPT" | "REVIEW" | "QUARANTINE" | undefined,
+        score: data.score,
+        profile_id: data.profile_id ?? "unknown",
+        profile_version: data.profile_version,
+        profile_variant_id: data.profile_variant_id,
+        defense_families: data.defense_families ?? [],
+        semantic_template: data.semantic_template ?? undefined,
+        placement: data.placement ?? undefined,
+        canary_issued: data.canary_issued ?? undefined,
+        canary_exposed: data.canary_exposed ?? false,
+        canary_verified_server: data.canary_verified_server ?? false,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * FR-R5-006: report the terminal outcome to the lab API. Transitions
+ * BOUND → COMPLETE server-side. Best-effort — a rejected outcome (e.g. run
+ * already terminal) is logged, never thrown; reconciliation below will
+ * reflect whatever state the server actually reached.
+ */
+async function postLabRunOutcome(
+  targetUrl: string,
+  runId: string,
+  labSecret: string,
+  outcome: RunRecordV1["outcome"],
+  errorCode?: string | null
+): Promise<void> {
+  try {
+    const resp = await fetch(`${targetUrl}/api/lab/runs/${runId}/outcome`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${labSecret}`,
+      },
+      body: JSON.stringify({
+        outcome,
+        ...(errorCode ? { error_code: errorCode } : {}),
+      }),
+    });
+    if (!resp.ok) {
+      console.warn(`Lab outcome POST failed for ${runId}: ${resp.status}`);
+    }
+  } catch (err) {
+    console.warn(`Lab outcome POST error for ${runId}:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * Execute a single trial.
+ * FR-R4-028/032/033: lab-mode server reconciliation.
+ * FR-R4-041/042: scenario maxSteps and modelConfig from manifest.
+ * FR-R4-083: adapter version from capabilities.
+ */
+async function executeTrial(
+  manifest: ExperimentManifest,
+  trial: ReturnType<typeof expandManifest>[number],
+  recorder: Recorder,
+  manifestHash: string,
+): Promise<RunRecordV1> {
+  const labSecret = process.env.FIRERAID_LAB_API_SECRET;
+  const labTarget = labSecret ? manifest.target.url : null;
+
+  const startedAt = Date.now();
+  const adapterCaps = ADAPTER_CAPABILITIES[trial.agent];
+
+  // Determine run_id: server-generated in lab mode, fallback to local
+  let runId: string;
+  let labRunContext: LabRunContext | undefined;
+  let labMode = false;
+
+  if (labTarget) {
+    try {
+      const lab = await createLabRun(labTarget, manifest);
+      runId = lab.runId;
+      labRunContext = { runId: lab.runId, bindToken: lab.bindToken };
+      labMode = true;
+    } catch {
+      // FR-R5-021: lab creation failure must fail the trial — do NOT fall back.
+      // Build an error record and return it immediately (fail-closed).
+      const errorRecord: RunRecordV1 = {
+        schema_version: 1,
+        run_id: generateRunId(),
+        experiment_id: manifest.id,
+        trial_index: trial.index,
+        repetition: trial.repetition,
+        agent: trial.agent,
+        model: trial.model,
+        prompt_variant: trial.prompt,
+        extractor: trial.extractor,
+        profile_version: manifest.profile_version,
+        profile_id: "pending-reconciliation",
+        defense_families: [],
+        server_reconciled: false,
+        submitted: false,
+        canary_exposed: false,
+        canary_referenced: false,
+        canary_requested_client: false,
+        canary_verified_server: false,
+        outcome: "error",
+        action_count: 0,
+        elapsed_ms: 0,
+        error_code: "LAB_RUN_CREATION_FAILED",
+        node_version: process.version,
+        adapter_version: adapterCaps.version,
+        fireraid_git_sha: getGitSha(),
+        fireraid_dirty: isGitDirty(),
+        manifest_hash: manifestHash,
+        started_at: startedAt,
+        completed_at: Date.now(),
+      };
+      recorder.record(errorRecord);
+      return errorRecord;
+    }
+  } else {
+    runId = generateRunId();
+  }
+
+  const scenario = {
+    targetUrl: manifest.target.url,
+    fixture: loadFixture(manifest.fixture),
+    promptVariant: trial.prompt,
+    model: trial.model,
+    maxSteps: manifest.max_steps,
+    timeoutMs: manifest.timeout_ms,
+    modelConfig: {
+      temperature: manifest.model_config.temperature,
+      maxTokens: manifest.model_config.max_tokens,
+    },
+    labRun: labRunContext,
   };
+
+  const adapter = createAdapter(trial.agent, trial.extractor);
+
+  // Run the adapter
+  const result = await adapter.run(scenario);
+
+  const completedAt = Date.now();
+
+  // Build initial record (agent-side observations)
+  let record: RunRecordV1 = {
+    schema_version: 1,
+    run_id: runId,
+    experiment_id: manifest.id,
+    trial_index: trial.index,
+    repetition: trial.repetition,
+    agent: trial.agent,
+    model: trial.model,
+    prompt_variant: trial.prompt,
+    extractor: trial.extractor,
+    profile_version: manifest.profile_version,
+    profile_id: "pending-reconciliation",
+    defense_families: [],
+    session_id: result.sessionCookie,
+    submitted: result.outcome === "submitted",
+    canary_exposed: false,
+    canary_referenced: result.canaryReferenced ?? false,
+    canary_requested_client: result.canaryTriggered ?? false,
+    canary_verified_server: false,
+    server_reconciled: false,
+    outcome: result.outcome,
+    action_count: result.actionCount,
+    elapsed_ms: result.elapsedMs,
+    error_code: result.errorCode ?? null,
+    node_version: process.version,
+    adapter_version: adapterCaps.version,
+    temperature: manifest.model_config.temperature,
+    max_tokens: manifest.model_config.max_tokens,
+    fireraid_git_sha: getGitSha(),
+    fireraid_dirty: isGitDirty(),
+    manifest_hash: manifestHash, // computed once in runExperiment from raw manifest
+    lab_mode: labMode,
+    started_at: startedAt,
+    completed_at: completedAt,
+  };
+
+  // Reconcile with server truth (FR-R4-028/032/033, FR-R5-006).
+  // The session↔run association happened server-side during the bind-aware
+  // /signup navigation (signup.ts consumes ?lab_run=&bind=) — the runner does
+  // NOT re-POST /associate here (the bind token is single-use; a second call
+  // is the FR-R5-006 double-bind bug). The runner only: reports the terminal
+  // outcome, then reads authoritative truth.
+  if (labTarget && labRunContext && labSecret) {
+    try {
+      // FR-R5-006: terminal outcome POST — BOUND → COMPLETE
+      await postLabRunOutcome(labTarget, runId, labSecret, record.outcome, record.error_code);
+
+      // Fetch authoritative server truth
+      const serverTruth = await fetchServerTruth(labTarget, runId, labSecret);
+
+      if (serverTruth) {
+        record = { ...record, ...serverTruth, server_reconciled: true };
+      } else {
+        record.server_reconciled = false;
+        record.error_code = record.error_code ?? "SERVER_RECONCILIATION_FAILED";
+      }
+    } catch {
+      record.server_reconciled = false;
+      record.error_code = record.error_code ?? "SERVER_RECONCILIATION_FAILED";
+    }
+  }
+
+  recorder.record(record);
+  return record;
+}
+
+/**
+ * Load fixture by name.
+ * FR-R4-086: fail closed if non-default fixture is missing.
+ */
+function loadFixture(name: string): Record<string, string> {
+  const fixturePath = join(process.cwd(), "harness", "fixtures", `${name}.json`);
+  if (existsSync(fixturePath)) {
+    return JSON.parse(readFileSync(fixturePath, "utf-8"));
+  }
+
+  // FR-R4-086: only "default" falls back to built-in
+  if (name === "default") {
+    return {
+      name: "Casey Example",
+      email: "casey@example.invalid",
+      organization: "Example Research",
+      intended_use: "Research purposes",
+      password: "synthetic-password-123",
+    };
+  }
+
+  throw new Error(`Fixture not found: ${name} (tried harness/fixtures/${name}.json)`);
+}
+
+/**
+ * Deterministic shuffle using experiment seed (FR-R3-090).
+ * Fisher-Yates with seeded PRNG.
+ */
+function shuffleWithSeed<T>(array: T[], seed: string): T[] {
+  // Simple seeded hash function
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    const char = seed.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+
+  // Seeded PRNG (mulberry32)
+  let state = hash >>> 0;
+  function random(): number {
+    state = (state + 0x6D2B79F5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // Fisher-Yates shuffle
+  const shuffled = [...array];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
+/**
+ * Write resume state with actual trial statuses (FR-R4-085).
+ */
+function writeResumeState(resumePath: string, state: ResumeState): void {
+  writeFileSync(resumePath, JSON.stringify(state, null, 2));
+}
+
+/**
+ * Run a complete experiment from a manifest.
+ * FR-R4-082: dirty-repo gate.
+ * FR-R4-085: real resume with per-key status.
+ */
+export async function runExperiment(manifestPath: string): Promise<void> {
+  // Load and validate manifest
+  const raw = JSON.parse(readFileSync(manifestPath, "utf-8"));
+  const result = validateManifest(raw);
+
+  if (!result.ok) {
+    console.error("Invalid manifest:");
+    for (const err of result.errors) {
+      console.error(`  - ${err}`);
+    }
+    process.exit(1);
+  }
+
+  const manifest = result.data;
+  console.log(`Experiment: ${manifest.name} (${manifest.id})`);
+  console.log(`Agents: ${manifest.agents.join(", ")}`);
+  console.log(`Models: ${manifest.models.join(", ")}`);
+  console.log(`Prompts: ${manifest.prompts.join(", ")}`);
+  console.log(`Repetitions: ${manifest.repetitions}`);
+  console.log(`Seed: ${manifest.seed}`);
+
+  // Compute manifest hash for provenance
+  // FR-R5-012: full 64-char SHA-256; JSON.stringify(raw) is canonical for now,
+  // key-sort canonicalization is future work.
+  const manifestHash = createHash("sha256").update(JSON.stringify(raw)).digest("hex");
+  console.log(`Manifest hash: ${manifestHash}`);
+
+  // FR-R4-082: dirty-repo gate
+  const dirty = isGitDirty();
+  if (dirty === true && process.env.FIRERAID_ALLOW_DIRTY !== "1") {
+    console.error("ERROR: Repository has uncommitted changes. Set FIRERAID_ALLOW_DIRTY=1 to override.");
+    process.exit(1);
+  }
+
+  // Expand into trials and shuffle deterministically (FR-R3-090)
+  const trials = shuffleWithSeed(expandManifest(manifest), manifest.seed);
+  console.log(`Total trials: ${trials.length}`);
+
+  // FR-R4-085: Check for existing resume state with stable per-key tracking
+  const resumePath = join(RESULTS_DIR, manifest.id, "resume.json");
+  const completedKeys = new Map<string, "COMPLETE" | "ERROR" | "TIMEOUT">();
+
+  if (existsSync(resumePath)) {
+    try {
+      const resume = JSON.parse(readFileSync(resumePath, "utf-8")) as ResumeState;
+      if (resume.manifest_hash === manifestHash) {
+        for (const t of resume.trials || []) {
+          completedKeys.set(t.key, t.status);
+        }
+        const doneCount = [...completedKeys.values()].filter((s) => s === "COMPLETE").length;
+        console.log(`Resuming: ${doneCount} trials already completed, ${completedKeys.size} total tracked`);
+      }
+    } catch {
+      // Ignore corrupt resume
+    }
+  }
+
+  const recorder = new Recorder(manifest.id);
+
+  // Execute trials sequentially
+  // (per-trial status is tracked in resumeTrials; no separate counter needed)
+  const resumeTrials: ResumeState["trials"] = [];
+
+  for (let i = 0; i < trials.length; i++) {
+    const trial = trials[i];
+    const key = trialKey(manifest.id, trial);
+
+    const existingStatus = completedKeys.get(key);
+
+    // FR-R4-085: SKIP COMPLETE, retry ERROR/TIMEOUT only if retry_failed
+    if (existingStatus === "COMPLETE") {
+      console.log(
+        `\n[${i + 1}/${trials.length}] SKIP ${trial.agent} / ${trial.model} / ${trial.prompt} (already completed)`
+      );
+      // Still add to resume state for final write
+      resumeTrials.push({ key, status: "COMPLETE" });
+      continue;
+    }
+
+    if (existingStatus) {
+      if (!manifest.retry_failed) {
+        console.log(
+          `\n[${i + 1}/${trials.length}] SKIP ${trial.agent} / ${trial.model} / ${trial.prompt} (${existingStatus}, retry_failed=false)`
+        );
+        resumeTrials.push({ key, status: existingStatus });
+        continue;
+      }
+      console.log(
+        `\n[${i + 1}/${trials.length}] RETRY ${trial.agent} / ${trial.model} / ${trial.prompt} (was ${existingStatus}, retrying)`
+      );
+    } else {
+      console.log(
+        `\n[${i + 1}/${trials.length}] ${trial.agent} / ${trial.model} / ${trial.prompt} (rep ${trial.repetition})`
+      );
+    }
+
+    try {
+      const record = await executeTrial(manifest, trial, recorder, manifestHash);
+      console.log(
+        `  Result: ${record.outcome} in ${record.elapsed_ms}ms (${record.action_count} actions)`
+      );
+      if (record.submitted) {
+        console.log(`  Disposition: ${record.disposition} | Score: ${record.score}`);
+      }
+
+      // Determine status from the record
+      const status: "COMPLETE" | "ERROR" | "TIMEOUT" =
+        record.error_code === "TIMEOUT" || record.outcome === "timeout"
+          ? "TIMEOUT"
+          : record.outcome === "error"
+            ? "ERROR"
+            : "COMPLETE";
+
+      resumeTrials.push({ key, status });
+
+      // Write incremental resume after each trial (FR-R4-085)
+      const partialState: ResumeState = {
+        experiment_id: manifest.id,
+        manifest_hash: manifestHash,
+        trials_total: trials.length,
+        trials_completed: resumeTrials.filter((t) => t.status === "COMPLETE").length,
+        trials: resumeTrials,
+      };
+      writeResumeState(resumePath, partialState);
+    } catch (err) {
+      console.error(`  FAILED: ${err instanceof Error ? err.message : String(err)}`);
+
+      // Record failure in resume even if the trial threw
+      resumeTrials.push({ key, status: "ERROR" });
+    }
+  }
+
+  // Save final resume state with actual statuses (FR-R4-085)
+  const finalState: ResumeState = {
+    experiment_id: manifest.id,
+    manifest_hash: manifestHash,
+    trials_total: trials.length,
+    trials_completed: resumeTrials.filter((t) => t.status === "COMPLETE").length,
+    trials: resumeTrials,
+    completed_at: new Date().toISOString(),
+  };
+  writeResumeState(resumePath, finalState);
+
+  // Print summary
+  const runs = Recorder.loadExperiment(manifest.id);
+  const metrics = Recorder.computeMetrics(runs);
+
+  console.log(`\n=== Summary ===`);
+  console.log(`Attempts: ${metrics.attempts}`);
+  console.log(`Valid: ${metrics.valid}`);
+  console.log(`Submitted: ${metrics.submitted}`);
+  console.log(`Stopped: ${metrics.stopped}`);
+  console.log(`Handoff: ${metrics.handoff}`);
+  console.log(`Quarantined: ${metrics.quarantined}`);
+  console.log(`Review: ${metrics.review}`);
+  console.log(`Canary verified: ${metrics.canary_verified}`);
+  console.log(`Median elapsed: ${metrics.median_elapsed}ms`);
+  console.log(`Error rate: ${(metrics.error_rate * 100).toFixed(1)}%`);
+  console.log(`Authoritative effectiveness metrics: npm run analyze -- ${manifest.id}`);
+}
+
+// CLI entry
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const manifestPath = process.argv[2];
+  if (!manifestPath) {
+    console.error("Usage: tsx harness/core/runner.ts <manifest.json>");
+    process.exit(1);
+  }
+  runExperiment(manifestPath);
 }

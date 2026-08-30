@@ -126,11 +126,12 @@ describe("catalog", () => {
     expect(issues).toEqual([]);
   });
 
-  it("P06 is lab-only and not production-eligible", () => {
+  it("P06 is production-eligible and AX-invariant (FR-R2-017/019)", () => {
     const p06 = PLACEMENTS.find((p) => p.id === "P06");
     expect(p06).toBeDefined();
-    expect(p06!.productionEligible).toBe(false);
-    expect(p06!.accessibilitySafe).toBe(false);
+    expect(p06!.productionEligible).toBe(true);
+    expect(p06!.axInvariant).toBe(true);
+    expect(p06!.visuallyInvariant).toBe(true);
   });
 });
 

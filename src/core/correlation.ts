@@ -171,3 +171,49 @@ export async function correlate(
 
   return evidence;
 }
+
+/**
+ * Correlate harness annotations (agent-reported, never server-verified) into
+ * evidence separate from server observations (FR-R2-024). Annotations are
+ * always verified:false — they are the harness's word, not server truth.
+ * FR-R2-023: input is not mutated.
+ */
+export function correlateHarnessAnnotations(
+  profile: DefenseProfile,
+  annotations: HarnessAnnotations
+): Evidence[] {
+  const evidence: Evidence[] = [];
+
+  if (annotations.agentStopped) {
+    evidence.push({
+      id: crypto.randomUUID(),
+      class: "B",
+      weight: 40,
+      source: "AGENT_STOPPED",
+      verified: false,
+    });
+  }
+
+  if (annotations.agentHandoff) {
+    evidence.push({
+      id: crypto.randomUUID(),
+      class: "B",
+      weight: 40,
+      source: "AGENT_HANDOFF",
+      verified: false,
+    });
+  }
+
+  if (annotations.canaryReferenced && profile.semantic) {
+    evidence.push({
+      id: crypto.randomUUID(),
+      class: "B",
+      weight: 20,
+      source: "CANARY_GENERIC_REFERENCE",
+      verified: false,
+      metadata: { templateId: profile.semantic.templateId },
+    });
+  }
+
+  return evidence;
+}

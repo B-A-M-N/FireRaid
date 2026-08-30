@@ -24,9 +24,59 @@
     }
   ],
 
+  // FR-R4-076: top-level defaults to dev semantics; a bare `wrangler deploy`
+  // publishes this. Only named environments are intended for real deploys.
   "vars": {
     "PROFILE_VERSION": "1",
     "LAB_MODE": "true"
+  },
+
+  "env": {
+    "dev": {
+      "vars": {
+        "PROFILE_VERSION": "1",
+        "LAB_MODE": "true"
+      }
+    },
+    // FR-R5-039: test bootstrap (-e test) — loads .dev.vars.test, which has
+    // NO Turnstile credentials, so the submit path skips Turnstile entirely.
+    // NOTE: named environments do NOT inherit top-level bindings — d1/assets
+    // must be restated here (same binding names).
+    "test": {
+      "assets": {
+        "directory": "./public",
+        "binding": "ASSETS",
+        "run_worker_first": [
+          "/signup",
+          "/api/*",
+          "/c/*",
+          "/admin*"
+        ]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "fireraid",
+          "database_id": "REPLACE_AFTER_CREATE"
+        }
+      ],
+      "vars": {
+        "PROFILE_VERSION": "1",
+        "LAB_MODE": "true"
+      }
+    },
+    "public-lab": {
+      "vars": {
+        "PROFILE_VERSION": "1",
+        "LAB_MODE": "true"
+      }
+    },
+    "production": {
+      "vars": {
+        "PROFILE_VERSION": "1",
+        "LAB_MODE": "false"
+      }
+    }
   },
 
   "observability": {

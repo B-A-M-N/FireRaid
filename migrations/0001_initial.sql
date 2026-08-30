@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
     profile_version INTEGER NOT NULL,
+    profile_key_id TEXT,
     profile_id TEXT NOT NULL,
     profile_hash TEXT NOT NULL,
     experiment_id TEXT,

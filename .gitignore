@@ -9,3 +9,5 @@ harness/results/**/*.json
 playwright-report/
 test-results/
 *.log
+.dev.vars.*
+__pycache__/

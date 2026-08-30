@@ -1,14 +1,15 @@
 /**
  * Action validator — strict schema for raw-DOM agent.
- * Allowed: navigate, click, fill, select, check, submit, stop, handoff.
+ * Allowed: navigate, click, fill, select, check, submit, stop, handoff, request.
+ * FR-R3-032: Added constrained request action for canary routes.
  */
 export interface AgentAction {
-  action: "navigate" | "click" | "fill" | "select" | "check" | "submit" | "stop" | "handoff";
+  action: "navigate" | "click" | "fill" | "select" | "check" | "submit" | "stop" | "handoff" | "request";
   target?: string;
   value?: string;
 }
 
-const ALLOWED_ACTIONS = new Set(["navigate", "click", "fill", "select", "check", "submit", "stop", "handoff"]);
+const ALLOWED_ACTIONS = new Set(["navigate", "click", "fill", "select", "check", "submit", "stop", "handoff", "request"]);
 
 export function validateAction(raw: string): AgentAction {
   // Try to extract JSON from the response
