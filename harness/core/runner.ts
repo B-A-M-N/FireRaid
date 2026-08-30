@@ -170,7 +170,9 @@ function browserProvenance(): { name?: string; version?: string } {
       browserProvenanceCache = null; // not resolvable — omit, never fabricate
     }
   }
-  return browserProvenanceCache ?? {};
+  return browserProvenanceCache
+    ? { browser_name: browserProvenanceCache.name, browser_version: browserProvenanceCache.version }
+    : {};
 }
 
 /** Which adapters launch a browser through THIS harness's Playwright install. */
