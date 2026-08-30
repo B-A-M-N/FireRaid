@@ -12,7 +12,7 @@
  * FR-R4-085: real resume with per-key status tracking.
  * FR-R4-086: fail closed on missing non-default fixture.
  */
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -80,15 +80,24 @@ function createAdapter(agent: AgentType, extractor?: string): AgentAdapter {
  * FIRERAID_LLM_MODEL is configured at pilot time" — resolved ONCE per
  * process so a pilot uses one model consistently, and the resolved id is
  * what every RunRecord records (exact provenance, never the placeholder).
- * Unknown sentinel with no env configured → thrown, never silently run.
+ *
+ * FR-R4-039 boundary: a model-AGNOSTIC agent (usesModel=false — human,
+ * raw-http) never consumes the model dimension, so its model column is
+ * bookkeeping, not provenance — the sentinel resolves to "none" there
+ * rather than failing the trial. A model-CONSUMING agent (usesModel=true)
+ * with an unresolvable sentinel is a hard error: an LLM trial must never
+ * record a fabricated model id.
  */
-function resolveModelId(model: string): string {
+function resolveModelId(model: string, usesModel: boolean): string {
   if (model === "FIRERAID_LLM_MODEL") {
     const resolved = process.env.FIRERAID_LLM_MODEL;
     if (!resolved) {
-      throw new Error(
-        "manifest model FIRERAID_LLM_MODEL but FIRERAID_LLM_MODEL env is unset — refusing to record a fabricated model id"
-      );
+      if (usesModel) {
+        throw new Error(
+          "manifest model FIRERAID_LLM_MODEL but FIRERAID_LLM_MODEL env is unset — refusing to record a fabricated model id"
+        );
+      }
+      return "none"; // model-agnostic agent: dimension not consumed
     }
     return resolved;
   }
@@ -294,7 +303,7 @@ async function executeTrial(
 
   // FR-POST-R6-P5: resolve the manifest's model entry to the concrete id
   // before ANY record can be built — the placeholder never reaches a record.
-  const modelId = resolveModelId(trial.model);
+  const modelId = resolveModelId(trial.model, adapterCaps.usesModel);
 
   // Determine run_id: server-generated in lab mode, fallback to local
   let runId: string;
@@ -574,8 +583,12 @@ function shuffleWithSeed<T>(array: T[], seed: string): T[] {
 
 /**
  * Write resume state with actual trial statuses (FR-R4-085).
+ * FR-POST-R6-P6: ensure the experiment directory exists — a pilot whose
+ * EVERY trial failed before the first record (e.g. unresolvable models)
+ * otherwise crashes on the final write instead of reporting cleanly.
  */
 function writeResumeState(resumePath: string, state: ResumeState): void {
+  mkdirSync(join(resumePath, ".."), { recursive: true });
   writeFileSync(resumePath, JSON.stringify(state, null, 2));
 }
 
