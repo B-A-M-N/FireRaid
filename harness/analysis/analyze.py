@@ -32,8 +32,15 @@ def load_runs(experiment_id: str) -> list:
         return []
     runs = []
     for f in sorted(dir_path.glob("*.json")):
+        # FR-POST-R6-P7: resume.json (and any other non-RunRecord bookkeeping
+        # file) lives alongside run records — a record has schema_version.
+        # Loading bookkeeping as data produced phantom NO_RECIPE groups.
+        if f.name == "resume.json":
+            continue
         with open(f) as fh:
-            runs.append(json.load(fh))
+            data = json.load(fh)
+        if isinstance(data, dict) and "schema_version" in data:
+            runs.append(data)
     return runs
 
 
