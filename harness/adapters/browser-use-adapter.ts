@@ -31,6 +31,14 @@ interface PythonResult {
   errorCode?: string | null;
   perceptionArtifacts?: AgentRunResult["perceptionArtifacts"];
   sessionCookie?: string | null;
+  /** FR-POST-R6-P8: worker runtime provenance (python/BU/Playwright/browser). */
+  provenance?: {
+    pythonVersion?: string | null;
+    browserUseVersion?: string | null;
+    playwrightVersion?: string | null;
+    browserName?: string | null;
+    browserVersion?: string | null;
+  };
 }
 
 /** Spawn browser-use.py with the scenario on stdin; parse the result line. */
@@ -158,6 +166,16 @@ export class BrowserUseAdapter implements AgentAdapter {
       canaryGenericReferenced: Boolean(py.canaryGenericReferenced),
       perceptionArtifacts: py.perceptionArtifacts,
       errorCode: py.errorCode ?? undefined,
+      // FR-POST-R6-P8: pass worker runtime provenance through verbatim —
+      // surfaced into the transcript below (AgentRunResult has no separate
+      // provenance channel; the runner serializes transcripts).
+      ...(py.provenance
+        ? {
+            transcript:
+              (py.transcript ?? "") +
+              `\n[PROVENANCE] ${JSON.stringify(py.provenance)}`,
+          }
+        : {}),
     };
   }
 }

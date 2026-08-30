@@ -41,6 +41,7 @@ Requirements:
 import asyncio
 import hashlib
 import json
+import platform
 import sys
 import time
 
@@ -266,6 +267,38 @@ async def run_scenario(scenario: dict) -> dict:
     except Exception:
         pass
 
+    # FR-POST-R6-P8: real provenance from the worker's own runtime —
+    # python/browser-use/Playwright versions and the browser binary the
+    # worker actually drove. Never fabricated: unresolvable -> omitted.
+    provenance = {
+        "pythonVersion": platform.python_version(),
+        "browserUseVersion": None,
+        "playwrightVersion": None,
+        "browserName": None,
+        "browserVersion": None,
+    }
+    try:
+        from importlib.metadata import version as _pkg_version
+        provenance["browserUseVersion"] = _pkg_version("browser-use")
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version as _pkg_version
+        provenance["playwrightVersion"] = _pkg_version("playwright")
+    except Exception:
+        pass
+    try:
+        binfo = browser_session.browser_agent  # browser-use Agent's browser
+    except Exception:
+        binfo = None
+    try:
+        if binfo is not None:
+            b = await binfo.get_browser()
+            provenance["browserName"] = b.browser_name
+            provenance["browserVersion"] = b.browser_version
+    except Exception:
+        pass
+
     return {
         "outcome": outcome,
         "actionCount": len(transcript),  # steps in transcript ≈ actions taken
@@ -277,6 +310,7 @@ async def run_scenario(scenario: dict) -> dict:
         "errorCode": None,
         "perceptionArtifacts": perception,
         "sessionCookie": session_cookie,
+        "provenance": provenance,
     }
 
 

@@ -13,8 +13,11 @@
  * FR-R4-086: fail closed on missing non-default fixture.
  */
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { join } from "node:path";
+// Imported lazily-resolved at top level so browserProvenance can use it
+// without a forbidden require(): the import itself must not launch anything.
+import * as playwrightCore from "playwright-core";
 import { createHash } from "node:crypto";
 import {
   validateManifest,
@@ -135,6 +138,44 @@ function isGitDirty(): boolean | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * FR-POST-R6-P8: real browser provenance. The schema declares
+ * browser_name/browser_version but nothing captured them — records carried
+ * null while every Playwright-based adapter (human, raw-dom, ax-snapshot)
+ * actually launches Chromium. Resolve the versions ONCE per process from
+ * the installed Playwright browser (never fabricated: absent registry →
+ * undefined, and the record omits it). Scripted agents (raw-http, and
+ * browser-use which runs its own python-managed browser) intentionally
+ * leave these unset — their browser provenance is recorded elsewhere.
+ */
+let browserProvenanceCache: { name: string; version: string } | null | undefined;
+function browserProvenance(): { name?: string; version?: string } {
+  if (browserProvenanceCache === undefined) {
+    try {
+      const { chromium } = playwrightCore as typeof import("playwright-core");
+      const path = chromium.executablePath();
+      const out = execFileSync(path, ["--version"], {
+        encoding: "utf-8",
+        timeout: 10000,
+      });
+      // Browser builds report e.g. "Chromium 143.0.5716.0" or
+      // "Google Chrome for Testing 151.0.7922.34" — split name/version.
+      const m = out.trim().match(/^(.*?[A-Za-z])\s+([\d.]+.*)$/);
+      browserProvenanceCache = m
+        ? { name: m[1], version: m[2] }
+        : { name: "unknown", version: out.trim() };
+    } catch {
+      browserProvenanceCache = null; // not resolvable — omit, never fabricate
+    }
+  }
+  return browserProvenanceCache ?? {};
+}
+
+/** Which adapters launch a browser through THIS harness's Playwright install. */
+function usesPlaywrightBrowser(agent: AgentType): boolean {
+  return agent === "human" || agent === "raw-dom" || agent === "ax-snapshot";
 }
 
 /**
@@ -430,6 +471,10 @@ async function executeTrial(
     adapter_version: adapterCaps.version,
     temperature: manifest.model_config.temperature,
     max_tokens: manifest.model_config.max_tokens,
+    // FR-POST-R6-P8: real browser provenance for Playwright-based adapters;
+    // scripted (raw-http) and python-worker (browser-use) agents stay unset
+    // — their execution engine is not this Chromium.
+    ...(usesPlaywrightBrowser(trial.agent) ? browserProvenance() : {}),
     fireraid_git_sha: getGitSha(),
     fireraid_dirty: isGitDirty(),
     manifest_hash: manifestHash, // computed once in runExperiment from raw manifest
@@ -624,10 +669,21 @@ export async function runExperiment(manifestPath: string): Promise<void> {
   console.log(`Repetitions: ${manifest.repetitions}`);
   console.log(`Seed: ${manifest.seed}`);
 
-  // Compute manifest hash for provenance
-  // FR-R5-012: full 64-char SHA-256; JSON.stringify(raw) is canonical for now,
-  // key-sort canonicalization is future work.
-  const manifestHash = createHash("sha256").update(JSON.stringify(raw)).digest("hex");
+  // Compute manifest hash for provenance.
+  // FR-POST-R6-P8: CANONICAL key-sorted serialization (closes FR-R5-012's
+  // noted future work) — two key orderings of the same manifest now hash
+  // identically, so the hash identifies manifest CONTENT, not file layout.
+  const canonicalJson = (v: unknown): string => {
+    if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+    if (v !== null && typeof v === "object") {
+      const entries = Object.entries(v as Record<string, unknown>)
+        .filter(([, val]) => val !== undefined)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+      return `{${entries.map(([k, val]) => `${JSON.stringify(k)}:${canonicalJson(val)}`).join(",")}}`;
+    }
+    return JSON.stringify(v);
+  };
+  const manifestHash = createHash("sha256").update(canonicalJson(raw)).digest("hex");
   console.log(`Manifest hash: ${manifestHash}`);
 
   // FR-R4-082: dirty-repo gate
