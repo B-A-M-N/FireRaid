@@ -217,6 +217,7 @@ async function fetchServerTruth(
       profile_id?: string;
       profile_version?: number;
       profile_variant_id?: string;
+      recipe_id?: string | null;
       defense_families?: string[];
       semantic_template?: string | null;
       placement?: string | null;
@@ -236,6 +237,11 @@ async function fetchServerTruth(
         profile_id: data.profile_id ?? "unknown",
         profile_version: data.profile_version,
         profile_variant_id: data.profile_variant_id,
+        // FR-POST-R6-P6: recipe_id is part of SERVER truth — the run row's
+        // immutable condition label must land in the record (the pilot
+        // invariant check reads it from the record, and the analyzer's
+        // FR-R5-049 baseline rule groups on it).
+        recipe_id: data.recipe_id ?? undefined,
         defense_families: data.defense_families ?? [],
         semantic_template: data.semantic_template ?? undefined,
         placement: data.placement ?? undefined,
