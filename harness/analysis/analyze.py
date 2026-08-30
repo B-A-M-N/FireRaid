@@ -44,6 +44,59 @@ def load_runs(experiment_id: str) -> list:
     return runs
 
 
+def exposure_view(r: dict) -> tuple:
+    """
+    Derive (exposure_state, perception_surface) from a RunRecord.
+
+    Tolerant of both v1 and v2 record schemas — acts as a migration
+    heuristic while the v2 rollout is in progress.
+
+    v2 (preferred when present):
+      r["exposure_state"]     ∈ {"EXPOSED", "NOT_EXPOSED", "UNMEASURED"}
+      r["perception_surface"] ∈ surface literals or null
+
+    v1 fallback (heuristic mapping):
+      agent == "human"                     → ("UNMEASURED",  None)
+      agent == "raw-http"                  → ("EXPOSED"/"NOT_EXPOSED" based on
+                                               canary_exposed, "transport-html")
+      agent == other (model/agent)         → canary_exposed True  → (
+                                               "EXPOSED", surface-from-extractor)
+                                                 raw-html       → "raw-html-model-input"
+                                                 simplified-dom → "simplified-dom-model-input"
+                                                 accessibility  → "accessibility-model-input"
+                                                 unknown        → "raw-html-model-input"
+                                             canary_exposed False → ("UNMEASURED", None)
+    """
+    # v2 fields preferred when present.
+    es = r.get("exposure_state")
+    ps = r.get("perception_surface")
+    if es is not None:
+        return (es, ps if ps else None)
+
+    # v1 heuristic fallback.
+    agent = r.get("agent", "")
+    canary_exposed = r.get("canary_exposed") is True
+
+    if agent == "human":
+        return ("UNMEASURED", None)
+
+    if agent == "raw-http":
+        return ("EXPOSED" if canary_exposed else "NOT_EXPOSED", "transport-html")
+
+    # Other agents: canary_exposed drives state.
+    if canary_exposed:
+        extractor = (r.get("extractor") or "").lower()
+        surface_map = {
+            "raw-html": "raw-html-model-input",
+            "simplified-dom": "simplified-dom-model-input",
+            "accessibility": "accessibility-model-input",
+        }
+        surface = surface_map.get(extractor, "raw-html-model-input")
+        return ("EXPOSED", surface)
+
+    return ("UNMEASURED", None)
+
+
 def is_baseline(r: dict) -> bool:
     """
     FR-R5-049 baseline detection rule:
@@ -422,9 +475,11 @@ def print_report(experiment_id: str):
             rates = compute_rates(rs, len(rs))
             if "quarantine_rate" not in rates:
                 continue
+            # Causal canary hit = server-verified (canary_verified_server
+            # is True), not merely quarantined by disposition.
             causal = sum(
                 1 for r in rs
-                if r.get("disposition") == "QUARANTINE"
+                if r.get("canary_verified_server") is True
             )
             print(
                 f"{variant:<25} {rates['n_valid']:>10} "
@@ -451,6 +506,44 @@ def print_report(experiment_id: str):
                 f"  {slice_name:<23} {rates['n_attempted']:>8} {rates['n_valid']:>8} "
                 f"{sub[0]*100:>6.1f}% {quar[0]*100:>9.1f}%"
             )
+
+    # --- Exposure breakdown by perception surface (FR-R7-004) ---
+    print(f"\n{'='*60}")
+    print("Exposure breakdown by perception surface (FR-R7-004)")
+    print(f"{'='*60}")
+    # Tally (state, surface) pairs across all runs.
+    exposure_counts = defaultdict(int)
+    for r in runs:
+        try:
+            state, surface = exposure_view(r)
+        except Exception:
+            continue
+        exposure_counts[(state, surface)] += 1
+
+    # Print: rows = perception_surface (null for UNMEASURED/no-surface).
+    print(f"{'Surface':<35} {'EXPOSED':>10} {'NOT_EXPOSED':>12} {'UNMEASURED':>12}")
+    print("-" * 65)
+
+    # Collect unique surfaces, keeping null last.
+    surfaces = sorted(
+        {s for _, s in exposure_counts.keys() if s is not None}
+    )
+    # Row for null surface (UNMEASURED with no perception surface).
+    for surf in surfaces + [None]:
+        exposed = exposure_counts.get(("EXPOSED", surf), 0)
+        not_exposed = exposure_counts.get(("NOT_EXPOSED", surf), 0)
+        unmeasured = exposure_counts.get(("UNMEASURED", surf), 0)
+        # Only print the row if at least one count is non-zero.
+        if exposed + not_exposed + unmeasured == 0:
+            continue
+        label = surf if surf is not None else "(null)"
+        print(f"  {label:<35} {exposed:>10} {not_exposed:>12} {unmeasured:>12}")
+
+    # Overall exposure summary.
+    total_exposed = sum(c for (st, _), c in exposure_counts.items() if st == "EXPOSED")
+    total_not_exposed = sum(c for (st, _), c in exposure_counts.items() if st == "NOT_EXPOSED")
+    total_unmeasured = sum(c for (st, _), c in exposure_counts.items() if st == "UNMEASURED")
+    print(f"  {'TOTAL':<35} {total_exposed:>10} {total_not_exposed:>12} {total_unmeasured:>12}")
 
     # --- Overall (all runs combined) ---
     overall = compute_rates(runs, len(runs))

@@ -54,6 +54,8 @@ export const ScenarioSchema = z.object({
   timeoutMs: z.number().int().positive(),
   modelConfig: z.object({ temperature: z.number().min(0).max(2).optional(), maxTokens: z.number().int().positive().optional() }).optional(),
   labRun: z.object({ runId: z.string(), bindToken: z.string() }).optional(),
+  /** FR-R7-006: false-positive trial variant (human agent only). */
+  controlVariant: z.enum(["normal", "keyboard", "autofill"]).optional(),
 });
 export type Scenario = z.infer<typeof ScenarioSchema>;
 
@@ -91,6 +93,18 @@ export interface AgentRunResult {
     content: string;
     hash: string;
   }>;
+  /** FR-R7-028/029 provenance — adapters fill what they know, never the API key. */
+  llmProvenance?: {
+    providerOrigin?: string;
+    modelRequested?: string;
+    modelServed?: string;
+    temperature?: number;
+    maxTokens?: number;
+  };
+  pythonVersion?: string;
+  browserUseVersion?: string;
+  browserEngine?: string;
+  browserEngineVersion?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +199,153 @@ export const RunRecordV1Schema = z.object({
 export type RunRecordV1 = z.infer<typeof RunRecordV1Schema>;
 
 // ---------------------------------------------------------------------------
+// RunRecordV2 — tri-state exposure + perception surface + provenance
+// ---------------------------------------------------------------------------
+/**
+ * Schema v2 replaces the binary canary_exposed with a three-state enum.
+ *
+ * exposure_state:
+ *   EXPOSED   — a perception artifact existed AND contained the exact session
+ *               treatment material.
+ *   NOT_EXPOSED — a perception artifact existed and demonstrably lacked it.
+ *   UNMEASURED — no perception artifact was captured (e.g. human trials).
+ *                This is NOT the same as measured-not-exposed.
+ *
+ * perception_surface: where exposure was measured.  null exactly when
+ *   exposure_state is UNMEASURED (no artifact to measure against).
+ *
+ * control_variant: human-agent false-positive trial configuration (FR-R7-006).
+ *   "normal" = bare browser, "keyboard" = manual typing, "autofill" =
+ *   form-autofilled fields.  Only applies to the "human" agent.
+ *
+ * Provenance fields (all optional): adapters fill in whatever they know;
+ *   none of these include the API key itself.
+ *
+ * Note: `canary_exposed` is retained from v1 as a derived boolean projection
+ * (true iff exposure_state === "EXPOSED").
+ */
+export const RunRecordV2Schema = RunRecordV1Schema.extend({
+  schema_version: z.literal(2),
+  exposure_state: z.enum(["EXPOSED", "NOT_EXPOSED", "UNMEASURED"]),
+  perception_surface: z.enum([
+    "human-visual",
+    "transport-html",
+    "raw-html-model-input",
+    "simplified-dom-model-input",
+    "accessibility-model-input",
+    "browser-use-observation",
+  ]).nullable(),
+  control_variant: z.enum(["normal", "keyboard", "autofill"]).nullish(),
+  llm_provider_origin: z.string().optional(),
+  llm_model_requested: z.string().optional(),
+  llm_model_served: z.string().optional(),
+  python_version: z.string().optional(),
+  browser_use_version: z.string().optional(),
+  browser_engine: z.string().optional(),
+  browser_engine_version: z.string().optional(),
+});
+export type RunRecordV2 = z.infer<typeof RunRecordV2Schema>;
+
+// ---------------------------------------------------------------------------
+// v1 → v2 migration normalizer (heuristic — not a re-measurement)
+// ---------------------------------------------------------------------------
+/**
+ * Migrate a v1 RunRecord to v2.
+ *
+ * Mapping rules:
+ *   agent "human"
+ *     → exposure_state "UNMEASURED", perception_surface null
+ *       (the old canary_exposed boolean was never a measurement).
+ *   agent "raw-http"
+ *     → perception_surface "transport-html" (transport artifact always exists,
+ *       so the old boolean was a real transport measurement):
+ *       canary_exposed true → "EXPOSED", false → "NOT_EXPOSED".
+ *   other agents (raw-dom, ax-snapshot, browser-use)
+ *     → canary_exposed true → "EXPOSED" with surface from the record's
+ *       extractor:
+ *         "raw-html"       → "raw-html-model-input"
+ *         "simplified-dom" → "simplified-dom-model-input"
+ *         "accessibility"  → "accessibility-model-input"
+ *         missing/unknown  → "raw-html-model-input"
+ *       canary_exposed false → "UNMEASURED" + null
+ *       (v1 cannot distinguish artifact-present-negative from artifact-absent).
+ *
+ * All other v1 fields pass through unchanged.  control_variant and provenance
+ * fields are set to undefined.  schema_version is set to 2.
+ */
+export function normalizeV1ToV2(v1: RunRecordV1): RunRecordV2 {
+  const agent = v1.agent;
+  let exposureState: RunRecordV2["exposure_state"];
+  let perceptionSurface: RunRecordV2["perception_surface"];
+
+  if (agent === "human") {
+    exposureState = "UNMEASURED";
+    perceptionSurface = null;
+  } else if (agent === "raw-http") {
+    perceptionSurface = "transport-html";
+    exposureState = v1.canary_exposed ? "EXPOSED" : "NOT_EXPOSED";
+  } else {
+    // raw-dom, ax-snapshot, browser-use — other agents
+    const extractor = v1.extractor;
+    if (v1.canary_exposed) {
+      exposureState = "EXPOSED";
+      switch (extractor) {
+        case "raw-html":
+          perceptionSurface = "raw-html-model-input";
+          break;
+        case "simplified-dom":
+          perceptionSurface = "simplified-dom-model-input";
+          break;
+        case "accessibility":
+          perceptionSurface = "accessibility-model-input";
+          break;
+        default:
+          perceptionSurface = "raw-html-model-input";
+      }
+    } else {
+      exposureState = "UNMEASURED";
+      perceptionSurface = null;
+    }
+  }
+
+  return {
+    ...v1,
+    schema_version: 2,
+    exposure_state: exposureState,
+    perception_surface: perceptionSurface,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Universal parser — tries v2 first, falls back to v1 + normalize
+// ---------------------------------------------------------------------------
+
+export type ParseRunRecordResult =
+  | { ok: true; record: RunRecordV2 }
+  | { ok: false; errors: string[] };
+
+export function parseRunRecord(raw: unknown): ParseRunRecordResult {
+  const v2Result = RunRecordV2Schema.safeParse(raw);
+  if (v2Result.success) {
+    return { ok: true, record: v2Result.data };
+  }
+
+  const v1Result = RunRecordV1Schema.safeParse(raw);
+  if (v1Result.success) {
+    return { ok: true, record: normalizeV1ToV2(v1Result.data) };
+  }
+
+  // Both failed — merge errors
+  const v2Errors = v2Result.error.issues.map(
+    (i) => `v2: ${i.path.join(".")} ${i.message}`
+  );
+  const v1Errors = v1Result.error.issues.map(
+    (i) => `v1: ${i.path.join(".")} ${i.message}`
+  );
+  return { ok: false, errors: [...v2Errors, ...v1Errors] };
+}
+
+// ---------------------------------------------------------------------------
 // ExperimentManifest — validated with Zod (FR-R3-093)
 // ---------------------------------------------------------------------------
 
@@ -228,6 +389,12 @@ export const ExperimentManifestSchema = z.object({
   recipe_id: RecipeIdSchema.optional(),
   turnstile_required: z.boolean().optional(),
   holdout_mode: z.boolean().default(false),
+
+  // FR-R7-006: human-agent false-positive trial variants — legitimate-user
+  // runs under defended profiles; applies to the "human" agent only.
+  control_variants: z
+    .array(z.enum(["normal", "keyboard", "autofill"]))
+    .default(["normal"]),
 });
 export type ExperimentManifest = z.infer<typeof ExperimentManifestSchema>;
 
@@ -243,6 +410,8 @@ export interface TrialDescriptor {
   extractor?: ExtractorType;
   /** FR-R6-008: named condition for server-side provenance (recipe_id). */
   recipeId?: string;
+  /** FR-R7-006: false-positive trial variant for the human agent. */
+  controlVariant?: "normal" | "keyboard" | "autofill";
 }
 
 // ---------------------------------------------------------------------------
@@ -358,17 +527,23 @@ export function expandManifest(manifest: ExperimentManifest): TrialDescriptor[] 
       for (const model of models) {
         for (const prompt of prompts) {
           for (const extractor of effectiveExtractors) {
-            trials.push({
-              index,
-              repetition: rep,
-              agent,
-              model,
-              prompt,
-              extractor,
-              // FR-R6-008: named treatment identity for provenance.
-              recipeId: manifest.recipe_id,
-            });
-            index++;
+            // FR-R7-006: human agent expands across control variants
+            const controlVariants =
+              agent === "human" ? manifest.control_variants : [undefined];
+            for (const cv of controlVariants) {
+              trials.push({
+                index,
+                repetition: rep,
+                agent,
+                model,
+                prompt,
+                extractor,
+                // FR-R6-008: named treatment identity for provenance.
+                recipeId: manifest.recipe_id,
+                controlVariant: cv,
+              });
+              index++;
+            }
           }
         }
       }

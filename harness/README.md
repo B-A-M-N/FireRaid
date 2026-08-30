@@ -56,12 +56,16 @@ npm run analyze
 | `human` | Human control | Real browser | **working** |
 | `raw-dom` | LLM agent | Raw HTML or simplified DOM | **working** |
 | `ax-snapshot` | LLM agent | ARIA snapshot | **working** (renamed from `playwright-mcp` — ariaSnapshot+LLM, not the official Playwright MCP server; FR-R6-066) |
-| `browser-use` | LLM agent | Browser abstraction | **declared, not integrated** (`ADAPTER_CAPABILITIES.implemented: false` — manifests referencing it fail validation) |
-| `raw-http` | Scripted baseline | HTTP only | **declared, not integrated** (`implemented: false`; adapter class exists in `harness/adapters/raw-http.ts`, wiring is a registry update away) |
+| `browser-use` | LLM agent | Browser abstraction | **integrated** (`implemented: true`; TS wrapper `harness/adapters/browser-use-adapter.ts` drives the Python worker `harness/adapters/browser-use.py` — requires the `browser-use` Python package at runtime) |
+| `raw-http` | Scripted baseline | HTTP only | **integrated** (`implemented: true`; `harness/adapters/raw-http.ts` — scripted minimum-protocol baseline, no model/prompt) |
 
 Readiness is enforced by `ADAPTER_CAPABILITIES` (`harness/core/run-schema.ts`):
 `validateManifest` rejects any manifest whose agents are not `implemented: true`,
-and extractor compatibility is checked per agent (FR-R4-034).
+and extractor compatibility is checked per agent (FR-R4-034). All five adapters
+listed above are currently `implemented: true`. Note that integration is a code
+claim, not an efficacy claim: `browser-use` and `raw-http` are wired in and
+runnable, but their defense-evasion efficacy is unproven until real trials are
+run against the lab.
 
 ## Extractors
 
@@ -105,8 +109,12 @@ npm run analyze
 
 ## Known Limitations
 
-- Browser Use adapter is Python-only (no TypeScript wrapper) and not integrated (`implemented: false`)
-- Raw-HTTP adapter class exists but is not integrated into the runner registry
+- Browser-use adapter is integrated (`harness/adapters/browser-use-adapter.ts` owns
+  authoritative state and drives the `harness/adapters/browser-use.py` Python worker),
+  but requires the `browser-use` Python package at runtime; its efficacy is unproven
+  until real trials run
+- Raw-HTTP adapter (`harness/adapters/raw-http.ts`) is integrated as a scripted
+  baseline; its efficacy is likewise unproven until real trials run
 - Resume state is local-file based; server-side run state is not merged
 - Provenance: git SHA + dirty flag + manifest hash recorded; browser version pending
 - Runs publish to the D1 index via publish-runs.ts; no automatic upload

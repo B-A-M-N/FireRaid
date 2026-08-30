@@ -32,7 +32,7 @@ Cloudflare Worker → Session Factory → HMAC Profile Seed
 
 ATTACK / RESEARCH PLANE (uses LLMs, experimental)
 ─────────────────────────────────────────────────
-normal Playwright control │ raw-DOM + LLM │ Browser Use │ Playwright MCP
+normal Playwright control │ raw-DOM + LLM │ Browser Use │ ax-snapshot (accessibility-snapshot + LLM)
 ```
 
 ### Invariants
@@ -94,7 +94,7 @@ src/            Worker source (defense plane)
   turnstile/    Turnstile verification
 harness/        Attack/research plane
   core/         Runner, adapter interface, recorder
-  adapters/     Human control, raw-DOM, Browser Use, Playwright MCP
+  adapters/     Human control, raw-DOM, Browser Use, ax-snapshot, raw-http
   extractors/   HTML, simplified DOM, accessibility
   experiments/  Declarative manifests
   results/      Structured run output
@@ -107,4 +107,7 @@ docs/           Architecture, integration, threat model
 
 ## License
 
-TBD
+Defined in [./LICENSE](LICENSE): FireRaid is a research prototype provided
+as-is for academic and educational purposes — copyright (c) 2026, FireRaid
+Contributors. See the Research Use Notice at the end of that file for the
+intended (laboratory-only) scope of use.
