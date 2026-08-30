@@ -151,7 +151,7 @@ function isGitDirty(): boolean | undefined {
  * leave these unset — their browser provenance is recorded elsewhere.
  */
 let browserProvenanceCache: { name: string; version: string } | null | undefined;
-function browserProvenance(): { name?: string; version?: string } {
+function browserProvenance(): { browser_name?: string; browser_version?: string } {
   if (browserProvenanceCache === undefined) {
     try {
       const { chromium } = playwrightCore as typeof import("playwright-core");
