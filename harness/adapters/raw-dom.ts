@@ -27,6 +27,31 @@ import type {
 import type { Page } from "@playwright/test";
 import { PROMPT_VARIANTS, resolvePrompt } from "./prompts.js";
 import { buildElementRefs, selectorFor } from "./raw-dom-refs.js";
+import { signupUrl } from "../core/urls.js";
+
+// ---------------------------------------------------------------------------
+// Origin pinning (FR-R6-056)
+// ---------------------------------------------------------------------------
+
+/**
+ * Default navigation policy: same-origin only. The harness studies admission
+ * defenses on the target origin; an agent that talks the LLM into navigating
+ * to attacker.example must not turn a defense experiment into an outbound
+ * traffic experiment. A manifest may explicitly allow cross-origin testing.
+ */
+function isNavigationAllowed(actionTarget: string, scenario: Scenario): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(actionTarget, `${scenario.targetUrl}/`);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  // Scenario-level escape hatch (wire through manifest later if ever needed).
+  const allowCrossOrigin = (scenario as Scenario & { allowCrossOrigin?: boolean }).allowCrossOrigin === true;
+  if (allowCrossOrigin) return true;
+  return parsed.origin === new URL(scenario.targetUrl).origin;
+}
 
 // ---------------------------------------------------------------------------
 // Perception artifact helper
@@ -57,12 +82,22 @@ function finish(
 
 // ---------------------------------------------------------------------------
 // Canary session-material detection (FR-R4-046)
+// FR-R6-055: EXACT vs GENERIC reference are distinct outcomes. Only exact
+// session material (the issued nonce or the issued route token) sets
+// canaryReferenced — a generic "/c/" mention is canaryGenericReferenced and
+// never feeds the exact-reference metric.
 // ---------------------------------------------------------------------------
+
+interface CanaryReferenceResult {
+  canaryReferenced: boolean;
+  canaryGenericReferenced: boolean;
+  canaryNote: string;
+}
 
 async function detectCanaryReferenced(
   raw: string,
   page: Page
-): Promise<{ canaryReferenced: boolean; canaryNote: string }> {
+): Promise<CanaryReferenceResult> {
   // After goto, extract canary nonce from page
   let canaryNonce: string | null = null;
   try {
@@ -82,18 +117,20 @@ async function detectCanaryReferenced(
     // Content extraction may fail
   }
 
-  // Primary check: session-specific material referenced in output
+  // Exact check: session-specific material referenced in output
   if ((canaryNonce && raw.includes(canaryNonce)) || (canaryRoute && raw.includes(canaryRoute))) {
-    return { canaryReferenced: true, canaryNote: "session-material" };
+    return { canaryReferenced: true, canaryGenericReferenced: false, canaryNote: "session-material" };
   }
 
-  // Raw-HTML fallback: if neither was found, check for /c/ URL-shaped path
+  // FR-R6-055: generic "/c/" shape WITHOUT exact material — a distinct,
+  // weaker signal that must not be conflated with an exact reference.
   if (raw.includes("/c/")) {
-    return { canaryReferenced: true, canaryNote: "generic" };
+    return { canaryReferenced: false, canaryGenericReferenced: true, canaryNote: "generic" };
   }
 
   return {
     canaryReferenced: false,
+    canaryGenericReferenced: false,
     canaryNote: canaryNonce ?? canaryRoute ?? "none",
   };
 }
@@ -116,6 +153,7 @@ export class RawDomAdapter implements AgentAdapter {
     const steps: Array<{ action: AgentAction; observation: string; step: number }> = [];
     let canaryTriggered = false;
     let canaryReferenced = false;
+    let canaryGenericReferenced = false;
     let transcript = "";
     let sessionCookie: string | undefined;
     const perception: PerceptionArtifact[] = [];
@@ -157,7 +195,10 @@ export class RawDomAdapter implements AgentAdapter {
         if (req.url().includes("/c/")) canaryTriggered = true;
       });
 
-      await page.goto(`${scenario.targetUrl}/signup`, { waitUntil: "networkidle" });
+      // FR-R6-005: every adapter resolves its entry URL through signupUrl() —
+      // the lab-run bind params (?lab_run=&bind=) reach the LLM attacker too,
+      // so raw-dom trials actually test their assigned treatment.
+      await page.goto(signupUrl(scenario), { waitUntil: "networkidle" });
 
       for (let step = 0; step < scenario.maxSteps; step++) {
         if (Date.now() - start > scenario.timeoutMs) {
@@ -170,6 +211,7 @@ export class RawDomAdapter implements AgentAdapter {
               sessionCookie,
               canaryTriggered,
               canaryReferenced,
+            canaryGenericReferenced,
             },
             perception
           );
@@ -206,11 +248,15 @@ export class RawDomAdapter implements AgentAdapter {
         // FR-R4-037: prepend prompt SHA to transcript for provenance
         const promptSha = sha256(systemPrompt);
         transcript += `\n[PROMPT_SHA256] ${promptSha}\n`;
-        // FR-R4-046: record canary detection note
+        // FR-R4-046: record canary detection note (FR-R6-055: exact vs
+        // generic tracked separately).
         const canaryNote = await detectCanaryReferenced(transcript, page);
         transcript += `\n[CANARY_REF] session-material:${canaryNote.canaryNote}\n`;
         if (canaryNote.canaryReferenced) {
           canaryReferenced = true;
+        }
+        if (canaryNote.canaryGenericReferenced) {
+          canaryGenericReferenced = true;
         }
 
         // FR-R4-045: Update system prompt to document ref usage
@@ -231,10 +277,15 @@ export class RawDomAdapter implements AgentAdapter {
           transcript += `\n--- Step ${step + 1} ---\n${raw}\n`;
 
           // FR-R4-046: Canary detection uses session-specific material
+          // (FR-R6-055: generic mentions tracked separately from exact).
           const canaryResult = await detectCanaryReferenced(raw, page);
           if (canaryResult.canaryReferenced) {
             canaryReferenced = true;
             transcript += `\n[CANARY_REF] session-material:${canaryResult.canaryNote}\n`;
+          }
+          if (canaryResult.canaryGenericReferenced) {
+            canaryGenericReferenced = true;
+            transcript += `\n[CANARY_REF_GENERIC] ${canaryResult.canaryNote}\n`;
           }
 
           action = validateAction(raw);
@@ -248,6 +299,7 @@ export class RawDomAdapter implements AgentAdapter {
               sessionCookie,
               canaryTriggered,
               canaryReferenced,
+            canaryGenericReferenced,
               errorCode: "llm_error",
             },
             perception
@@ -269,23 +321,11 @@ export class RawDomAdapter implements AgentAdapter {
               break;
             // FR-R4-044: Implemented navigate/select/check actions
             case "navigate": {
-              // Only allow http(s) URLs (FR-R4-044)
-              if (action.target) {
-                let parsed: URL;
-                try {
-                  parsed = new URL(action.target);
-                } catch {
-                  // Not a valid absolute URL — try as relative to targetUrl
-                  try {
-                    parsed = new URL(action.target, `${scenario.targetUrl}/`);
-                  } catch {
-                    // Invalid URL — skip
-                    break;
-                  }
-                }
-                if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-                  await page.goto(parsed.href);
-                }
+              // FR-R6-056: http(s) AND same-origin (unless the scenario
+              // explicitly allows cross-origin testing).
+              if (action.target && isNavigationAllowed(action.target, scenario)) {
+                const parsed = new URL(action.target, `${scenario.targetUrl}/`);
+                await page.goto(parsed.href);
               }
               break;
             }
@@ -331,6 +371,7 @@ export class RawDomAdapter implements AgentAdapter {
                   sessionCookie,
                   canaryTriggered,
                   canaryReferenced,
+            canaryGenericReferenced,
                 },
                 perception
               );
@@ -345,6 +386,7 @@ export class RawDomAdapter implements AgentAdapter {
                   sessionCookie,
                   canaryTriggered,
                   canaryReferenced,
+            canaryGenericReferenced,
                 },
                 perception
               );
@@ -358,6 +400,7 @@ export class RawDomAdapter implements AgentAdapter {
                   sessionCookie,
                   canaryTriggered,
                   canaryReferenced,
+            canaryGenericReferenced,
                 },
                 perception
               );
@@ -378,6 +421,7 @@ export class RawDomAdapter implements AgentAdapter {
           sessionCookie,
           canaryTriggered,
           canaryReferenced,
+            canaryGenericReferenced,
         },
         perception
       );
@@ -391,6 +435,7 @@ export class RawDomAdapter implements AgentAdapter {
           sessionCookie,
           canaryTriggered,
           canaryReferenced,
+            canaryGenericReferenced,
           errorCode: "browser_error",
         },
         perception

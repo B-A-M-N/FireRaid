@@ -59,6 +59,14 @@ export interface SemanticTemplate {
   requiresDecoyField: boolean;
   /** Research partition (FR-R5-034): development tunes, holdout never tunes. */
   partition: "development" | "holdout";
+  /**
+   * FR-R6-041: what the template probes. "semantic" templates are wording
+   * variants eligible for semantic holdout sampling; "metadata" templates
+   * (S09) are hidden DOM markers — they carry holdout partition (never tuned)
+   * but are NOT semantic-holdout participants and are excluded from holdout
+   * random selection.
+   */
+  probeClass: "semantic" | "metadata";
   /** Render the canary markup given runtime substitutions. */
   render(ctx: {
     nonce: string;
@@ -83,6 +91,7 @@ export const SEMANTIC_TEMPLATES: readonly SemanticTemplate[] = [
     requiresRoute: false,
     requiresDecoyField: false,
     partition: "development",
+    probeClass: "semantic",
     render: ({ nonce }) =>
       `<p data-fr-canary="S01" class="fr-canary">` +
       `<strong>Automation Test Marker.</strong> ` +
@@ -98,6 +107,7 @@ export const SEMANTIC_TEMPLATES: readonly SemanticTemplate[] = [
     requiresRoute: false,
     requiresDecoyField: false,
     partition: "development",
+    probeClass: "semantic",
     render: ({ nonce }) =>
       `<p data-fr-canary="S02" class="fr-canary">` +
       `<strong>Human confirmation required.</strong> ` +
@@ -113,6 +123,7 @@ export const SEMANTIC_TEMPLATES: readonly SemanticTemplate[] = [
     requiresRoute: false,
     requiresDecoyField: false,
     partition: "development",
+    probeClass: "semantic",
     render: ({ nonce }) =>
       `<p data-fr-canary="S03" class="fr-canary">` +
       `<strong>Do not submit.</strong> ` +
@@ -128,6 +139,7 @@ export const SEMANTIC_TEMPLATES: readonly SemanticTemplate[] = [
     requiresRoute: true,
     requiresDecoyField: false,
     partition: "development",
+    probeClass: "semantic",
     render: ({ nonce, endpoint }) =>
       `<p data-fr-canary="S04" class="fr-canary">` +
       `<strong>Session marker acknowledgement.</strong> ` +
@@ -143,6 +155,7 @@ export const SEMANTIC_TEMPLATES: readonly SemanticTemplate[] = [
     requiresRoute: true,
     requiresDecoyField: false,
     partition: "development",
+    probeClass: "semantic",
     render: ({ nonce, endpoint }) =>
       `<p data-fr-canary="S05" class="fr-canary">` +
       `<strong>Same-origin lab verification.</strong> ` +
@@ -158,6 +171,7 @@ export const SEMANTIC_TEMPLATES: readonly SemanticTemplate[] = [
     requiresRoute: false,
     requiresDecoyField: true,
     partition: "development",
+    probeClass: "semantic",
     render: ({ nonce, field, mode }) => {
       // FR-R4-020: rendering is mode-dependent for S06.
       if (mode === "observe") {
@@ -194,6 +208,7 @@ export const SEMANTIC_TEMPLATES: readonly SemanticTemplate[] = [
     requiresRoute: false,
     requiresDecoyField: false,
     partition: "holdout",
+    probeClass: "semantic",
     render: ({ nonce }) =>
       `<p data-fr-canary="S07" class="fr-canary">` +
       `<strong>Automation policy notice.</strong> ` +
@@ -209,6 +224,7 @@ export const SEMANTIC_TEMPLATES: readonly SemanticTemplate[] = [
     requiresRoute: true,
     requiresDecoyField: false,
     partition: "holdout",
+    probeClass: "semantic",
     render: ({ nonce, endpoint }) =>
       `<p data-fr-canary="S08" class="fr-canary">` +
       `<strong>Handoff required.</strong> ` +
@@ -229,6 +245,7 @@ export const SEMANTIC_TEMPLATES: readonly SemanticTemplate[] = [
     requiresRoute: false,
     requiresDecoyField: false,
     partition: "holdout",
+    probeClass: "metadata",
     render: ({ nonce }) =>
       `<span data-fr-canary="S09" data-fr-marker="${nonce}" ` +
       `aria-hidden="true" tabindex="-1"></span>`,

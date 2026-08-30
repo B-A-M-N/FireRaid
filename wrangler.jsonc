@@ -24,15 +24,36 @@
     }
   ],
 
-  // FR-R4-076: top-level defaults to dev semantics; a bare `wrangler deploy`
-  // publishes this. Only named environments are intended for real deploys.
+  // FR-R4-076 / FR-R6-085: top-level is SAFE by default — a bare
+  // `wrangler deploy` must never publish lab semantics. Named environments
+  // (dev/test) opt into LAB_MODE explicitly. Named-env deploys are the only
+  // supported deploy path (npm run deploy:lab / deploy:production).
   "vars": {
     "PROFILE_VERSION": "1",
-    "LAB_MODE": "true"
+    "LAB_MODE": "false"
   },
 
   "env": {
+    // FR-R6-001: named environments do NOT inherit top-level bindings —
+    // d1_databases and assets are restated in EVERY env block.
     "dev": {
+      "assets": {
+        "directory": "./public",
+        "binding": "ASSETS",
+        "run_worker_first": [
+          "/signup",
+          "/api/*",
+          "/c/*",
+          "/admin*"
+        ]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "fireraid",
+          "database_id": "REPLACE_AFTER_CREATE"
+        }
+      ],
       "vars": {
         "PROFILE_VERSION": "1",
         "LAB_MODE": "true"
@@ -66,12 +87,50 @@
       }
     },
     "public-lab": {
+      "assets": {
+        "directory": "./public",
+        "binding": "ASSETS",
+        "run_worker_first": [
+          "/signup",
+          "/api/*",
+          "/c/*",
+          "/admin*"
+        ]
+      },
+      // FR-R6-001: public-lab MUST get its own D1 database before real deploy
+      // (swap database_id; `wrangler d1 create fireraid-public-lab`).
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "fireraid-public-lab",
+          "database_id": "REPLACE_AFTER_CREATE"
+        }
+      ],
       "vars": {
         "PROFILE_VERSION": "1",
         "LAB_MODE": "true"
       }
     },
     "production": {
+      "assets": {
+        "directory": "./public",
+        "binding": "ASSETS",
+        "run_worker_first": [
+          "/signup",
+          "/api/*",
+          "/c/*",
+          "/admin*"
+        ]
+      },
+      // FR-R6-001: production MUST have a distinct database from public-lab —
+      // swap database_id (`wrangler d1 create fireraid-production`).
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "fireraid-production",
+          "database_id": "REPLACE_AFTER_CREATE"
+        }
+      ],
       "vars": {
         "PROFILE_VERSION": "1",
         "LAB_MODE": "false"

@@ -1,12 +1,13 @@
 /**
  * Session system — cryptographically random IDs, secure cookies, expiration.
  *
- * FR-R5-030: D1 SQL bodies moved to D1SessionStore (cloudflare/session-store.ts).
- * This module re-exports/delegates to keep route imports compiling.
+ * FR-R6-092: this module is now PURE — no Cloudflare imports. D1-backed
+ * session persistence moved to `src/cloudflare/session.ts` (D1SessionStore
+ * plus the persistSession/loadSession/touchSession/markSessionSubmitted
+ * delegates). Cookie/CSRF/ID helpers and the profile key ring stay here.
  *
  * FR-R5-029: Profile key-ring plumbing — persisted profile_key_id on sessions,
- * resolveProfileKey() to reconstruct the key ring from env vars, and
- * loadSessionKey(db, sessionId) to read a session's key id from D1.
+ * resolveProfileKey() to reconstruct the key ring from env vars.
  *
  *   Reconstruction contract (documented for the next agent pass):
  *   1. session.profile_key_id → ring lookup via resolveProfileKey(env)
@@ -15,22 +16,11 @@
  *      - unknown id → hard error
  *   2. NULL id rows → fall back to current key (legacy rule)
  */
-import { SESSION_COOKIE, SESSION_TTL_MS, CSRF_COOKIE } from "../types/profile.js";
-import { D1SessionStore } from "../cloudflare/session-store.js";
+import { SESSION_COOKIE, SESSION_TTL_MS } from "../types/profile.js";
 
 const enc = new TextEncoder();
 
-// ─── Factory ──────────────────────────────────────────────────────────────
-
-/**
- * Create a D1SessionStore bound to the given database.
- * Exported so tests and route code can share the same instance.
- */
-export function createSessionStore(db: D1Database): D1SessionStore {
-  return new D1SessionStore(db);
-}
-
-// ─── Type exports (kept for route compatibility) ──────────────────────────
+// ─── Type exports ─────────────────────────────────────────────────────────
 
 export interface SessionPayload {
   id: string;
@@ -67,45 +57,34 @@ export function now(): number {
 }
 
 export function isExpired(createdAt: number, ttl = SESSION_TTL_MS): boolean {
-  return now() - createdAt > ttl;
+  return Date.now() - createdAt > ttl;
 }
 
 export function sessionCookieHeader(sessionId: string, maxAge = SESSION_TTL_MS / 1000): string {
-  return [
-    `${SESSION_COOKIE}=${sessionId}`,
-    "Path=/",
-    "HttpOnly",
-    "Secure",
-    "SameSite=Lax",
-    `Max-Age=${Math.floor(maxAge)}`,
-  ].join("; ");
+  return `__Host-fr_sid=${sessionId}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
 }
 
 export function csrfCookieHeader(token: string, maxAge = SESSION_TTL_MS / 1000): string {
-  return [
-    `${CSRF_COOKIE}=${token}`,
-    "Path=/",
-    "Secure",
-    "SameSite=Lax",
-    `Max-Age=${Math.floor(maxAge)}`,
-  ].join("; ");
+  return `__Host-fr_csrf=${token}; Path=/; Secure; SameSite=Strict; Max-Age=${maxAge}`;
 }
 
 export function parseCookies(header: string | null): Map<string, string> {
-  const map = new Map<string, string>();
-  if (!header) return map;
+  const out = new Map<string, string>();
+  if (!header) return out;
   for (const part of header.split(";")) {
     const idx = part.indexOf("=");
     if (idx < 0) continue;
     const k = part.slice(0, idx).trim();
     const v = part.slice(idx + 1).trim();
-    if (k) map.set(k, v);
+    if (k) out.set(k, v);
   }
-  return map;
+  return out;
 }
 
-// ─── CSRFs ────────────────────────────────────────────────────────────────
-
+/**
+ * Derive the CSRF token bound to a session: HMAC(secret, `${sessionId}:${purpose}`).
+ * Keyed by the profile secret so a token is unforgeable without server state.
+ */
 export async function deriveCsrfToken(
   secret: string,
   sessionId: string,
@@ -145,77 +124,21 @@ export async function verifyCsrfToken(
   return diff === 0;
 }
 
-// ─── D1 delegation (FR-R5-030) ────────────────────────────────────────────
-
 /**
- * Get the session ID from a request's cookie header.
+ * Constant-time string comparison. Returns true if equal.
+ * Exported for reuse by bearer-auth and bind-token checks.
  */
+export function constantTimeEqualStr(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/** Get the session ID from a request's cookie header. */
 export function getSessionId(request: Request): string | null {
   const cookies = parseCookies(request.headers.get("cookie"));
   return cookies.get(SESSION_COOKIE) ?? null;
-}
-
-/**
- * FR-R5-030: Delegate to D1SessionStore.
- * Returns SessionPayload-compatible shape (submitted as number|undefined).
- */
-export async function persistSession(
-  db: D1Database,
-  session: SessionPayload,
-  profileId: string,
-  profileHash: string
-): Promise<void> {
-  const store = new D1SessionStore(db);
-  return store.create({
-    id: session.id,
-    createdAt: session.createdAt,
-    profileVersion: session.profileVersion,
-    profileId,
-    profileHash,
-  });
-}
-
-/**
- * FR-R5-030: Delegate to D1SessionStore.
- * Maps store's boolean `submitted` to SessionPayload's `submitted?: number`.
- */
-export async function loadSession(
-  db: D1Database,
-  sessionId: string
-): Promise<SessionPayload | null> {
-  const store = new D1SessionStore(db);
-  const row = await store.load(sessionId);
-  if (!row) return null;
-  // Convert boolean -> SessionPayload shape: submitted = number | undefined
-  return {
-    id: row.id,
-    createdAt: row.createdAt,
-    profileVersion: row.profileVersion,
-    submitted: row.submitted ? 1 : undefined,
-    finalScore: row.finalScore,
-    finalDisposition: row.finalDisposition,
-  };
-}
-
-/**
- * FR-R5-030: Delegate to D1SessionStore.
- */
-export async function touchSession(db: D1Database, sessionId: string): Promise<void> {
-  const store = new D1SessionStore(db);
-  return store.touch(sessionId);
-}
-
-/**
- * FR-R5-030: Delegate to D1SessionStore.
- */
-export async function markSessionSubmitted(
-  db: D1Database,
-  sessionId: string,
-  score: number,
-  disposition: string
-): Promise<void> {
-  const store = new D1SessionStore(db);
-  return store.markSubmitted(sessionId, score, disposition);
 }
 
 // ─── FR-R5-029: Profile key-ring plumbing ─────────────────────────────────
@@ -261,17 +184,4 @@ export function resolveProfileKey(
     },
     previous,
   };
-}
-
-/**
- * Load the profile_key_id for a session from D1.
- * Returns NULL if the session doesn't exist or has no key.
- */
-export async function loadSessionKey(
-  db: D1Database,
-  sessionId: string
-): Promise<string | null> {
-  const store = new D1SessionStore(db);
-  const row = await store.load(sessionId);
-  return row?.profileKeyId ?? null;
 }

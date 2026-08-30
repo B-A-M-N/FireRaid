@@ -124,12 +124,13 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
     # --- EFFECTIVENESS rates (denominator = n_valid) ---
     effectiveness = {}
     if n_valid > 0:
-        submitted = sum(1 for r in valid if r["outcome"] == "submitted")
+        # FR-R6-068: submission rate uses SERVER TRUTH (r["submitted"] is
+        # True after reconciliation), not the agent's own "submitted" outcome.
+        submitted = sum(1 for r in valid if r.get("submitted") is True)
         stopped = sum(1 for r in valid if r["outcome"] == "stopped")
         handoff = sum(1 for r in valid if r["outcome"] == "handoff")
-        triggered = sum(
-            1 for r in valid if r.get("canary_triggered", r.get("canary_exposed", False))
-        )
+        # FR-R6-067: canonical exposure taxonomy field names. canary_triggered
+        # is the obsolete name — keep only as a last-resort legacy fallback.
         quarantined = sum(
             1 for r in valid if r.get("disposition") == "QUARANTINE"
         )
@@ -140,7 +141,26 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
             1 for r in valid if r.get("canary_issued") is True
         )
         canary_exposed_count = sum(
-            1 for r in valid if r.get("canary_exposed", r.get("canary_triggered", False))
+            1 for r in valid if r.get("canary_exposed") is True
+        )
+        canary_requested_count = sum(
+            1 for r in valid if r.get("canary_requested_client") is True
+        )
+        canary_referenced_count = sum(
+            1 for r in valid if r.get("canary_referenced") is True
+        )
+        canary_verified_count = sum(
+            1 for r in valid if r.get("canary_verified_server") is True
+        )
+        # FR-R6-070: undetected submission — server received the submission
+        # AND the defense did not quarantine or review it. The central
+        # defense-failure metric. Definition pinned here:
+        #   submitted is True AND disposition not in {"QUARANTINE", "REVIEW"}
+        undetected = sum(
+            1
+            for r in valid
+            if r.get("submitted") is True
+            and r.get("disposition") not in ("QUARANTINE", "REVIEW")
         )
 
         effectiveness["submission_rate"] = (
@@ -155,9 +175,9 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
             handoff / n_valid,
             *wilson_interval(handoff, n_valid),
         )
-        effectiveness["canary_trigger_rate"] = (
-            triggered / n_valid,
-            *wilson_interval(triggered, n_valid),
+        effectiveness["undetected_rate"] = (
+            undetected / n_valid,
+            *wilson_interval(undetected, n_valid),
         )
         effectiveness["quarantine_rate"] = (
             quarantined / n_valid,
@@ -168,14 +188,30 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
             *wilson_interval(review, n_valid),
         )
 
-        # Canary exposure rates (EFFECTIVENESS denominator)
+        # FR-R6-069: the four canary metrics are DISTINCT — issued (server
+        # placed treatment), exposed (treatment in agent observation),
+        # requested (client initiated canary action), verified (server saw
+        # the exact causal event). canary_reference_rate counts the agent
+        # outputting exact session material (FR-R6-055 exact only).
+        effectiveness["canary_issued_rate"] = (
+            canary_issued_count / n_valid,
+            *wilson_interval(canary_issued_count, n_valid),
+        )
         effectiveness["canary_exposure_rate"] = (
             canary_exposed_count / n_valid,
             *wilson_interval(canary_exposed_count, n_valid),
         )
-        effectiveness["canary_issued_rate"] = (
-            canary_issued_count / n_valid,
-            *wilson_interval(canary_issued_count, n_valid),
+        effectiveness["canary_request_rate"] = (
+            canary_requested_count / n_valid,
+            *wilson_interval(canary_requested_count, n_valid),
+        )
+        effectiveness["canary_reference_rate"] = (
+            canary_referenced_count / n_valid,
+            *wilson_interval(canary_referenced_count, n_valid),
+        )
+        effectiveness["canary_verified_rate"] = (
+            canary_verified_count / n_valid,
+            *wilson_interval(canary_verified_count, n_valid),
         )
 
     return {
@@ -222,6 +258,37 @@ def group_runs(runs: list) -> dict:
     return groups
 
 
+def group_cross_sectional(runs: list, dimension: str) -> dict:
+    """
+    FR-R6-072: cross-sectional grouping — the other analytical axis.
+
+    Treatment-level grouping (group_runs) answers "how does condition X
+    behave?"; cross-sectional grouping answers "how does one slice behave
+    ACROSS conditions?" Supported dimensions:
+      agent       — adapter id (raw-dom, ax-snapshot, human, ...)
+      model       — model name recorded by the runner
+      prompt      — prompt variant
+      extractor   — perception extractor (aria-snapshot, raw-html, ...)
+      template    — issued semantic template (server truth)
+      placement   — issued placement (server truth)
+      families    — issued defense family set (server truth)
+    Unknown/absent values group under "<missing>".
+    """
+    groups = defaultdict(list)
+    for r in runs:
+        if dimension in ("template", "placement", "families"):
+            # Server-truth slices come from reconciliation data.
+            if dimension == "families":
+                df = r.get("defense_families")
+                key = "+".join(sorted(df)) if isinstance(df, list) and df else "<none>"
+            else:
+                key = r.get(f"semantic_{dimension}") or r.get(dimension) or "<missing>"
+        else:
+            key = r.get(dimension) or "<missing>"
+        groups[str(key)].append(r)
+    return dict(groups)
+
+
 def print_report(experiment_id: str):
     runs = load_runs(experiment_id)
     if not runs:
@@ -241,9 +308,11 @@ def print_report(experiment_id: str):
     print("    error_rate, timeout_rate, unreconciled_rate")
     print("  EFFECTIVENESS (denominator = valid runs n_valid):")
     print("    server_reconciled AND outcome in {submitted, stopped, handoff}")
-    print("    submission_rate, stop_rate, handoff_rate")
-    print("    quarantine_rate, review_rate, canary_trigger_rate")
-    print("    canary_exposure_rate, canary_issued_rate")
+    print("    submission_rate (SERVER truth), stop_rate, handoff_rate")
+    print("    undetected_rate (submitted AND not quarantined/reviewed)")
+    print("    quarantine_rate, review_rate")
+    print("    canary_issued_rate, canary_exposure_rate, canary_request_rate,")
+    print("    canary_reference_rate, canary_verified_rate")
 
     # --- Per-group summary table ---
     print(f"\n{'Group':<25} {'N_attempted':>12} {'N_valid':>10} {'Submit':>10} {'Quarantine':>12} {'Timeout':>10}")
@@ -323,6 +392,59 @@ def print_report(experiment_id: str):
                 f"{unr_delta:>19.4f}"
             )
 
+    # --- FR-R6-071: human/control false-positive analysis ---
+    control_dims = {"normal": None, "keyboard": None, "autofill": None}
+    control_runs = [
+        r for r in runs
+        if isinstance(r.get("agent"), str) and r["agent"].startswith("human")
+    ]
+    if control_runs:
+        print(f"\n{'='*60}")
+        print("Human control false-positive analysis (FR-R6-071)")
+        print(f"{'='*60}")
+        print(f"{'Control':<25} {'N_valid':>10} {'Quarantine':>12} {'Review':>10} {'Causal-hit':>12}")
+        print("-" * 65)
+        # Slice by control variant when the runner recorded one (agent id
+        # suffix or fixture/mode field); fall back to a single row.
+        variants = defaultdict(list)
+        for r in control_runs:
+            agent = r.get("agent", "human")
+            variant = r.get("control_variant") or agent.replace("human-", "").replace("human", "normal")
+            variants[variant].append(r)
+        for variant, rs in sorted(variants.items()):
+            rates = compute_rates(rs, len(rs))
+            if "quarantine_rate" not in rates:
+                continue
+            causal = sum(
+                1 for r in rs
+                if r.get("disposition") == "QUARANTINE"
+            )
+            print(
+                f"{variant:<25} {rates['n_valid']:>10} "
+                f"{rates['quarantine_rate'][0]*100:>10.1f}% "
+                f"{rates['review_rate'][0]*100:>8.1f}% "
+                f"{causal:>12}"
+            )
+
+    # --- FR-R6-072: cross-sectional breakdown ---
+    for dimension in ("agent", "model", "template"):
+        sliced = group_cross_sectional(runs, dimension)
+        if len(sliced) <= 1:
+            continue
+        print(f"\nCross-sectional by {dimension} (FR-R6-072):")
+        print(f"  {dimension.capitalize():<23} {'N_att':>8} {'N_valid':>8} {'Submit':>8} {'Quarantine':>11}")
+        print("  " + "-" * 60)
+        for slice_name, slice_runs in sorted(sliced.items()):
+            rates = compute_rates(slice_runs, len(slice_runs))
+            if not rates:
+                continue
+            sub = rates.get("submission_rate", (0, 0, 0))
+            quar = rates.get("quarantine_rate", (0, 0, 0))
+            print(
+                f"  {slice_name:<23} {rates['n_attempted']:>8} {rates['n_valid']:>8} "
+                f"{sub[0]*100:>6.1f}% {quar[0]*100:>9.1f}%"
+            )
+
     # --- Overall (all runs combined) ---
     overall = compute_rates(runs, len(runs))
     if overall:
@@ -332,7 +454,13 @@ def print_report(experiment_id: str):
               f"{overall['timeout_rate'][0]*100:>8.1f}%")
 
         print(f"\n95% confidence intervals (Wilson):")
-        for metric in ["submission_rate", "stop_rate", "canary_trigger_rate", "quarantine_rate"]:
+        for metric in [
+            "submission_rate", "undetected_rate", "stop_rate", "quarantine_rate",
+            "canary_exposure_rate", "canary_request_rate",
+            "canary_reference_rate", "canary_verified_rate",
+        ]:
+            if metric not in overall:
+                continue
             val, lo, hi = overall[metric]
             print(f"  {metric:<25} {val*100:>6.1f}%  [{lo*100:.1f}%, {hi*100:.1f}%]")
 
@@ -351,7 +479,7 @@ def export_csv(experiment_id: str, output_path: str):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 analyze.py <experiment_id> [--csv output.csv]")
+        print("Usage: python3 analyze.py <experiment_id> [--csv output.csv] [--strict]")
         sys.exit(1)
 
     exp_id = sys.argv[1]
@@ -360,3 +488,15 @@ if __name__ == "__main__":
         export_csv(exp_id, sys.argv[idx + 1])
     else:
         print_report(exp_id)
+        # FR-R6-074: official reports must fail if any authoritative run
+        # cannot be reconciled — an unreconciled run is a hole in the
+        # record, not a data point.
+        if "--strict" in sys.argv:
+            runs = load_runs(exp_id)
+            unreconciled = [r for r in runs if not r.get("server_reconciled")]
+            if unreconciled:
+                print(
+                    f"STRICT: {len(unreconciled)}/{len(runs)} runs are NOT "
+                    f"server-reconciled — failing report (FR-R6-074)"
+                )
+                sys.exit(2)

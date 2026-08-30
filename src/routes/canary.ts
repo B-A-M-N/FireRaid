@@ -9,11 +9,13 @@ import { noContent, error } from "../security/headers.js";
 import type { Env } from "../env.js";
 import {
   getSessionId,
-  loadSession,
   isExpired,
   now,
 } from "../core/session.js";
-import { deriveProfile } from "../core/profile.js";
+import {
+  loadSession,
+} from "../cloudflare/session.js";;
+import { reconstructFromSessionId } from "../core/reconstruct.js";
 
 /** Hash a token for storage (SHA-256 hex). */
 async function hashToken(token: string): Promise<string> {
@@ -51,12 +53,23 @@ export async function canary(req: Request, env: Env): Promise<Response> {
   if (!session) return error("invalid session", 403);
   if (isExpired(session.createdAt)) return error("session expired", 403);
 
-  // FIX: Use session's stored profile version
-  const profile = await deriveProfile(env, sessionId, session.profileVersion);
-  if (!profile.decoy) return error("no decoy for this session", 404);
+  // FR-R6-050: canonical reconstruction (recipe + key-id aware), never a
+  // route-local deriveProfile with ad-hoc arguments.
+  const reconstructed = await reconstructFromSessionId(env, sessionId, {
+    profileVersion: session.profileVersion,
+  });
+  if (!reconstructed.ok) {
+    console.error("canary reconstruction failed:", reconstructed.code, reconstructed.detail);
+    return error("profile reconstruction failed", 500);
+  }
+  const profile = reconstructed.profile;
+
+  // FR-R6-028: the route token lives ONLY in decoyRoute — a DECOY_FIELD_ONLY
+  // session (no decoyRoute) must 404 here, not fall back to aggregate state.
+  if (!profile.decoyRoute) return error("no decoy route for this session", 404);
 
   // Constant-time comparison (no early return on length mismatch)
-  const expected = profile.decoy.endpointToken;
+  const expected = profile.decoyRoute.endpointToken;
   if (!constantTimeTokenEqual(token, expected)) {
     return error("invalid token", 403);
   }
@@ -65,16 +78,18 @@ export async function canary(req: Request, env: Env): Promise<Response> {
   const expectedHash = await hashToken(expected);
   const observedHash = await hashToken(token);
 
-  // Record verified causal hit (best-effort)
+  // Record verified causal hit (best-effort).
+  // FR-R6-051: INSERT OR IGNORE against idx_canary_unique_verified — replayed
+  // hits are idempotent, and real storage errors are logged, not swallowed.
   try {
     await env.DB.prepare(
-      `INSERT INTO canary_hits (session_id, created_at, family, evidence_class, expected_hash, observed_hash, verified)
+      `INSERT OR IGNORE INTO canary_hits (session_id, created_at, family, evidence_class, expected_hash, observed_hash, verified)
        VALUES (?, ?, 'decoy-route', 'A', ?, ?, 1)`
     )
       .bind(sessionId, now(), expectedHash, observedHash)
       .run();
-  } catch {
-    // D1 insert failure must not block response
+  } catch (err) {
+    console.error("canary hit persistence failed:", err);
   }
 
   return noContent();

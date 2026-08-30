@@ -18,35 +18,66 @@ function makeMockDb(runResults: { meta: { changes: number } }[]) {
   const records: RecordedStmt[] = [];
   let runIdx = 0;
 
-  return {
-    DB: {
-      prepare(sql: string) {
-        records.push({ sql, params: [] });
-        return {
-          bind(...params: unknown[]) {
-            // Record the bound params on the last statement
-            if (records.length > 0) {
-              records[records.length - 1].params = params;
-            }
-            return {
-              run() {
-                const r = runResults[runIdx] ?? { meta: { changes: 0 } };
-                runIdx++;
-                return r as any;
-              },
-              first<T = Record<string, unknown>>() {
-                return null as T | null;
-              },
-              all<T = Record<string, unknown>>() {
-                return { results: [] as T[] };
-              },
-            };
-          },
-        };
-      },
+  const mockDb = {
+    prepare(sql: string) {
+      records.push({ sql, params: [] });
+      const stmt: D1PreparedStatement = {
+        bind(...params: unknown[]) {
+          // Record the bound params on the last statement
+          if (records.length > 0) {
+            records[records.length - 1].params = params;
+          }
+          return {
+            run(): Promise<D1Result> {
+              const r = runResults[runIdx] ?? { meta: { changes: 0 } };
+              runIdx++;
+              return Promise.resolve(
+                ({
+                  success: true,
+                  meta: r.meta,
+                  results: [],
+                } as unknown) as D1Result
+              );
+            },
+            first<T = Record<string, unknown>>() {
+              return Promise.resolve(null as T | null);
+            },
+            all<T = Record<string, unknown>>() {
+              return Promise.resolve({ success: true, meta: {}, results: [] as T[] } as D1Result<T>);
+            },
+            raw<T = unknown[]>(_options?: { columnNames?: boolean }) {
+              return Promise.resolve([] as T);
+            },
+          };
+        },
+      } as D1PreparedStatement;
+      return stmt;
     },
-    records,
-  };
+    batch() {
+      return Promise.resolve([]);
+    },
+    exec() {
+      return Promise.resolve({ count: 0, duration: 0 });
+    },
+    dump() {
+      return Promise.resolve(new ArrayBuffer(0));
+    },
+    withSession() {
+      return {
+        prepare(sql: string) {
+          return mockDb.prepare(sql);
+        },
+        batch() {
+          return Promise.resolve([]);
+        },
+        getBookmark() {
+          return null;
+        },
+      } as unknown as D1DatabaseSession;
+    },
+  } as unknown as D1Database;
+
+  return { DB: mockDb, records };
 }
 
 describe("expireStaleLabRuns", () => {
@@ -58,7 +89,7 @@ describe("expireStaleLabRuns", () => {
       { meta: { changes: 0 } },
     ]);
 
-    const result = await expireStaleLabRuns(DB as unknown as Parameters<typeof expireStaleLabRuns>[0], NOW);
+    const result = await expireStaleLabRuns(DB, NOW);
     void result;
 
     expect(records.length).toBe(2);
@@ -84,7 +115,7 @@ describe("expireStaleLabRuns", () => {
       { meta: { changes: 3 } },
       { meta: { changes: 2 } },
     ]);
-    const result = await expireStaleLabRuns(DB as unknown as Parameters<typeof expireStaleLabRuns>[0], NOW);
+    const result = await expireStaleLabRuns(DB, NOW);
     void result;
     expect(result).toBe(5);
   });
@@ -94,21 +125,23 @@ describe("expireStaleLabRuns", () => {
       { meta: { changes: 0 } },
       { meta: { changes: 0 } },
     ]);
-    const result = await expireStaleLabRuns(DB as unknown as Parameters<typeof expireStaleLabRuns>[0], NOW);
+    const result = await expireStaleLabRuns(DB, NOW);
     void result;
     expect(result).toBe(0);
   });
 
-  it("binds correct params for PENDING expiry (threshold = now - 24h)", async () => {
+  it("binds correct params for PENDING expiry (threshold = now — FR-R6-013)", async () => {
     const { DB, records } = makeMockDb([
       { meta: { changes: 0 } },
       { meta: { changes: 0 } },
     ]);
-    await expireStaleLabRuns(DB as any, NOW);
+    await expireStaleLabRuns(DB, NOW);
     const params0 = records[0].params;
     expect(params0.length).toBeGreaterThanOrEqual(1);
-    // The bound value should be the threshold timestamp
-    expect(params0[0]).toBe(NOW - 86_400_000);
+    // FR-R6-013: expires_at is ALREADY created_at + 24h, so the PENDING
+    // sweep must compare against `now` — binding now-24h let PENDING runs
+    // survive ~48h.
+    expect(params0[0]).toBe(NOW);
   });
 
   it("binds correct params for BOUND abandonment (threshold = now - 24h)", async () => {
@@ -116,7 +149,7 @@ describe("expireStaleLabRuns", () => {
       { meta: { changes: 0 } },
       { meta: { changes: 0 } },
     ]);
-    await expireStaleLabRuns(DB as any, NOW);
+    await expireStaleLabRuns(DB, NOW);
     const params1 = records[1].params;
     expect(params1.length).toBeGreaterThanOrEqual(1);
     expect(params1[0]).toBe(NOW - 86_400_000);
@@ -126,7 +159,7 @@ describe("expireStaleLabRuns", () => {
     const { DB } = makeMockDb([{ meta: { changes: 1 } }]);
     // The mock DB always succeeds. To test error handling we'd need a different
     // approach, but the function uses try/catch internally so it won't throw.
-    const result = await expireStaleLabRuns(DB as unknown as Parameters<typeof expireStaleLabRuns>[0], NOW);
+    const result = await expireStaleLabRuns(DB, NOW);
     void result;
     expect(result).toBe(1);
   });

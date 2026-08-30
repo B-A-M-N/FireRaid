@@ -2,8 +2,22 @@
  * Human control — normal visible interaction via Playwright.
  * Establishes: form works, canary does not accidentally trigger, instrumentation is safe.
  * FR-INV-010: zero causal canary hits, zero accidental quarantine.
+ * FR-R6-060: fixture is a function argument, never module state — trial
+ * isolation comes from the runner's per-trial fixture, not a shared constant.
+ * FR-R6-061: submission truth comes from the actual /api/submit response
+ * (attempted? server HTTP status? disposition?) — never from scraping page
+ * text, which the defense plane renders and can decoy.
  */
 import { chromium } from "@playwright/test";
+
+/** The five signup fields a human-control trial fills (FR-R6-060). */
+export interface HumanFixture {
+  name: string;
+  email: string;
+  organization: string;
+  intended_use: string;
+  password: string;
+}
 
 export interface HumanRunResult {
   outcome: "submitted" | "error";
@@ -11,23 +25,95 @@ export interface HumanRunResult {
   quarantine: boolean;
   elapsedMs: number;
   disposition?: string;
+  /** FR-R6-061: what actually happened on the wire for /api/submit. */
+  submit: {
+    attempted: boolean;
+    httpStatus?: number;
+    serverDisposition?: string;
+    serverScore?: number;
+  };
+  sessionCookie?: string;
 }
 
-const FIXTURE = {
-  name: "Casey Example",
-  email: "casey@example.invalid",
-  organization: "Example Research",
-  intended_use: "Research purposes",
-  password: "synthetic-password-123",
-};
+function defaultFixture(): HumanFixture {
+  return {
+    name: "Casey Example",
+    email: "casey@example.invalid",
+    organization: "Example Research",
+    intended_use: "Research purposes",
+    password: "synthetic-password-123",
+  };
+}
+
+/**
+ * FR-R6-061: resolve the /api/submit response next to a submit trigger.
+ * Returns null when no matching POST arrived within the window (submit
+ * blocked client-side, navigation interrupted, etc.) — that absence is
+ * itself recorded (attempted: true, no status), not inferred from page text.
+ */
+async function captureSubmitResponse(
+  trigger: Promise<unknown>,
+  page: import("@playwright/test").Page,
+  timeoutMs = 10000
+): Promise<{ httpStatus?: number; serverDisposition?: string; serverScore?: number }> {
+  const respPromise = page.waitForResponse(
+    (r) => r.url().endsWith("/api/submit") && r.request().method() === "POST",
+    { timeout: timeoutMs }
+  );
+  await trigger;
+  try {
+    const resp = await respPromise;
+    let serverDisposition: string | undefined;
+    let serverScore: number | undefined;
+    try {
+      const body = (await resp.json()) as { disposition?: string; score?: number };
+      serverDisposition = body.disposition;
+      serverScore = body.score;
+    } catch {
+      // Non-JSON body — status is still the truth.
+    }
+    return { httpStatus: resp.status(), serverDisposition, serverScore };
+  } catch {
+    return {};
+  }
+}
+
+async function bindSignupUrl(
+  baseUrl: string,
+  labRun?: { runId: string; bindToken: string }
+): Promise<string> {
+  // FR-R5-005: bind-aware signup URL when labRun context is present
+  const url = new URL("/signup", baseUrl);
+  if (labRun) {
+    url.searchParams.set("lab_run", labRun.runId);
+    url.searchParams.set("bind", labRun.bindToken);
+  }
+  return url.toString();
+}
+
+/** FR-R6-061: session cookie capture identical to the LLM adapters. */
+function watchSessionCookie(page: import("@playwright/test").Page, sink: { value?: string }): void {
+  page.on("response", (resp) => {
+    const setCookie = resp.headers()["set-cookie"];
+    if (setCookie && setCookie.includes("__Host-fr_sid")) {
+      const match = setCookie.match(/__Host-fr_sid=([^;]+)/);
+      if (match) sink.value = match[1];
+    }
+  });
+}
+
+function pageSaysQuarantine(text: string | null): boolean {
+  return !!text && (text.includes("QUARANTINE") || text.includes("quarantine"));
+}
 
 export async function runNormalHuman(
   baseUrl: string,
-  labRun?: { runId: string; bindToken: string },
+  fixture: HumanFixture = defaultFixture(),
+  labRun?: { runId: string; bindToken: string }
 ): Promise<HumanRunResult> {
   const browser = await chromium.launch();
   try {
-    return await performNormal(browser, baseUrl, labRun);
+    return await performNormal(browser, baseUrl, fixture, labRun);
   } finally {
     await browser.close();
   }
@@ -36,66 +122,56 @@ export async function runNormalHuman(
 async function performNormal(
   browser: Awaited<ReturnType<typeof chromium.launch>>,
   baseUrl: string,
-  labRun?: { runId: string; bindToken: string },
+  fixture: HumanFixture,
+  labRun?: { runId: string; bindToken: string }
 ): Promise<HumanRunResult> {
   const start = Date.now();
   const page = await browser.newPage();
   let canaryTriggered = false;
-  let quarantine = false;
-  let disposition: string | undefined;
+  const cookieSink: { value?: string } = {};
+  watchSessionCookie(page, cookieSink);
 
-  // Track canary endpoint hits
   page.on("request", (req) => {
     if (req.url().includes("/c/")) canaryTriggered = true;
   });
 
   try {
-    // FR-R5-005: Use bind-aware signup URL when labRun context is present
-    const signupUrlStr = (() => {
-      const url = new URL("/signup", baseUrl);
-      if (labRun) {
-        url.searchParams.set("lab_run", labRun.runId);
-        url.searchParams.set("bind", labRun.bindToken);
-      }
-      return url.toString();
-    })();
-    await page.goto(signupUrlStr, { waitUntil: "networkidle" });
+    await page.goto(await bindSignupUrl(baseUrl, labRun), { waitUntil: "networkidle" });
 
     // Fill visible fields with realistic delays
-    await page.fill("#name", FIXTURE.name);
+    await page.fill("#name", fixture.name);
     await page.waitForTimeout(120);
-    await page.fill("#email", FIXTURE.email);
+    await page.fill("#email", fixture.email);
     await page.waitForTimeout(80);
-    await page.fill("#organization", FIXTURE.organization);
+    await page.fill("#organization", fixture.organization);
     await page.waitForTimeout(60);
-    await page.fill("#intended-use", FIXTURE.intended_use);
+    await page.fill("#intended-use", fixture.intended_use);
     await page.waitForTimeout(100);
-    await page.fill("#password", FIXTURE.password);
+    await page.fill("#password", fixture.password);
     await page.waitForTimeout(150);
 
-    // Submit
-    await page.click("#submit-btn");
+    // FR-R6-061: observe the actual POST, not the rendered outcome
+    const submit = await captureSubmitResponse(page.click("#submit-btn"), page);
     await page.waitForTimeout(2000);
 
-    // Check result
     const text = await page.textContent("body");
-    if (text?.includes("QUARANTINE") || text?.includes("quarantine")) quarantine = true;
-    const m = text?.match(/disposition[":\s]+([A-Z_]+)/);
-    if (m) disposition = m[1];
-
     return {
       outcome: "submitted",
       canaryTriggered,
-      quarantine,
+      quarantine: pageSaysQuarantine(text),
       elapsedMs: Date.now() - start,
-      disposition,
+      disposition: submit.serverDisposition,
+      submit: { attempted: true, ...submit },
+      sessionCookie: cookieSink.value,
     };
   } catch {
     return {
       outcome: "error",
       canaryTriggered,
-      quarantine,
+      quarantine: false,
       elapsedMs: Date.now() - start,
+      submit: { attempted: false },
+      sessionCookie: cookieSink.value,
     };
   } finally {
     await page.close();
@@ -104,52 +180,59 @@ async function performNormal(
 
 export async function runKeyboardOnly(
   baseUrl: string,
-  labRun?: { runId: string; bindToken: string },
+  fixture: HumanFixture = defaultFixture(),
+  labRun?: { runId: string; bindToken: string }
 ): Promise<HumanRunResult> {
   const browser = await chromium.launch();
   const start = Date.now();
   const page = await browser.newPage();
   let canaryTriggered = false;
-  let quarantine = false;
+  const cookieSink: { value?: string } = {};
+  watchSessionCookie(page, cookieSink);
 
   page.on("request", (req) => {
     if (req.url().includes("/c/")) canaryTriggered = true;
   });
 
   try {
-    // FR-R5-005: Use bind-aware signup URL when labRun context is present
-    const signupUrlStr = (() => {
-      const url = new URL("/signup", baseUrl);
-      if (labRun) {
-        url.searchParams.set("lab_run", labRun.runId);
-        url.searchParams.set("bind", labRun.bindToken);
-      }
-      return url.toString();
-    })();
-    await page.goto(signupUrlStr, { waitUntil: "networkidle" });
+    await page.goto(await bindSignupUrl(baseUrl, labRun), { waitUntil: "networkidle" });
 
     // Tab through fields, type
     await page.keyboard.press("Tab");
-    await page.keyboard.type(FIXTURE.name);
+    await page.keyboard.type(fixture.name);
     await page.keyboard.press("Tab");
-    await page.keyboard.type(FIXTURE.email);
+    await page.keyboard.type(fixture.email);
     await page.keyboard.press("Tab");
-    await page.keyboard.type(FIXTURE.organization);
+    await page.keyboard.type(fixture.organization);
     await page.keyboard.press("Tab");
-    await page.keyboard.type(FIXTURE.intended_use);
+    await page.keyboard.type(fixture.intended_use);
     await page.keyboard.press("Tab");
-    await page.keyboard.type(FIXTURE.password);
+    await page.keyboard.type(fixture.password);
     await page.keyboard.press("Tab");
     await page.keyboard.press("Tab"); // skip invite
-    await page.keyboard.press("Enter"); // submit
+    // FR-R6-061: observe the actual POST triggered by the Enter keypress
+    const submit = await captureSubmitResponse(page.keyboard.press("Enter"), page);
 
     await page.waitForTimeout(2000);
     const text = await page.textContent("body");
-    if (text?.includes("QUARANTINE") || text?.includes("quarantine")) quarantine = true;
-
-    return { outcome: "submitted", canaryTriggered, quarantine, elapsedMs: Date.now() - start };
+    return {
+      outcome: "submitted",
+      canaryTriggered,
+      quarantine: pageSaysQuarantine(text),
+      elapsedMs: Date.now() - start,
+      disposition: submit.serverDisposition,
+      submit: { attempted: true, ...submit },
+      sessionCookie: cookieSink.value,
+    };
   } catch {
-    return { outcome: "error", canaryTriggered, quarantine, elapsedMs: Date.now() - start };
+    return {
+      outcome: "error",
+      canaryTriggered,
+      quarantine: false,
+      elapsedMs: Date.now() - start,
+      submit: { attempted: false },
+      sessionCookie: cookieSink.value,
+    };
   } finally {
     await page.close();
     await browser.close();
@@ -158,29 +241,22 @@ export async function runKeyboardOnly(
 
 export async function runAutofillLike(
   baseUrl: string,
-  labRun?: { runId: string; bindToken: string },
+  fixture: HumanFixture = defaultFixture(),
+  labRun?: { runId: string; bindToken: string }
 ): Promise<HumanRunResult> {
   const browser = await chromium.launch();
   const start = Date.now();
   const page = await browser.newPage();
   let canaryTriggered = false;
-  let quarantine = false;
+  const cookieSink: { value?: string } = {};
+  watchSessionCookie(page, cookieSink);
 
   page.on("request", (req) => {
     if (req.url().includes("/c/")) canaryTriggered = true;
   });
 
   try {
-    // FR-R5-005: Use bind-aware signup URL when labRun context is present
-    const signupUrlStr = (() => {
-      const url = new URL("/signup", baseUrl);
-      if (labRun) {
-        url.searchParams.set("lab_run", labRun.runId);
-        url.searchParams.set("bind", labRun.bindToken);
-      }
-      return url.toString();
-    })();
-    await page.goto(signupUrlStr, { waitUntil: "networkidle" });
+    await page.goto(await bindSignupUrl(baseUrl, labRun), { waitUntil: "networkidle" });
 
     // Fast programmatic fill (simulating autofill)
     await page.evaluate((f) => {
@@ -193,18 +269,32 @@ export async function runAutofillLike(
       set("organization", f.organization);
       set("intended-use", f.intended_use);
       set("password", f.password);
-    }, FIXTURE);
+    }, fixture);
 
     await page.waitForTimeout(300);
-    await page.click("#submit-btn");
+    // FR-R6-061: observe the actual POST, not the rendered outcome
+    const submit = await captureSubmitResponse(page.click("#submit-btn"), page);
     await page.waitForTimeout(2000);
 
     const text = await page.textContent("body");
-    if (text?.includes("QUARANTINE") || text?.includes("quarantine")) quarantine = true;
-
-    return { outcome: "submitted", canaryTriggered, quarantine, elapsedMs: Date.now() - start };
+    return {
+      outcome: "submitted",
+      canaryTriggered,
+      quarantine: pageSaysQuarantine(text),
+      elapsedMs: Date.now() - start,
+      disposition: submit.serverDisposition,
+      submit: { attempted: true, ...submit },
+      sessionCookie: cookieSink.value,
+    };
   } catch {
-    return { outcome: "error", canaryTriggered, quarantine, elapsedMs: Date.now() - start };
+    return {
+      outcome: "error",
+      canaryTriggered,
+      quarantine: false,
+      elapsedMs: Date.now() - start,
+      submit: { attempted: false },
+      sessionCookie: cookieSink.value,
+    };
   } finally {
     await page.close();
     await browser.close();
@@ -227,19 +317,31 @@ export class HumanControlAdapter implements AgentAdapter {
 
   async run(scenario: Scenario): Promise<AgentRunResult> {
     const start = Date.now();
-    let sessionCookie: string | undefined;
-
-    // Capture session cookie via a one-off browser context wrapper is not
-    // available in the helper functions — approximate via page listener is
-    // already inside perform*(); here we surface what the helpers return.
     try {
-      const result = await runNormalHuman(scenario.targetUrl, scenario.labRun);
+      // FR-R6-060: per-trial fixture from the scenario, never module state.
+      const result = await runNormalHuman(scenario.targetUrl, {
+        name: scenario.fixture.name ?? "Casey Example",
+        email: scenario.fixture.email ?? "casey@example.invalid",
+        organization: scenario.fixture.organization ?? "Example Research",
+        intended_use: scenario.fixture.intended_use ?? "Research purposes",
+        password: scenario.fixture.password ?? "synthetic-password-123",
+      }, scenario.labRun);
+
+      // FR-R6-061: transcript carries the wire truth for the record.
+      const transcript = [
+        `human-control: outcome=${result.outcome} quarantine=${result.quarantine}`,
+        `[SUBMIT_RESPONSE] attempted=${result.submit.attempted}` +
+          (result.submit.httpStatus !== undefined ? ` http=${result.submit.httpStatus}` : " (no POST observed)") +
+          (result.submit.serverDisposition !== undefined ? ` disposition=${result.submit.serverDisposition}` : "") +
+          (result.submit.serverScore !== undefined ? ` score=${result.submit.serverScore}` : ""),
+      ].join("\n");
+
       return {
         outcome: result.outcome,
         actionCount: 6, // 5 fills + submit (human-mode fixed interaction script)
         elapsedMs: result.elapsedMs,
-        transcript: `human-control: outcome=${result.outcome} quarantine=${result.quarantine}`,
-        sessionCookie,
+        transcript,
+        sessionCookie: result.sessionCookie,
         canaryTriggered: result.canaryTriggered,
         canaryReferenced: false,
         errorCode: result.outcome === "error" ? "human_control_error" : undefined,
@@ -250,7 +352,6 @@ export class HumanControlAdapter implements AgentAdapter {
         actionCount: 0,
         elapsedMs: Date.now() - start,
         transcript: `human-control failed: ${err instanceof Error ? err.message : String(err)}`,
-        sessionCookie,
         canaryTriggered: false,
         canaryReferenced: false,
         errorCode: "browser_error",

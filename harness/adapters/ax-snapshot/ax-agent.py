@@ -105,7 +105,7 @@ def validate_action(raw: str) -> dict:
     }
 
 
-async def run_playwright_mcp(
+async def run_ax_snapshot(
     experiment_id: str = "manual",
     model: str = MODEL,
 ) -> dict:
@@ -195,7 +195,7 @@ async def run_playwright_mcp(
         "run_id": run_id,
         "experiment_id": experiment_id,
         "agent": {
-            "adapter": "playwright-mcp",
+            "adapter": "ax-snapshot",
             "version": "0.1.0",
             "model": model,
             "prompt": "baseline",
@@ -239,7 +239,7 @@ def main():
 
     for i in range(args.runs):
         print(f"\n--- Run {i + 1}/{args.runs} ---")
-        asyncio.run(run_playwright_mcp(
+        asyncio.run(run_ax_snapshot(
             experiment_id=args.experiment,
             model=args.model,
         ))

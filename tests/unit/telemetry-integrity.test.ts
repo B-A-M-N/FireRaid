@@ -49,41 +49,43 @@ describe("validateTelemetryBatch (FR-R4-015)", () => {
     if (!result.ok) expect(result.code).toBe("TOO_MANY_EVENTS");
   });
 
-  it("invalid kinds are dropped", () => {
+  it("invalid kind → whole batch rejected (FR-R6-035, no silent drop)", () => {
     const events: unknown[] = [
       { seq: 1, dt: 100, kind: "focus", target: "a" },
       { seq: 2, dt: 200, kind: "bogus_kind", target: "b" },
       { seq: 3, dt: 300, kind: "input", target: "c" },
     ];
     const result = validateTelemetryBatch(events);
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.events.length).toBe(2);
-      expect(result.events[0].kind).toBe("focus");
-      expect(result.events[1].kind).toBe("input");
-    }
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("MALFORMED_EVENT");
   });
 
-  it("seq not strictly-increasing → event dropped", () => {
+  it("seq not strictly-increasing → whole batch rejected (FR-R6-035)", () => {
     const events: unknown[] = [
       { seq: 3, dt: 300, kind: "focus", target: "a" },
       { seq: 1, dt: 100, kind: "focus", target: "b" }, // seq not increasing
       { seq: 2, dt: 200, kind: "focus", target: "c" }, // seq not increasing
     ];
     const result = validateTelemetryBatch(events);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.events.length).toBe(1);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("SEQ_ORDER_VIOLATION");
   });
 
-  it("dt not nondecreasing → event dropped", () => {
+  it("dt not nondecreasing → whole batch rejected (FR-R6-035)", () => {
     const events: unknown[] = [
       { seq: 1, dt: 300, kind: "focus", target: "a" },
       { seq: 2, dt: 100, kind: "focus", target: "b" }, // dt decreases
       { seq: 3, dt: 200, kind: "focus", target: "c" }, // dt decreases
     ];
     const result = validateTelemetryBatch(events);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.events.length).toBe(1);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("SEQ_ORDER_VIOLATION");
+  });
+
+  it("fractional seq → rejected (FR-R6-034 safe integers)", () => {
+    const result = validateTelemetryBatch([{ seq: 1.5, dt: 100, kind: "focus" }]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("MALFORMED_EVENT");
   });
 
   it("empty array → {ok:true, events:[]}", () => {
@@ -92,10 +94,10 @@ describe("validateTelemetryBatch (FR-R4-015)", () => {
     if (result.ok) expect(result.events).toEqual([]);
   });
 
-  it("null input → {ok:true, events:[]}", () => {
+  it("null input → rejected NOT_AN_ARRAY (FR-R6-035)", () => {
     const result = validateTelemetryBatch(null);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.events).toEqual([]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("NOT_AN_ARRAY");
   });
 });
 

@@ -22,7 +22,6 @@ import {
   parseDefenseRecipe,
   type DefenseRecipe,
 } from "./recipe-schema.js";
-import type { SemanticTemplate } from "./catalog.js";
 import { getPolicyOrThrow } from "./decision.js";
 import type {
   DefenseProfile,
@@ -43,10 +42,16 @@ const FAMILIES: DefenseFamilyName[] = [
 /**
  * Named ablation condition recipes for reproducibility.
  * Keys match RecipeIdSchema in recipe-schema.ts.
+ *
+ * FR-R6-006: CONTROL and TURNSTILE_ONLY MUST declare `families: []` — an
+ * omitted `families` means "randomly sample 2–4 families", which made both
+ * "control" conditions render random defense profiles and destroyed the
+ * ablation baseline. Turnstile itself is controlled independently via the
+ * lab run's `turnstile_required` flag, not via these recipes.
  */
 export const ABLATION_RECIPES: Record<string, DefenseRecipe> = {
-  CONTROL: {},
-  TURNSTILE_ONLY: {},
+  CONTROL: { families: [] },
+  TURNSTILE_ONLY: { families: [] },
   SEMANTIC_ONLY: { families: ["semantic"] },
   DECOY_FIELD_ONLY: { families: ["decoy-field"] },
   DECOY_ROUTE_ONLY: { families: ["decoy-route"] },
@@ -86,22 +91,26 @@ function profileId(seed: ArrayBuffer): string {
  * (FR-R4-024). Includes all explicit and derived treatment dimensions
  * so that different semanticModes produce distinct variant IDs.
  */
-function buildVariantId(
-  profile: DefenseProfile
-): string {
-  const parts: string[] = [];
-  for (const fam of profile.families.sort()) {
-    parts.push(fam);
-  }
-  if (profile.semantic) {
-    parts.push(`template=${profile.semantic.templateId}`);
-    parts.push(`placement=${profile.semantic.placementId}`);
-    parts.push(`mode=${profile.semantic.mode}`);
-  }
-  const variantInput = parts.join("|");
-  // Use full SHA-256 hex (64 chars) for uniqueness — truncation caused
-  // different semanticModes to collide in early tests.
-  return Array.from(new TextEncoder().encode(variantInput))
+/**
+ * FR-R6-042: the variant ID is a real SHA-256 over a canonical treatment
+ * object (not reversible hex-encoding), covering every treatment dimension:
+ * families, template/placement/mode, interaction scoring, the telemetry
+ * mask, the scoring policy, and the Turnstile condition.
+ */
+async function buildVariantId(profile: DefenseProfile, turnstileRequired: boolean): Promise<string> {
+  const treatment = {
+    families: [...profile.families].sort(),
+    template: profile.semantic?.templateId ?? null,
+    placement: profile.semantic?.placementId ?? null,
+    semantic_mode: profile.semantic?.mode ?? null,
+    interaction_scoring: profile.interaction?.scoringEnabled ?? null,
+    telemetry: { ...profile.telemetry },
+    scoring_policy: profile.scoringPolicy,
+    turnstile_required: turnstileRequired,
+  };
+  const data = new TextEncoder().encode(JSON.stringify(treatment));
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hash))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
@@ -113,6 +122,10 @@ export interface DeriveProfileOptions {
   version: number;
   sessionId: string;
   mode?: "lab" | "production";
+  /** FR-R6-040: part of the typed options — no more `as` casting. */
+  holdoutMode?: boolean;
+  /** FR-R6-042: Turnstile condition is part of the treatment identity. */
+  turnstileRequired?: boolean;
 }
 
 /**
@@ -168,22 +181,12 @@ function validateExplicitOverrides(
 
 /**
  * FR-R5-034: holdoutMode support.
- * When holdoutMode is true, only templates with partition === "holdout" are
- * eligible. Explicit overrides selecting a development-partition template
- * throw TEMPLATE_NOT_ELIGIBLE_IN_MODE.
- *
- * Catalog partition assignment (S01–S09): S01–S06 development,
- * S07–S08 holdout, S09 holdout (hidden metadata marker, not a semantic
- * holdout participant — FR-R4-027/FR-R5-033).
+ * When holdoutMode is true, only templates with partition === "holdout" AND
+ * probeClass === "semantic" are eligible for random selection (S09 is a
+ * metadata probe, not a semantic-holdout participant — FR-R6-041). Explicit
+ * overrides selecting a development-partition template throw
+ * TEMPLATE_NOT_ELIGIBLE_IN_MODE.
  */
-function getTemplatesByPartition(): Record<string, SemanticTemplate[]> {
-  const byPartition: Record<string, SemanticTemplate[]> = {};
-  for (const tpl of SEMANTIC_TEMPLATES) {
-    if (!byPartition[tpl.partition]) byPartition[tpl.partition] = [];
-    byPartition[tpl.partition].push(tpl);
-  }
-  return byPartition;
-}
 
 /**
  * Derive a deterministic defense profile with optional recipe overrides.
@@ -269,9 +272,8 @@ export async function deriveProfilePure(
         ? SEMANTIC_TEMPLATES.find((t) => t.id === resolvedRecipe!.semanticTemplate)
         : undefined;
 
-    // FR-R5-034: holdoutMode
-    const isHoldoutMode = (opts as DeriveProfileOptions & { holdoutMode?: boolean })
-      .holdoutMode === true;
+    // FR-R5-034 / FR-R6-040: holdoutMode is a typed option.
+    const isHoldoutMode = opts.holdoutMode === true;
 
     if (resolvedRecipe?.semanticTemplate !== undefined) {
       // Explicit template: validate partition eligibility in holdout mode
@@ -282,9 +284,23 @@ export async function deriveProfilePure(
       // No explicit template: random selection from eligible pool
       // FR-R5-034: lab-only random profiles are lab-mode-only (validateExplicitOverrides
       // does not apply — this is the engine's random exploration, filtered by mode).
-      const pool = isHoldoutMode
-        ? (getTemplatesByPartition()["holdout"] ?? [])
-        : SEMANTIC_TEMPLATES.filter((t) => isLab || !t.labOnly);
+      // FR-R6-041: holdout mode samples only holdout-partition SEMANTIC probes —
+      // S09 is partition "holdout" but probeClass "metadata", so it is excluded
+      // (it is a hidden DOM marker, not a semantic-holdout participant).
+      // FR-R6-039: when the recipe names an explicit placement, restrict the
+      // candidate pool to templates that ALLOW that placement BEFORE selection —
+      // a random template must never contradict an explicit placement.
+      const explicitPlacement = resolvedRecipe?.placementId;
+      const pool = SEMANTIC_TEMPLATES.filter((t) => {
+        if (isHoldoutMode) {
+          return t.partition === "holdout" && t.probeClass === "semantic";
+        }
+        if (!isLab && t.labOnly) return false;
+        if (explicitPlacement !== undefined && !t.allowedPlacements.includes(explicitPlacement)) {
+          return false;
+        }
+        return true;
+      });
       if (pool.length > 0) {
         template = pool[await stream.nextInt(pool.length)];
       }
@@ -296,7 +312,7 @@ export async function deriveProfilePure(
       families.splice(families.indexOf("semantic"), 1);
     } else {
       // S06 auto-adds decoy-field via requiresDecoyField (FR-R4-019)
-      if (template.id === "S06" && !families.includes("decoy-field")) {
+      if (template.requiresDecoyField && !families.includes("decoy-field")) {
         families.push("decoy-field");
         families.sort();
       }
@@ -308,19 +324,12 @@ export async function deriveProfilePure(
       // If explicit placement is provided, validate against template
       if (resolvedRecipe?.placementId !== undefined) {
         placementId = resolvedRecipe.placementId;
-        // If template is also explicit, we already validated allowedPlacements
-        // above in validateExplicitOverrides. If template is random but placement
-        // is explicit, check against the chosen template's allowedPlacements.
         if (!template.allowedPlacements.includes(placementId)) {
-          // Only fail closed for EXPLICIT template + EXPLICIT placement
-          // If template was random, the explicit placement check was not
-          // enforced in validateExplicitOverrides (no template was known).
-          // We need to check here only if template was explicitly set.
-          if (resolvedRecipe?.semanticTemplate !== undefined) {
-            throw new Error("INVALID_PLACEMENT_FOR_TEMPLATE: " + placementId);
-          }
-          // Random template: keep existing random-eligibility behavior
-          // (the explicit placement is accepted if it matches the random template)
+          // FR-R6-039: with placement-filtered selection above, a random
+          // template ALWAYS allows the explicit placement — only the
+          // explicit-template + explicit-placement combination can still
+          // contradict, and that fails closed.
+          throw new Error("INVALID_PLACEMENT_FOR_TEMPLATE: " + placementId);
         }
       } else {
         // No explicit placement: select from eligible placements
@@ -362,14 +371,15 @@ export async function deriveProfilePure(
     }
   }
 
-  // Handle decoy-field / decoy-route (shared token generation)
+  // Handle decoy-field / decoy-route (FR-R6-027/049: independent families,
+  // independent projections — there is NO aggregate `decoy` object).
+  // Shared token draws preserve determinism: field draws first, then route,
+  // regardless of which family is present, so a session with only decoy-route
+  // consumes the same stream positions as one with both.
   if (families.includes("decoy-field") || families.includes("decoy-route")) {
     const fieldName = `fr_${await generateToken(stream, 4)}`;
     const endpointToken = await generateToken(stream, 6);
     const elementId = `fr_${await generateToken(stream, 4)}`;
-    // Aggregate config consumed by renderer + correlation.
-    profile.decoy = { fieldName, endpointToken, elementId };
-    // Family-specific projections (FR-R3-010).
     if (families.includes("decoy-field")) {
       profile.decoyField = { fieldName, elementId };
     }
@@ -379,12 +389,16 @@ export async function deriveProfilePure(
   }
 
   // Handle interaction family
+  // FR-R6-038: honor the recipe's explicit interactionScoring toggle.
   if (families.includes("interaction")) {
-    profile.interaction = { scoringEnabled: true };
+    profile.interaction = { scoringEnabled: resolvedRecipe?.interactionScoring ?? true };
   }
 
-  // Build variant ID
-  profile.profileVariantId = buildVariantId(profile);
+  // Build variant ID (FR-R6-042: SHA-256 over the full treatment identity)
+  profile.profileVariantId = await buildVariantId(
+    profile,
+    opts.turnstileRequired ?? false
+  );
 
   return profile;
 }

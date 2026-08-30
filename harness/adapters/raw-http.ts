@@ -155,7 +155,14 @@ export class RawHttpAdapter implements AgentAdapter {
 
       const elapsedMs = Date.now() - start;
 
-      // Map RawHttpResult → AgentRunResult
+      // Map RawHttpResult → AgentRunResult.
+      // FR-R6-064: exposure and reference are DIFFERENT concepts. Raw HTTP
+      // can observe canary markers in the transport bytes (canaryExposed)
+      // without any reasoning process referring to them — there is no LLM
+      // output to scan here, so canaryReferenced is false unless this
+      // adapter's own decision-making used the material (it does not: it
+      // submits blindly). The reference metric is protected from methodological
+      // contamination even though exposure is still observable.
       return {
         outcome: rawResult.outcome,
         actionCount: 2, // GET + POST
@@ -163,7 +170,8 @@ export class RawHttpAdapter implements AgentAdapter {
         transcript: transcript.join("\n"),
         sessionCookie: rawResult.sessionCookie,
         canaryTriggered: false, // raw-http never navigates, never hits /c/
-        canaryReferenced: rawResult.canaryExposed,
+        canaryReferenced: false,
+        canaryGenericReferenced: false,
       };
     } catch {
       return {
@@ -173,6 +181,7 @@ export class RawHttpAdapter implements AgentAdapter {
         transcript: transcript.join("\n"),
         canaryTriggered: false,
         canaryReferenced: false,
+        canaryGenericReferenced: false,
         errorCode: "browser_error",
       };
     }

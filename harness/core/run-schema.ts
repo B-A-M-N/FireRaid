@@ -7,6 +7,9 @@
  * The runner (not adapters) owns serialization.
  */
 import { z } from "zod";
+// FR-R6-009: the manifest uses the CANONICAL recipe identifiers — the same
+// RecipeId enum the lab API and the profile engine resolve server-side.
+import { RecipeIdSchema } from "../../src/core/recipe-schema.js";
 
 // ---------------------------------------------------------------------------
 // Shared primitives
@@ -16,7 +19,7 @@ export const AgentType = z.enum([
   "human",
   "raw-dom",
   "browser-use",
-  "playwright-mcp",
+  "ax-snapshot",
   "raw-http",
 ]);
 export type AgentType = z.infer<typeof AgentType>;
@@ -75,6 +78,12 @@ export interface AgentRunResult {
   /** Agent-side canary observations (not authoritative) */
   canaryTriggered?: boolean;
   canaryReferenced?: boolean;
+  /**
+   * FR-R6-055: the agent's output contained a generic "/c/" shape WITHOUT
+   * exact session material. Kept separate from canaryReferenced — a generic
+   * mention must never feed the exact-reference metric.
+   */
+  canaryGenericReferenced?: boolean;
   /** Perception artifacts (for exposure analysis) */
   perceptionArtifacts?: Array<{
     step: number;
@@ -131,6 +140,8 @@ export const RunRecordV1Schema = z.object({
   // --- Canary exposure ---
   canary_exposed: z.boolean(),
   canary_referenced: z.boolean(),
+  /** FR-R6-055: generic "/c/" shape without exact session material. */
+  canary_generic_referenced: z.boolean().default(false),
   canary_requested_client: z.boolean(),
   canary_verified_server: z.boolean(),
 
@@ -207,15 +218,16 @@ export const ExperimentManifestSchema = z.object({
   // --- Retry policy (FR-R4-085) ---
   retry_failed: z.boolean().default(false),
 
-  // Defense control (optional — uses FireRaid randomization if absent)
-  recipe: z
-    .object({
-      semanticTemplate: z.string().optional(),
-      placementId: z.string().optional(),
-      families: z.array(z.string()).optional(),
-      scoringPolicy: z.string().optional(),
-    })
-    .optional(),
+  // FR-R6-009: manifest conditions use the CANONICAL treatment abstractions,
+  // not a second hand-written partial recipe schema:
+  //   recipe_id — named condition (CONTROL, FULL, SEMANTIC_ONLY, ...),
+  //               resolved server-side against ABLATION_RECIPES.
+  //   turnstile_required — per-run Turnstile experimental condition.
+  //   holdout_mode — restrict semantic templates to the holdout partition.
+  // recipe_id XOR recipe: one treatment identity per run (FR-R6-010).
+  recipe_id: RecipeIdSchema.optional(),
+  turnstile_required: z.boolean().optional(),
+  holdout_mode: z.boolean().default(false),
 });
 export type ExperimentManifest = z.infer<typeof ExperimentManifestSchema>;
 
@@ -229,6 +241,8 @@ export interface TrialDescriptor {
   model: string;
   prompt: string;
   extractor?: ExtractorType;
+  /** FR-R6-008: named condition for server-side provenance (recipe_id). */
+  recipeId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +260,9 @@ export interface AdapterCapabilities {
 export const ADAPTER_CAPABILITIES: Record<AgentType, AdapterCapabilities> = {
   "human":          { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "0.1.0" },
   "raw-dom":        { implemented: true,  usesModel: true,  usesPrompt: true,  supportedExtractors: ["raw-html", "simplified-dom"], version: "0.1.0" },
-  "playwright-mcp": { implemented: true,  usesModel: true,  usesPrompt: true,  supportedExtractors: ["accessibility"], version: "0.1.0" },
+  // FR-R6-066: renamed from "playwright-mcp" — this adapter is ariaSnapshot+LLM,
+  // not the official Playwright MCP server.
+  "ax-snapshot": { implemented: true,  usesModel: true,  usesPrompt: true,  supportedExtractors: ["accessibility"], version: "0.1.0" },
   // FR-R4-034: declared but not yet integrated as AgentAdapters — manifests
   // referencing them fail validation until wired.
   "browser-use":    { implemented: false, usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.0.0" },
@@ -336,6 +352,8 @@ export function expandManifest(manifest: ExperimentManifest): TrialDescriptor[] 
               model,
               prompt,
               extractor,
+              // FR-R6-008: named treatment identity for provenance.
+              recipeId: manifest.recipe_id,
             });
             index++;
           }

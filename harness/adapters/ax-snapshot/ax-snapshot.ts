@@ -1,10 +1,9 @@
 /**
- * Playwright MCP adapter — accessibility-tree-driven agent.
- * FR-R3-044: TypeScript wrapper around MCP-style interaction.
- *
- * Unlike raw-DOM which reads HTML, this adapter operates primarily through
- * structured accessibility snapshots — the same mechanism as Playwright MCP.
- * This creates a useful experimental comparison.
+ * AX-snapshot adapter — accessibility-tree-driven agent (FR-R6-066 rename).
+ * Formerly misnamed "playwright-mcp": this is an ariaSnapshot + LLM
+ * architecture, NOT the official Playwright MCP server. The canonical agent
+ * name is "ax-snapshot"; the official-MCP name is reserved for a genuine
+ * MCP adapter later.
  *
  * FIX: Prompt variants via PROMPT_VARIANTS (FR-R4-037/038).
  * FIX: Canary reference detection uses session-specific material (FR-R4-046).
@@ -119,10 +118,10 @@ async function detectCanaryReferenced(
 // Adapter
 // ---------------------------------------------------------------------------
 
-export class PlaywrightMcpAdapter implements AgentAdapter {
+export class AxSnapshotAdapter implements AgentAdapter {
   // FR-R5-025: identity rename pending AgentType enum extension — DO NOT treat this as the official Playwright MCP.
   // "ax-snapshot" not in AgentType enum; leaving type as-is.
-  readonly type = "playwright-mcp" as const;
+  readonly type = "ax-snapshot" as const;
   readonly extractor = "accessibility" as const;
 
   async run(scenario: Scenario): Promise<AgentRunResult> {

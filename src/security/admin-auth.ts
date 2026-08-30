@@ -11,11 +11,17 @@ import type { Env } from "../env.js";
 export const ADMIN_SESSION_TTL = 60 * 60 * 1000; // 1 hour
 const ADMIN_COOKIE = "__Host-fr_admin";
 
-/** Constant-time string comparison. Returns true if equal. */
+/** Constant-time string comparison. Length difference is folded into the
+ * accumulator so timing does not leak token length or match position. */
 function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
+  const len = Math.max(a.length, b.length);
   let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  for (let i = 0; i < len; i++) {
+    const x = i < a.length ? a.charCodeAt(i) : 0;
+    const y = i < b.length ? b.charCodeAt(i) : 0;
+    diff |= x ^ y;
+  }
+  diff |= a.length ^ b.length;
   return diff === 0;
 }
 

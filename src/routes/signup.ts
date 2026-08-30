@@ -12,9 +12,12 @@ import {
   generateSessionId,
   sessionCookieHeader,
   csrfCookieHeader,
-  persistSession,
   now,
+  resolveProfileKey,
 } from "../core/session.js";
+import {
+  persistSession,
+} from "../cloudflare/session.js";;
 import { deriveProfile, hashProfile, type DefenseRecipe } from "../core/profile.js";
 import { renderSignupPage } from "../core/renderer.js";
 import { makeCsrfToken } from "../security/csrf.js";
@@ -85,43 +88,73 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
         .first<{ recipe_json: string | null }>();
       const raw = row?.recipe_json;
       if (typeof raw === "string" && raw.length > 0) {
-        try { recipe = JSON.parse(raw) as DefenseRecipe; } catch { recipe = undefined; }
+        try { recipe = JSON.parse(raw) as DefenseRecipe; } catch {
+          // FR-R6-003: recipe_json was non-empty but not valid JSON —
+          // fail closed so a bound run never renders a random profile.
+          return error("lab run bind failed: recipe unreadable", 500);
+        }
       }
     } catch {
-      // recipe_json unreadable → treat as a failed bind rather than silently
-      // rendering a condition-less page (fail closed, FR-R5 Pass C).
+      // recipe_json lookup error → treat as a failed bind (fail closed, FR-R5 Pass C).
       return error("lab run bind failed: recipe unreadable", 500);
     }
   }
   const profile = await deriveProfile(env, sessionId, undefined, recipe);
+  // FR-R6-003: belt-and-braces — a bound lab run whose recipe requested
+  // families somehow derived zero families would silently dilute the
+  // experiment condition (deriveProfilePure already throws INVALID_RECIPE
+  // fail-closed, but log here for debug observability).
+  if (labBindRequested && bindToken && bindHash && recipe?.families) {
+    if (profile.families.length === 0) {
+      console.error("lab run bind: recipe requested families but derived profile has none", {
+        run_id: labRunId,
+        recipe_families: recipe.families,
+        derived_families: profile.families,
+      });
+    }
+  }
   const profileHash = await hashProfile(profile);
   const csrfToken = await makeCsrfToken(env, sessionId);
 
-  await persistSession(env.DB, {
-    id: sessionId,
-    createdAt: now(),
-    profileVersion: profileVersion(env),
-  }, profile.profileId, profileHash);
-
-  // FR-R5-005/028: one-time conditional bind — the WHERE clause repeats the
-  // token-hash check so a raced concurrent bind leaves this UPDATE a no-op,
-  // which we treat as a failure (fail closed, orphan session expires by TTL).
+  // FR-R6-011: atomic session-create + lab claim via D1 batch (transactional).
+  // Combines the session INSERT (verbatim from D1SessionStore.create) and
+  // the conditional lab-run claim UPDATE into a single round-trip so the
+  // session insert rolls back if the claim fails — no orphan sessions.
   if (labBindRequested && bindToken && bindHash) {
-    let claimed = false;
+    const profileKeyId = resolveProfileKey(env).current.id;
+    const sessionStmt = env.DB.prepare(
+      `INSERT INTO sessions (id, created_at, last_seen_at, profile_version, profile_key_id, profile_id, profile_hash, submitted)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
+    ).bind(
+      sessionId,
+      now(),
+      Date.now(),
+      profileVersion(env),
+      profileKeyId,
+      profile.profileId,
+      profileHash,
+    );
+    const claimStmt = env.DB.prepare(
+      `UPDATE lab_runs SET session_id = ?, bind_token_hash = NULL, status = 'BOUND'
+       WHERE id = ? AND bind_token_hash = ? AND status = 'PENDING'`
+    ).bind(sessionId, labRunId, bindHash);
+
     try {
-      const result = await env.DB.prepare(
-        `UPDATE lab_runs SET session_id = ?, bind_token_hash = NULL, status = 'BOUND'
-         WHERE id = ? AND bind_token_hash = ? AND status = 'PENDING'`
-      )
-        .bind(sessionId, labRunId, bindHash)
-        .run();
-      claimed = (result.meta?.changes ?? 0) === 1;
+      const results = await env.DB.batch([sessionStmt, claimStmt]);
+      const claimResult = results[1] as D1Result;
+      if ((claimResult.meta?.changes ?? 0) !== 1) {
+        return error("lab run bind failed: token already consumed", 409);
+      }
     } catch {
-      claimed = false;
+      return error("lab run bind failed: internal error", 500);
     }
-    if (!claimed) {
-      return error("lab run bind failed: token already consumed", 409);
-    }
+  } else {
+    // Unbound / production path — persist session as before.
+    await persistSession(env.DB, {
+      id: sessionId,
+      createdAt: now(),
+      profileVersion: profileVersion(env),
+    }, profile.profileId, profileHash);
   }
 
   let staticHtml: string;

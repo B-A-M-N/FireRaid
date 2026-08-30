@@ -37,12 +37,6 @@ export interface TelemetryConfig {
   captureSubmit: boolean;
 }
 
-export interface DecoyConfig {
-  fieldName: string;
-  endpointToken: string;
-  elementId: string;
-}
-
 export interface DefenseProfile {
   version: number;
   profileId: string;
@@ -51,8 +45,10 @@ export interface DefenseProfile {
   sessionId: string;
   families: DefenseFamilyName[];
   semantic?: SemanticConfig;
-  /** Aggregate decoy config (field + route together). */
-  decoy?: DecoyConfig;
+  // FR-R6-027/049: the aggregate `decoy` object was removed — decoy-field and
+  // decoy-route are independent families and must be read independently so the
+  // ablations stay isolated (DECOY_FIELD_ONLY renders no route token,
+  // DECOY_ROUTE_ONLY renders no field).
   decoyField?: DecoyFieldConfig;
   decoyRoute?: DecoyRouteConfig;
   interaction?: {

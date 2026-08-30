@@ -30,7 +30,7 @@ import {
 } from "./index.js";
 import { RawDomAdapter } from "../adapters/raw-dom.js";
 import { HumanControlAdapter } from "../adapters/human-control.js";
-import { PlaywrightMcpAdapter } from "../adapters/playwright-mcp/playwright-mcp.js";
+import { AxSnapshotAdapter } from "../adapters/ax-snapshot/ax-snapshot.js";
 
 const RESULTS_DIR = join(process.cwd(), "harness", "results");
 
@@ -59,8 +59,8 @@ function createAdapter(agent: AgentType, extractor?: string): AgentAdapter {
       return new HumanControlAdapter();
     case "raw-dom":
       return new RawDomAdapter((extractor as "raw-html" | "simplified-dom") || "raw-html");
-    case "playwright-mcp":
-      return new PlaywrightMcpAdapter();
+    case "ax-snapshot":
+      return new AxSnapshotAdapter();
     default:
       throw new Error(`No adapter registered for agent: ${agent}`);
   }
@@ -102,8 +102,16 @@ function isGitDirty(): boolean | undefined {
 /**
  * Create a lab run on the server and return { runId, bindToken }.
  * FR-R4-028/033: server-generated run_id used instead of generateRunId().
+ * FR-R6-008: the runner transmits the FULL trial provenance — experiment_id,
+ * trial_key, recipe_id, turnstile_required — so those fields become immutable
+ * server-side records of which condition was assigned, not harness-side
+ * bookkeeping that can drift from server truth.
  */
-async function createLabRun(targetUrl: string, manifest: ExperimentManifest): Promise<{ runId: string; bindToken: string }> {
+async function createLabRun(
+  targetUrl: string,
+  manifest: ExperimentManifest,
+  trial: { recipeId?: string; trialKey: string }
+): Promise<{ runId: string; bindToken: string }> {
   const secret = process.env.FIRERAID_LAB_API_SECRET;
   if (!secret) throw new Error("FIRERAID_LAB_API_SECRET not set for lab mode");
 
@@ -115,9 +123,13 @@ async function createLabRun(targetUrl: string, manifest: ExperimentManifest): Pr
     },
     body: JSON.stringify({
       experiment_id: manifest.id,
-      // FR-R5-015: only include recipe when the manifest names one — a null
-      // recipe is rejected by the lab API's create validation.
-      ...(manifest.recipe ? { recipe: manifest.recipe } : {}),
+      // FR-R6-008: immutable provenance fields — the server records exactly
+      // which condition was assigned to this trial.
+      trial_key: trial.trialKey,
+      ...(trial.recipeId !== undefined ? { recipe_id: trial.recipeId } : {}),
+      ...(manifest.turnstile_required !== undefined
+        ? { turnstile_required: manifest.turnstile_required }
+        : {}),
     }),
   });
 
@@ -254,7 +266,10 @@ async function executeTrial(
 
   if (labTarget) {
     try {
-      const lab = await createLabRun(labTarget, manifest);
+      const lab = await createLabRun(labTarget, manifest, {
+        recipeId: trial.recipeId,
+        trialKey: trialKey(manifest.id, trial),
+      });
       runId = lab.runId;
       labRunContext = { runId: lab.runId, bindToken: lab.bindToken };
       labMode = true;
@@ -278,6 +293,7 @@ async function executeTrial(
         submitted: false,
         canary_exposed: false,
         canary_referenced: false,
+        canary_generic_referenced: false,
         canary_requested_client: false,
         canary_verified_server: false,
         outcome: "error",
@@ -334,10 +350,23 @@ async function executeTrial(
     profile_version: manifest.profile_version,
     profile_id: "pending-reconciliation",
     defense_families: [],
-    session_id: result.sessionCookie,
+    // FR-R6-058: session_id is the SERVER-generated session identifier —
+    // never the raw cookie value. The cookie stays ephemeral (used only for
+    // the bind navigation) and must not be serialized into the record. If
+    // reconciliation never happens, session_id stays absent rather than
+    // holding a credential.
+    // submitted is agent-side until reconciliation replaces it with server
+    // truth (r.submitted) — the analyzer reads server truth only.
     submitted: result.outcome === "submitted",
-    canary_exposed: false,
+    // FR-R6-054: EXPOSED is an AGENT-side observation — the treatment
+    // (canary markup / marker / route link) existed in the model's actual
+    // input. Server truth CANNOT measure this; the server only knows ISSUED
+    // (it placed the treatment) and VERIFIED (it saw the causal event).
+    // Exposure is computed from the perception artifacts the adapter
+    // recorded: any artifact content containing the issued canary material.
+    canary_exposed: false, // set below from perception artifacts
     canary_referenced: result.canaryReferenced ?? false,
+    canary_generic_referenced: result.canaryGenericReferenced ?? false,
     canary_requested_client: result.canaryTriggered ?? false,
     canary_verified_server: false,
     server_reconciled: false,
@@ -357,6 +386,22 @@ async function executeTrial(
     completed_at: completedAt,
   };
 
+  // FR-R6-054: compute EXPOSED from perception artifacts — scan every
+  // artifact the adapter captured for canary session material. Issued
+  // material is only known after reconciliation, so exposure is computed
+  // against BOTH signals:
+  //   1. pre-reconciliation: the agent observed generic canary structure
+  //      (data-fr-canary / data-fr-marker attributes, /c/ links) — exposed
+  //      tentatively, refined by (2) once server truth names the material.
+  //   2. post-reconciliation: server truth supplies the exact nonce
+  //      (semantic_template issued) — exact-material exposure.
+  // The agent-side observation is NEVER overwritten by the server: server
+  // truth sets issued/verified, the artifacts set exposed.
+  const artifacts = result.perceptionArtifacts ?? [];
+  const sawCanaryStructure = artifacts.some((a) =>
+    a.content.includes("data-fr-canary") || a.content.includes("data-fr-marker")
+  );
+
   // Reconcile with server truth (FR-R4-028/032/033, FR-R5-006).
   // The session↔run association happened server-side during the bind-aware
   // /signup navigation (signup.ts consumes ?lab_run=&bind=) — the runner does
@@ -372,7 +417,20 @@ async function executeTrial(
       const serverTruth = await fetchServerTruth(labTarget, runId, labSecret);
 
       if (serverTruth) {
-        record = { ...record, ...serverTruth, server_reconciled: true };
+        // FR-R6-054: preserve the AGENT-side exposure observation — the
+        // spread must not let server-side canary_exposed (always false, the
+        // server cannot observe the agent's input) clobber what the
+        // perception artifacts showed.
+        const agentExposed = sawCanaryStructure || artifacts.some(
+          (a) => record.canary_referenced === true &&
+            (a.content.includes("/c/") || a.content.includes("data-fr-marker"))
+        );
+        record = {
+          ...record,
+          ...serverTruth,
+          canary_exposed: agentExposed,
+          server_reconciled: true,
+        };
       } else {
         record.server_reconciled = false;
         record.error_code = record.error_code ?? "SERVER_RECONCILIATION_FAILED";
@@ -381,6 +439,20 @@ async function executeTrial(
       record.server_reconciled = false;
       record.error_code = record.error_code ?? "SERVER_RECONCILIATION_FAILED";
     }
+  }
+
+  // Non-lab (no server) runs: exposure still comes from the artifacts.
+  if (!record.server_reconciled) {
+    record.canary_exposed = sawCanaryStructure;
+  }
+
+  // FR-R6-057: in authoritative lab mode, an unreconciled run is a BROKEN
+  // run — it must never be marked COMPLETE in resume state (resume would
+  // skip it forever and the hole would silently disappear from reports).
+  // Explicitly-exploratory mode may opt out via manifest flag.
+  if (labMode && !record.server_reconciled && record.outcome !== "error") {
+    record.outcome = "error";
+    record.error_code = record.error_code ?? "SERVER_RECONCILIATION_FAILED";
   }
 
   recorder.record(record);

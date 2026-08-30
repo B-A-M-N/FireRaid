@@ -57,7 +57,9 @@ export async function correlate(
   const evidence: Evidence[] = [];
 
   // === CLASS A — causal (server-verifiable) ===
-  if (observations.canaryEndpointHit && profile.decoy) {
+  // FR-R6-030: route evidence requires decoyRoute specifically — not
+  // aggregate decoy existence.
+  if (observations.canaryEndpointHit && profile.decoyRoute) {
     evidence.push({
       id: crypto.randomUUID(),
       class: "A",
@@ -65,7 +67,7 @@ export async function correlate(
       source: "CANARY_ROUTE_MATCH",
       verified: true,
       // FIX: Store hashed token, not raw (FR-R2-006)
-      metadata: { tokenHash: await hashToken(profile.decoy.endpointToken) },
+      metadata: { tokenHash: await hashToken(profile.decoyRoute.endpointToken) },
     });
   }
 
@@ -84,15 +86,16 @@ export async function correlate(
   }
 
   // === CLASS B — strong behavioral ===
-  // Only count decoy field populated if nonce didn't match
-  if (observations.decoyFieldPopulated && profile.decoy && !observations.decoyFieldMatchesNonce) {
+  // Only count decoy field populated if nonce didn't match.
+  // FR-R6-030: field evidence requires decoyField specifically.
+  if (observations.decoyFieldPopulated && profile.decoyField && !observations.decoyFieldMatchesNonce) {
     evidence.push({
       id: crypto.randomUUID(),
       class: "B",
       weight: 60,
       source: "DECOY_FIELD_POPULATED",
       verified: true,
-      metadata: { field: profile.decoy.fieldName },
+      metadata: { field: profile.decoyField.fieldName },
     });
   }
 

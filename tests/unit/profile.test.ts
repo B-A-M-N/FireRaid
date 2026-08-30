@@ -139,7 +139,8 @@ describe("correlation", () => {
   it("canary endpoint hit => Class A evidence", async () => {
     const env = mockEnv();
     const profile = await deriveProfile(env, "sid");
-    profile.decoy = { fieldName: "fr_x", endpointToken: "abc123", elementId: "fr_y" };
+    // FR-R6-028: route evidence requires decoyRoute specifically.
+    profile.decoyRoute = { endpointToken: "abc123" };
     const evidence = await correlate(profile, { canaryEndpointHit: true });
     const causal = evidence.filter((e) => e.class === "A");
     expect(causal.length).toBeGreaterThanOrEqual(1);

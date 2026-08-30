@@ -165,6 +165,74 @@ describe("FR-R4-056: migrations execute against a fresh SQLite database", () => 
     expect(() => insert.run("s4", "u-1")).toThrow(/UNIQUE/);
     expect(insert.run("s4", "u-2").changes).toBe(1);
   });
+
+  // FR-R6-044: applied migration files are immutable — 0001 must stay in its
+  // released (v0.1) form. The profile_key_id column was once added by editing
+  // 0001 in place, which silently broke every DB that had already applied the
+  // original file. This pins the lineage.
+  it("migration 0001 is the released v0.1 form (no profile_key_id — FR-R6-044)", () => {
+    const sql = readFileSync(join(MIGRATIONS_DIR, "0001_initial.sql"), "utf-8");
+    expect(sql).not.toContain("profile_key_id");
+    // The column arrives via the forward migration instead.
+    const db = new DatabaseSync(":memory:");
+    applyMigrations(db);
+    expect(tableColumns(db, "sessions")).toContain("profile_key_id");
+  });
+
+  // FR-R6-083: upgrade paths. Fresh-install tests prove nothing about a
+  // database that already applied OLDER released migrations. Replay the
+  // historical prefix, then apply everything introduced after it, and assert
+  // the resulting schema matches a fresh install.
+  it("upgrade path: v0.1 schema (0001 only) → later migrations → current (FR-R6-083)", () => {
+    const files = listMigrations();
+    const later = files.filter((f) => !f.startsWith("0001_"));
+
+    // Database state as of v0.1: only 0001 applied.
+    const upgraded = new DatabaseSync(":memory:");
+    const v1 = readFileSync(join(MIGRATIONS_DIR, "0001_initial.sql"), "utf-8");
+    upgraded.exec(v1);
+    for (const f of later) {
+      upgraded.exec(readFileSync(join(MIGRATIONS_DIR, f), "utf-8"));
+    }
+
+    // Must equal a fresh install, table by table.
+    const fresh = new DatabaseSync(":memory:");
+    applyMigrations(fresh);
+
+    const freshTables = fresh
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+      .all()
+      .map((r) => String((r as { name: string }).name));
+    for (const table of freshTables) {
+      expect(tableColumns(upgraded, table).sort()).toEqual(tableColumns(fresh, table).sort());
+    }
+    // And the two columns whose lineage this audit item is about:
+    expect(tableColumns(upgraded, "sessions")).toContain("profile_key_id");
+    expect(tableColumns(upgraded, "sessions")).toContain("last_event_seq");
+  });
+
+  it("upgrade path: pre-lifecycle schema (0001–0004) → 0005+ → current (FR-R6-083)", () => {
+    const files = listMigrations();
+    const prefix = files.filter((f) => f.startsWith("000") && f < "0005_");
+    const rest = files.filter((f) => !prefix.includes(f));
+
+    const upgraded = new DatabaseSync(":memory:");
+    for (const f of prefix) {
+      upgraded.exec(readFileSync(join(MIGRATIONS_DIR, f), "utf-8"));
+    }
+    // v4-era lab_runs had no outcome/expires_at/terminal_reason columns and no
+    // bound_at/completed_at — 0005/0007 add them forward.
+    for (const f of rest) {
+      upgraded.exec(readFileSync(join(MIGRATIONS_DIR, f), "utf-8"));
+    }
+
+    const fresh = new DatabaseSync(":memory:");
+    applyMigrations(fresh);
+    for (const col of ["experiment_id", "trial_key", "recipe_id", "outcome", "expires_at", "terminal_reason"]) {
+      expect(tableColumns(upgraded, "lab_runs")).toContain(col);
+    }
+    expect(tableColumns(upgraded, "lab_runs").sort()).toEqual(tableColumns(fresh, "lab_runs").sort());
+  });
 });
 
 // ---------------------------------------------------------------------------

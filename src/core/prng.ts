@@ -69,13 +69,14 @@ export class SeedStream {
     if (n <= 0 || n > 0x100000000) throw new Error(`invalid range: ${n}`);
     const bits = 32 - Math.clz32(n - 1);
     const bytesNeeded = Math.ceil(bits / 8);
-    // FIX: Use >>> 0 to handle 32-bit case properly
-    const mask = bits === 32 ? 0xFFFFFFFF : (1 << bits) - 1;
     for (;;) {
       const b = await this.nextBytes(bytesNeeded);
+      // FIX FR-R6-045: accumulate with unsigned arithmetic, not bitwise
+      // shifts — `val << 8` is signed 32-bit, so a 4-byte value with the high
+      // bit set went negative and `val < n` could return a negative integer.
+      // Max value here is 0xFFFFFFFF (well under 2^53), so Number math is exact.
       let val = 0;
-      for (let i = 0; i < bytesNeeded; i++) val = (val << 8) | b[i];
-      val &= mask;
+      for (let i = 0; i < bytesNeeded; i++) val = val * 256 + b[i];
       if (val < n) return val;
     }
   }

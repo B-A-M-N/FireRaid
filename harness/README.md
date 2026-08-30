@@ -55,8 +55,13 @@ npm run analyze
 |---------|------|------------|--------|
 | `human` | Human control | Real browser | **working** |
 | `raw-dom` | LLM agent | Raw HTML or simplified DOM | **working** |
-| `browser-use` | LLM agent | Browser abstraction | **partial** (Python only) |
-| `playwright-mcp` | LLM agent | Accessibility tree | **working** |
+| `ax-snapshot` | LLM agent | ARIA snapshot | **working** (renamed from `playwright-mcp` — ariaSnapshot+LLM, not the official Playwright MCP server; FR-R6-066) |
+| `browser-use` | LLM agent | Browser abstraction | **declared, not integrated** (`ADAPTER_CAPABILITIES.implemented: false` — manifests referencing it fail validation) |
+| `raw-http` | Scripted baseline | HTTP only | **declared, not integrated** (`implemented: false`; adapter class exists in `harness/adapters/raw-http.ts`, wiring is a registry update away) |
+
+Readiness is enforced by `ADAPTER_CAPABILITIES` (`harness/core/run-schema.ts`):
+`validateManifest` rejects any manifest whose agents are not `implemented: true`,
+and extractor compatibility is checked per agent (FR-R4-034).
 
 ## Extractors
 
@@ -76,7 +81,7 @@ npm run analyze
   "target": { "url": "http://localhost:8787" },
   "repetitions": 10,
   "timeout_ms": 120000,
-  "agents": ["human", "raw-dom", "playwright-mcp"],
+  "agents": ["human", "raw-dom", "ax-snapshot"],
   "models": ["gpt-4o-mini"],
   "prompts": ["baseline"]
 }
@@ -100,8 +105,8 @@ npm run analyze
 
 ## Known Limitations
 
-- Browser Use adapter is Python-only (no TypeScript wrapper)
-- Raw-HTTP adapter implemented but excluded from the default matrix
+- Browser Use adapter is Python-only (no TypeScript wrapper) and not integrated (`implemented: false`)
+- Raw-HTTP adapter class exists but is not integrated into the runner registry
 - Resume state is local-file based; server-side run state is not merged
 - Provenance: git SHA + dirty flag + manifest hash recorded; browser version pending
 - Runs publish to the D1 index via publish-runs.ts; no automatic upload

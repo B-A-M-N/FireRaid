@@ -14,6 +14,7 @@
     "test:a11y": "playwright test --config=playwright.a11y.config.ts",
     "lint": "eslint \"src/**/*.ts\" \"harness/**/*.ts\" \"tests/**/*.ts\" --max-warnings 0",
     "test:e2e:ci": "playwright install chromium firefox webkit && playwright test",
+    "deploy": "wrangler deploy --env production",
     "deploy:lab": "wrangler deploy --env public-lab",
     "deploy:production": "wrangler deploy --env production",
     "experiment": "tsx harness/core/runner.ts",

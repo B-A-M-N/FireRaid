@@ -11,7 +11,7 @@
 import { json, error, withSecurityHeaders } from "../security/headers.js";
 import { requireAdmin, createAdminToken, adminCookieHeader, verifyAdminSecret } from "../security/admin-auth.js";
 import type { Env } from "../env.js";
-import { deriveProfile } from "../core/profile.js";
+import { reconstructFromSessionId } from "../core/reconstruct.js";
 
 // POST /api/admin/login — exchange ADMIN_SECRET for a session cookie
 // FIX: Constant-time secret comparison to prevent timing attacks
@@ -171,19 +171,47 @@ export async function adminSessionDetail(req: Request, env: Env, sessionId: stri
     }));
   }
 
-  // FR-R4-071: Reconstruct defense families from the session's stored profile
-  // version — not by guessing from canary hits (a hit only proves that ONE
-  // family was active, not the profile's family set).
+  // FR-R4-071 / FR-R6-094: Reconstruct defense families from the session's
+  // stored profile version via the canonical reconstruction service.
+  // Fetch the bound lab run's recipe_json for the session — include it so
+  // reconstruction is fully recipe-aware (FR-R6-094).
   const defense_families: string[] = [];
+  let reconstructionError: string | undefined;
+
+  // Fetch recipe_json from lab_runs (BOUND or COMPLETE only)
+  let recipeJson: string | null = null;
   try {
-    const row = session as { profile_version: number };
-    const profile = await deriveProfile(env, sessionId, row.profile_version);
-    defense_families.push(...profile.families);
-  } catch (err) {
-    console.error("FireRaid admin profile reconstruction failed:", {
-      sessionId,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    const r = await env.DB.prepare(
+      `SELECT recipe_json FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
+    )
+      .bind(sessionId)
+      .first<{ recipe_json: string | null }>();
+    recipeJson = r?.recipe_json ?? null;
+  } catch {
+    // lab_runs table may not exist; recipe stays null — reconstruction still works
+  }
+
+  const recipe = recipeJson
+    ? (() => {
+        try {
+          return JSON.parse(recipeJson);
+        } catch {
+          // Unparseable recipe — reconstruction proceeds without it;
+          // the caller will see reconstructionError below.
+          return null;
+        }
+      })()
+    : undefined;
+
+  const result = await reconstructFromSessionId(env, sessionId, {
+    profileVersion: (session as { profile_version: number }).profile_version,
+    recipe: recipe ?? undefined,
+  });
+
+  if (result.ok) {
+    defense_families.push(...result.profile.families);
+  } else {
+    reconstructionError = `${result.code}: ${result.detail}`;
   }
 
   return json({
@@ -193,6 +221,7 @@ export async function adminSessionDetail(req: Request, env: Env, sessionId: stri
     submission,
     evidence,
     defense_families,
+    ...(reconstructionError ? { reconstructionError } : {}),
   });
 }
 

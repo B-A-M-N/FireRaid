@@ -9,6 +9,8 @@ export interface ScoringPolicy {
   quarantineOnCausal: boolean;
   reviewScoreThreshold: number;
   quarantineScoreThreshold: number;
+  /** Threshold for strong behavioral evidence to require human review. Default: 80. */
+  strongReviewThreshold?: number;
 }
 
 export const DEFAULT_POLICY: ScoringPolicy = {
@@ -16,6 +18,7 @@ export const DEFAULT_POLICY: ScoringPolicy = {
   quarantineOnCausal: true,
   reviewScoreThreshold: 50,
   quarantineScoreThreshold: 100,
+  strongReviewThreshold: 80,
 };
 
 /** Known scoring policies — extend as new policies are added. */
@@ -26,12 +29,14 @@ export const KNOWN_POLICIES: Record<string, ScoringPolicy> = {
     quarantineOnCausal: true,
     reviewScoreThreshold: 30,
     quarantineScoreThreshold: 80,
+    strongReviewThreshold: 60,
   },
   "permissive-v1": {
     name: "permissive-v1",
     quarantineOnCausal: true,
     reviewScoreThreshold: 70,
     quarantineScoreThreshold: 120,
+    strongReviewThreshold: 90,
   },
 };
 
@@ -78,24 +83,49 @@ export function decide(
   const reasons: string[] = [];
   let disposition: Disposition = "ACCEPT";
 
+  // Whether the causal branch reached a terminal QUARANTINE decision —
+  // later review/accept branches must not run (and must not DOWNGRADE a
+  // quarantine: the original single-if form let `total >= reviewScoreThreshold`
+  // overwrite a just-issued QUARANTINE with REVIEW).
+  let quarantined = false;
+
   if (causal >= 1 && total >= policy.quarantineScoreThreshold) {
-    disposition = "QUARANTINE";
-    reasons.push(`Class A causal evidence detected (${causal} hits)`);
-  } else if (strong >= 1 && total >= 80) {
-    disposition = "REVIEW";
-    reasons.push(`Strong behavioral evidence with high score (${total})`);
-  } else if (total >= policy.reviewScoreThreshold) {
-    disposition = "REVIEW";
-    reasons.push(`Score ${total} exceeds review threshold ${policy.reviewScoreThreshold}`);
-  } else {
-    disposition = "ACCEPT";
-    reasons.push(`Score ${total} below threshold; no causal evidence`);
+    if (policy.quarantineOnCausal) {
+      disposition = "QUARANTINE";
+      quarantined = true;
+      reasons.push(`Class A causal evidence detected (${causal} hits)`);
+    } else {
+      reasons.push(`Causal evidence present but policy disables quarantine-on-causal`);
+      // Fall through to strong/review/accept logic below.
+    }
+  }
+
+  if (!quarantined) {
+    if (
+      strong >= 1 &&
+      total >= (policy.strongReviewThreshold ?? 80)
+    ) {
+      disposition = "REVIEW";
+      reasons.push(
+        `Strong behavioral evidence with high score (${total})`
+      );
+    } else if (total >= policy.reviewScoreThreshold) {
+      disposition = "REVIEW";
+      reasons.push(
+        `Score ${total} exceeds review threshold ${policy.reviewScoreThreshold}`
+      );
+    } else {
+      disposition = "ACCEPT";
+      reasons.push(`Score ${total} below threshold; no causal evidence`);
+    }
   }
 
   // When causal evidence is present but below quarantine threshold,
   // note that in the reasons.
   if (causal >= 1 && total < policy.quarantineScoreThreshold) {
-    reasons.push(`Causal evidence detected but below quarantine threshold ${policy.quarantineScoreThreshold}`);
+    reasons.push(
+      `Causal evidence detected but below quarantine threshold ${policy.quarantineScoreThreshold}`
+    );
   }
 
   return {

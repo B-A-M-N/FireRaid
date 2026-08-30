@@ -25,10 +25,16 @@
 import { json, error } from "../security/headers.js";
 import type { Env } from "../env.js";
 import { isLabMode } from "../env.js";
-import { getSessionId, loadSession } from "../core/session.js";
-import { deriveProfile } from "../core/profile.js";
+import {
+  loadSession,
+} from "../cloudflare/session.js";;
+import { reconstructFromSessionId } from "../core/reconstruct.js";
 import { ABLATION_RECIPES } from "../core/profile.js";
-import type { DefenseRecipe } from "../core/profile.js";
+import type { DefenseRecipe } from "../core/recipe-schema.js";
+
+// FR-R6-012: POST /api/lab/runs/:id/associate was removed (double-bind). If
+// src/index.ts still routes it, it 404s via the missing export — remove the
+// route line there in the integration pass.
 
 // ─── Cryptographic helpers (exported for testing) ───────────────────────
 
@@ -74,7 +80,7 @@ export function requireLabAuth(req: Request, env: Env): boolean {
 // ─── FR-R5-037: Expiry helper ───────────────────────────────────────────
 
 /**
- * Expire stale lab runs (FR-R5-037).
+ * Expire stale lab runs (FR-R5-037, FR-R6-013, FR-R6-014).
  *   - PENDING runs past 24h → EXPIRED (terminal_reason: 'expired_pending')
  *   - BOUND runs without reconciled_at past 24h → ABANDONED (terminal_reason: 'abandoned_bound')
  * Returns total changes across both UPDATEs. Best-effort — errors are swallowed.
@@ -86,26 +92,29 @@ export async function expireStaleLabRuns(
   const twentyFourHoursAgo = now - 86_400_000; // 24h in ms
   let total = 0;
 
-  // PENDING runs past expiry → EXPIRED
+  // PENDING runs past expiry → EXPIRED (FR-R6-013: bind `now` directly;
+  // expires_at is already created_at+24h, so using now-24h would let runs
+  // survive ~48h).
   try {
     const r1 = await db
       .prepare(
         `UPDATE lab_runs SET status = 'EXPIRED', terminal_reason = 'expired_pending'
          WHERE status = 'PENDING' AND expires_at < ?`
       )
-      .bind(twentyFourHoursAgo)
+      .bind(now)
       .run();
     total += r1.meta.changes;
   } catch {
     // Best-effort: don't fail callers on expiry sweep
   }
 
-  // BOUND runs without reconciled_at past 24h → ABANDONED
+  // BOUND runs without reconciled_at past 24h → ABANDONED (FR-R6-014: use
+  // bound_at when present, fall back to created_at for legacy rows).
   try {
     const r2 = await db
       .prepare(
         `UPDATE lab_runs SET status = 'ABANDONED', terminal_reason = 'abandoned_bound'
-         WHERE status = 'BOUND' AND reconciled_at IS NULL AND created_at < ?`
+         WHERE status = 'BOUND' AND reconciled_at IS NULL AND COALESCE(bound_at, created_at) < ?`
       )
       .bind(twentyFourHoursAgo)
       .run();
@@ -206,19 +215,17 @@ function validateCreateBody(raw: unknown): {
 /**
  * Build the recipe JSON to persist: recipe_id takes priority;
  * if recipe is also provided it is stored as a refinement on top.
+ *
+ * FR-R6-010: when recipe_id is present, IGNORE body recipe overrides entirely.
+ * recipe_id is the sole treatment identity — the stored recipe_json is exactly
+ * ABLATION_RECIPES[recipe_id]. This prevents two different recipes from
+ * claiming the same recipe_id (e.g., CONTROL) while having different fields.
  */
 function buildRecipeJson(recipe?: DefenseRecipe, recipeId?: string): string | null {
   if (recipeId !== undefined && ABLATION_RECIPES[recipeId]) {
-    // recipe_id is authoritative; merge in body recipe overrides
-    const base = { ...ABLATION_RECIPES[recipeId] };
-    if (recipe) {
-      // Merge body recipe fields on top (recipe_id is authoritative base)
-      for (const k of Object.keys(recipe) as (keyof DefenseRecipe)[]) {
-        (base as Record<string, unknown>)[k] = (recipe as Record<string, unknown>)[k];
-      }
-      return JSON.stringify(base);
-    }
-    return JSON.stringify(base);
+    // FR-R6-010: recipe_id is authoritative — ignore body recipe overrides.
+    // The stored recipe_json must be exactly the canonical ablation recipe.
+    return JSON.stringify(ABLATION_RECIPES[recipeId]);
   }
   if (recipe) return JSON.stringify(recipe);
   return null;
@@ -335,12 +342,15 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
     outcome: string | null;
     expires_at: number | null;
     terminal_reason: string | null;
+    bound_at: number | null;
+    completed_at: number | null;
   } | null;
 
   try {
     record = await env.DB.prepare(
       `SELECT id, session_id, recipe_json, turnstile_required, status, created_at, reconciled_at,
-              experiment_id, trial_key, recipe_id, outcome, expires_at, terminal_reason
+              experiment_id, trial_key, recipe_id, outcome, expires_at, terminal_reason,
+              bound_at, completed_at
        FROM lab_runs WHERE id = ?`
     )
       .bind(runId)
@@ -363,6 +373,8 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
       outcome: record.outcome,
       expires_at: record.expires_at,
       terminal_reason: record.terminal_reason,
+      bound_at: record.bound_at,
+      completed_at: record.completed_at,
     });
   }
 
@@ -376,10 +388,29 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
     return error("internal server error", 500);
   }
 
-  // Reconstruct profile to get defense families + variant ID
+  // FR-R6-004: Canonical profile reconstruction via recipe_json.
+  // Parse the stored recipe_json from the lab run row, then reconstruct the
+  // profile using the canonical reconstructFromSessionId path.
+  let parsedRecipe: DefenseRecipe | undefined;
+  if (record.recipe_json) {
+    try {
+      parsedRecipe = JSON.parse(record.recipe_json) as DefenseRecipe;
+    } catch {
+      return error("internal server error", 500);
+    }
+  }
+
   let profile;
   try {
-    profile = await deriveProfile(env, record.session_id, session?.profileVersion);
+    const reconstructed = await reconstructFromSessionId(env, record.session_id, {
+      profileVersion: session?.profileVersion,
+      recipe: parsedRecipe,
+    });
+    if (!reconstructed.ok) {
+      console.error("Profile reconstruction failed in getLabRun", { detail: reconstructed.detail });
+      return error("internal server error", 500);
+    }
+    profile = reconstructed.profile;
   } catch {
     return error("internal server error", 500);
   }
@@ -476,6 +507,8 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
     recipe_id: record.recipe_id,
     outcome: record.outcome,
     status: record.outcome ? "COMPLETE" : record.status,
+    bound_at: record.bound_at,
+    completed_at: record.completed_at,
     submission: submission
       ? {
           disposition: submission.disposition,
@@ -547,12 +580,13 @@ export async function postLabRunOutcome(req: Request, env: Env, runId: string): 
   }
 
   const terminalReason = body.error_code ?? body.outcome;
+  const now = Date.now();
 
   try {
     await env.DB.prepare(
-      `UPDATE lab_runs SET outcome = ?, terminal_reason = ?, status = 'COMPLETE' WHERE id = ?`
+      `UPDATE lab_runs SET outcome = ?, terminal_reason = ?, status = 'COMPLETE', completed_at = ? WHERE id = ?`
     )
-      .bind(body.outcome, terminalReason, runId)
+      .bind(body.outcome, terminalReason, now, runId)
       .run();
   } catch (e) {
     console.error("D1 update failed in postLabRunOutcome", { error: e instanceof Error ? e.message : String(e) });
@@ -565,78 +599,12 @@ export async function postLabRunOutcome(req: Request, env: Env, runId: string): 
 /**
  * POST /api/lab/runs/:id/associate — browser bind, one-time capability.
  * Uses bind token (not runner bearer secret) — the browser agent's context.
+ *
+ * FR-R6-012: This endpoint was removed (double-bind). The stub below returns
+ * 410 Gone so the export remains compatible with src/index.ts imports.
  */
-export async function associateLabRun(req: Request, env: Env, runId: string): Promise<Response> {
-  if (!isLabMode(env)) return error("lab API disabled in production", 404);
-  if (req.method !== "POST") return error("method not allowed", 405);
-
-  // Look up the run
-  let record: {
-    id: string;
-    session_id: string | null;
-    bind_token_hash: string | null;
-    status: string;
-  } | null;
-
-  try {
-    record = await env.DB.prepare(
-      `SELECT id, session_id, bind_token_hash, status FROM lab_runs WHERE id = ?`
-    )
-      .bind(runId)
-      .first();
-  } catch (e) {
-    console.error("D1 select failed in associateLabRun", { error: e instanceof Error ? e.message : String(e) });
-    return error("internal server error", 500);
-  }
-
-  if (!record) return error("run not found", 404);
-
-  // Accept bind_token from JSON body or query parameter
-  const url = new URL(req.url);
-  const queryBind = url.searchParams.get("bind_token");
-
-  let bindTokenValue: string | null = null;
-  if (queryBind) {
-    bindTokenValue = queryBind;
-  } else {
-    let body: { bind_token?: string };
-    try {
-      body = (await req.json()) as typeof body;
-      bindTokenValue = body.bind_token ?? null;
-    } catch {
-      return error("invalid JSON", 400);
-    }
-  }
-
-  if (!bindTokenValue) return error("bind_token required", 400);
-
-  // If bind_token_hash is NULL → already bound or never issued
-  if (record.bind_token_hash === null) return error("bind token not available", 400);
-
-  // Compute SHA-256 of provided token and constant-time compare
-  const providedHash = await hashBindToken(bindTokenValue);
-  if (!constantTimeEqualStr(providedHash, record.bind_token_hash)) {
-    return error("forbidden", 403);
-  }
-
-  // Get session from cookie
-  const sessionId = getSessionId(req);
-  if (!sessionId) return error("session required", 401);
-
-  // One-time use: NULL the hash, set session_id, mark BOUND
-  try {
-    await env.DB.prepare(
-      `UPDATE lab_runs SET session_id = ?, bind_token_hash = NULL, status = 'BOUND'
-       WHERE id = ? AND bind_token_hash = ?`
-    )
-      .bind(sessionId, runId, record.bind_token_hash)
-      .run();
-  } catch (e) {
-    console.error("D1 update failed in associateLabRun", { error: e instanceof Error ? e.message : String(e) });
-    return error("internal server error", 500);
-  }
-
-  return json({ run_id: record.id, session_id: sessionId, status: "BOUND" });
+export async function associateLabRun(_req: Request, _env: Env, _runId: string): Promise<Response> {
+  return error("removed: bind happens via GET /signup?lab_run=&bind= (FR-R6-012)", 410);
 }
 
 /**
