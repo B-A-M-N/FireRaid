@@ -38,6 +38,9 @@
       captureSubmit: true, // submit tracking is core UX, not a treatment
     },
     interactionScoring: false,
+    // FR-P0-5: defaults mirror the server schema; the rendered config is
+    // authoritative when present.
+    limits: { maxEventsPerBatch: 256, maxBatchBytes: 16 * 1024 },
   };
 
   function readClientConfig() {
@@ -48,6 +51,19 @@
       const t = parsed && typeof parsed === "object" ? parsed.telemetry : null;
       if (!t || typeof t !== "object") return DEFAULT_MASK;
       const bool = (v) => typeof v === "boolean" ? v : false;
+      // FR-P0-5: server-derived batch limits — count AND byte caps travel
+      // with the config so the client can never drift from the server schema.
+      const limits = parsed.limits && typeof parsed.limits === "object" ? parsed.limits : {};
+      const limitsOut = {
+        maxEventsPerBatch:
+          typeof limits.maxEventsPerBatch === "number" && limits.maxEventsPerBatch > 0
+            ? Math.floor(limits.maxEventsPerBatch)
+            : 256,
+        maxBatchBytes:
+          typeof limits.maxBatchBytes === "number" && limits.maxBatchBytes > 0
+            ? Math.floor(limits.maxBatchBytes)
+            : 16 * 1024,
+      };
       return {
         telemetry: {
           captureFocus: bool(t.captureFocus),
@@ -58,6 +74,7 @@
           captureSubmit: typeof t.captureSubmit === "boolean" ? t.captureSubmit : true,
         },
         interactionScoring: bool(parsed.interactionScoring),
+        limits: limitsOut,
       };
     } catch {
       return DEFAULT_MASK;
@@ -186,16 +203,50 @@
   }
 
   /**
-   * FR-R7-023: server-side MAX_EVENTS_PER_BATCH is 256 (re-benchmarked
-   * against the 16 KiB byte budget). Keep this constant in sync with
-   * src/types/telemetry.ts.
+   * FR-P0-5: batch-splitting honors BOTH server limits — count
+   * (maxEventsPerBatch) and encoded JSON byte size (maxBatchBytes). A batch
+   * over the byte cap is 413'd wholesale, so the client must never build one.
    */
-  const MAX_EVENTS_PER_BATCH = 256;
+  function batchFits(batch) {
+    if (batch.length > MASK.limits.maxEventsPerBatch) return false;
+    try {
+      return new TextEncoder().encode(JSON.stringify({ events: batch })).length <= MASK.limits.maxBatchBytes;
+    } catch {
+      return false;
+    }
+  }
 
   /**
-   * FR-R7-015 / 016: send one batch and return the server's acceptedThrough
-   * seq on success, the same on 409 (trim only what the server actually
-   * has), or null on any other failure (leave the queue).
+   * FR-P0-5: take the next sendable batch off the FRONT of the queue. If the
+   * first maxEventsPerBatch events exceed the byte cap, keep halving until a
+   * sendable prefix is found (a single oversize event is dropped — it cannot
+   * ever fit, and its absence degrades one observation, not the stream).
+   */
+  function takeBatch() {
+    if (events.length === 0) return null;
+    let size = Math.min(events.length, MASK.limits.maxEventsPerBatch);
+    while (size > 1) {
+      const candidate = events.slice(0, size);
+      if (batchFits(candidate)) return candidate;
+      size = Math.floor(size / 2);
+    }
+    // Single event still too big? Drop it (cannot ever fit) and continue.
+    const dropped = events.shift();
+    try {
+      console.warn("fireraid: dropped oversize telemetry event", dropped && dropped.seq);
+    } catch { /* console may not exist in odd contexts */ }
+    return events.length > 0 ? takeBatch() : null;
+  }
+
+  /**
+   * FR-R7-015 / 016 + FR-P0-2: send one batch and return ONLY what the
+   * server actually acknowledged. The client NEVER manufactures an ACK from
+   * the submitted batch — if the server does not name acceptedThrough, the
+   * queue keeps everything and retries later.
+   *   - 200 + acceptedThrough  → server stored through that seq
+   *   - 409 + acceptedThrough  → concurrent/conflicting write; trim to the
+   *                              authoritative watermark and retry the rest
+   *   - anything else          → null (leave the queue untouched)
    */
   async function tryAcknowledge(batch) {
     try {
@@ -205,18 +256,13 @@
         body: JSON.stringify({ events: batch }),
         keepalive: true,
       });
-      if (resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        return typeof body.acceptedThrough === "number"
-          ? body.acceptedThrough
-          : batch[batch.length - 1].seq;
-      }
-      if (resp.status === 409) {
-        const body = await resp.json().catch(() => ({}));
-        if (typeof body.acceptedThrough === "number") {
+      if (resp.ok || resp.status === 409) {
+        const body = await resp.json().catch(() => null);
+        if (body && typeof body.acceptedThrough === "number") {
           return body.acceptedThrough;
         }
-        return batch[batch.length - 1].seq;
+        // No authoritative ACK → treat as failure; the queue stays intact.
+        return null;
       }
       return null;
     } catch {
@@ -231,18 +277,19 @@
     acknowledgedSeq = Math.max(acknowledgedSeq, throughSeq);
   }
 
+  /**
+   * FR-R7-015 / FR-P0-4/5: drain the outbox through /api/events. Each
+   * iteration takes a sendable batch off the queue FRONT (splice semantics:
+   * nothing is duplicated), sends it, and trims by the server's ACK.
+   * Failure leaves the remaining queue intact for the next drain.
+   */
   async function drainToBatches() {
-    while (events.length > MAX_EVENTS_PER_BATCH) {
-      const batch = events.slice(0, MAX_EVENTS_PER_BATCH);
+    while (events.length > 0) {
+      const batch = takeBatch();
+      if (!batch) break;
       const acked = await tryAcknowledge(batch);
-      if (acked === null) break;
+      if (acked === null) break; // network/server failure — retry later
       trimAcknowledgedPrefix(acked);
-    }
-  }
-
-  function requeueInFlight(inFlight) {
-    if (inFlight.length > 0) {
-      events.unshift(...inFlight);
     }
   }
 
@@ -318,13 +365,21 @@
   });
 
   // Submit handler.
+  // FR-P0-4: the submit batch is SPLICED out of the queue, not copied —
+  // the old slice() + requeueInFlight(unshift) pair duplicated every seq on
+  // a verification/network failure, making the retry batch malformed
+  // (strictly-increasing seq is a server rejection condition).
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (submitInFlight) return;
     submitInFlight = true;
     push("submit_attempt");
     await drainToBatches();
-    const inFlight = events.slice();
+
+    // Take the whole remaining queue as the submit payload (it fits: the
+    // submit body cap is larger than the batch cap, and drainToBatches just
+    // emptied everything the server already has).
+    const submitBatch = events.splice(0, events.length);
 
     const formData = new FormData(form);
     const formObj = {};
@@ -332,6 +387,12 @@
       if (key !== "csrf") formObj[key] = value;
     });
     const csrfToken = form.querySelector('[name="csrf"]')?.value || "";
+
+    // Requeue WITHOUT duplication: put the splice'd events back at the
+    // front, in order, exactly once.
+    function requeue(batch) {
+      if (batch.length > 0) events.unshift(...batch);
+    }
 
     try {
       const resp = await fetch("/api/submit", {
@@ -341,24 +402,27 @@
           csrf: csrfToken,
           turnstileToken,
           form: formObj,
-          eventBatch: inFlight,
+          eventBatch: submitBatch,
         }),
       });
       const result = await resp.json();
 
       if (resp.ok && result.status === "received") {
-        trimAcknowledgedPrefix(inFlight[inFlight.length - 1]?.seq ?? seq);
+        // Server finalized the session — the stream is consumed either way.
+        trimAcknowledgedPrefix(submitBatch[submitBatch.length - 1]?.seq ?? seq);
         renderResult(result);
       } else if (resp.status === 403 && result.status === "verification_required") {
-        requeueInFlight(inFlight);
+        // Not finalized — retry with the SAME events (they were spliced out,
+        // so putting them back is not a duplication).
+        requeue(submitBatch);
         resetTurnstile();
         renderVerificationRequired(result);
       } else {
-        requeueInFlight(inFlight);
+        requeue(submitBatch);
         renderResult(result);
       }
     } catch {
-      requeueInFlight(inFlight);
+      requeue(submitBatch);
       renderResult({ error: "Submission failed. Please try again." });
     } finally {
       submitInFlight = false;

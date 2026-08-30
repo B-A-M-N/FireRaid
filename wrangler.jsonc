@@ -16,6 +16,13 @@
     ]
   },
 
+"triggers": {
+    // FR-P0-15: retention sweep + expired-lab-run cleanup. Cron triggers
+    // only apply to the top-level worker; each named env restates it so a
+    // -e deploy publishes the schedule explicitly.
+    "crons": ["41 4 * * *"]
+    },
+
   "d1_databases": [
     {
       "binding": "DB",
@@ -47,6 +54,10 @@
           "/admin*"
         ]
       },
+"triggers": {
+        // FR-P0-15: retention sweep cron (see top-level note).
+        "crons": ["41 4 * * *"]
+      },
       "d1_databases": [
         {
           "binding": "DB",
@@ -74,6 +85,10 @@
           "/admin*"
         ]
       },
+"triggers": {
+        // FR-P0-15: retention sweep cron (see top-level note).
+        "crons": ["41 4 * * *"]
+      },
       "d1_databases": [
         {
           "binding": "DB",
@@ -99,6 +114,10 @@
       },
       // FR-R6-001: public-lab MUST get its own D1 database before real deploy
       // (swap database_id; `wrangler d1 create fireraid-public-lab`).
+"triggers": {
+        // FR-P0-15: retention sweep cron (see top-level note).
+        "crons": ["41 4 * * *"]
+      },
       "d1_databases": [
         {
           "binding": "DB",
@@ -124,6 +143,10 @@
       },
       // FR-R6-001: production MUST have a distinct database from public-lab —
       // swap database_id (`wrangler d1 create fireraid-production`).
+"triggers": {
+        // FR-P0-15: retention sweep cron (see top-level note).
+        "crons": ["41 4 * * *"]
+      },
       "d1_databases": [
         {
           "binding": "DB",

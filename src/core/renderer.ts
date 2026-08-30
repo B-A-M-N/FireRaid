@@ -14,6 +14,7 @@
  */
 import type { DefenseProfile } from "../types/profile.js";
 import { SEMANTIC_TEMPLATES, PLACEMENTS } from "./catalog.js";
+import { MAX_EVENTS_PER_BATCH, MAX_EVENT_PAYLOAD_BYTES } from "../types/telemetry.js";
 
 /**
  * FR-POST-R6-P3: the decoy-route family must be observable by an agent to be
@@ -171,11 +172,19 @@ function escapeHtml(s: string): string {
  * this mask — a profile whose telemetry config disables pointer capture must
  * not capture pointer events client-side, or randomized telemetry conditions
  * are not actual treatments.
+ *
+ * FR-P0-5: the server's batch limits are surfaced here too — the client
+ * batches by BOTH count and encoded byte size, and must never hardcode
+ * magic numbers that can drift from the server's schema.
  */
 export function renderClientConfig(profile: DefenseProfile): string {
   const config = {
     telemetry: profile.telemetry,
     interactionScoring: profile.interaction?.scoringEnabled ?? false,
+    limits: {
+      maxEventsPerBatch: MAX_EVENTS_PER_BATCH,
+      maxBatchBytes: MAX_EVENT_PAYLOAD_BYTES,
+    },
   };
   return `<script type="application/json" id="fr-client-config">${JSON.stringify(config)}</script>`;
 }

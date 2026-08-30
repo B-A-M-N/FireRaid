@@ -9,8 +9,8 @@ export interface SessionStore {
     profileVersion: number;
     profileId: string;
     profileHash: string;
-    /** FR-R4-077: which profile key derived this session (rotation support). */
-    profileKeyId?: string;
+    /** FR-R4-077/FR-P0-18: REQUIRED — rotation-safe reconstruction. */
+    profileKeyId: string;
   }): Promise<void>;
 
   load(sessionId: string): Promise<{
@@ -104,6 +104,8 @@ export interface SubmissionFinalizer {
       disposition: string;
       policy: string;
       reasons: string[];
+      /** FR-P0-16: provider name (e.g. "turnstile"), or "none" when unset. */
+      verificationProvider: string;
     };
     evidence: Array<{
       evidenceClass: string;

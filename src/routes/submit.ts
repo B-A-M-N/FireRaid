@@ -41,8 +41,12 @@ import { correlate, type ObservationSet } from "../core/correlation.js";
 import { decide } from "../core/decision.js";
 import { MAX_SUBMIT_BODY_BYTES } from "../types/telemetry.js";
 import { isLabMode } from "../env.js";
-import { validateTelemetryBatch, persistTelemetryBatch } from "./telemetry.js";
-import { aggregateSessionTelemetry, loadSessionMetrics } from "../telemetry/aggregate.js";
+import {
+  validateTelemetryBatch,
+  ingestTelemetryBatch,
+  type ValidatedEvent,
+} from "./telemetry.js";
+import { aggregateSessionTelemetry, loadSessionMetrics, mergeSessionMetrics } from "../telemetry/aggregate.js";
 import type { TelemetryMetrics } from "../telemetry/aggregate.js";
 import { D1SubmissionFinalizer } from "../cloudflare/session-store.js";
 import { randomUUID } from "node:crypto";
@@ -165,6 +169,9 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   } else {
     turnstileRequired = Boolean(env.TURNSTILE_SECRET_KEY);
   }
+  // FR-P0-16: provider identity defaults to "none" — the truthful name for a
+  // submission that was never challenged.
+  let verificationProvider = "none";
 
   // FR-R6-020: required + verifier unavailable = configuration failure.
   // Never silently turn a required experimental treatment off.
@@ -192,6 +199,10 @@ export async function submit(req: Request, env: Env): Promise<Response> {
     if (!provider) {
       return error("verification provider unavailable", 500);
     }
+    // FR-P0-16: record WHO adjudicated. The submissions row carries the
+    // provider name so analysis can distinguish a real challenge from an
+    // unchallenged submission.
+    verificationProvider = provider.name;
     const turnstileResult = await provider.verify({
       token: body.turnstileToken,
       expectedAction: "fireraid_signup",
@@ -304,6 +315,12 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   // FR-R6-026: structural validation failures (TOO_MANY_EVENTS,
   // MALFORMED_EVENT, SEQ_ORDER_VIOLATION) are rejected — an invalid batch is
   // NEVER silently discarded at submit time. Oversize arrays are 413.
+  // FR-P0-3: the SAME canonical ingestion as /api/events — the final batch
+  // often overlaps what /api/events already stored (client retries, pagehide
+  // race). The overlap is stripped here and only the never-stored suffix is
+  // persisted + folded, so a submit-time suffix can no longer silently
+  // vanish before scoring.
+  let finalTelemetryBatch: ValidatedEvent[] = [];
   if (body.eventBatch !== undefined) {
     if (!Array.isArray(body.eventBatch)) {
       return error("eventBatch must be an array", 400);
@@ -314,25 +331,51 @@ export async function submit(req: Request, env: Env): Promise<Response> {
       return error(`telemetry rejected: ${validated.code}`, status);
     }
     if (validated.events.length > 0) {
-      try {
-        await persistTelemetryBatch(env.DB, sessionId, validated.events);
-      } catch (err) {
-        if (err instanceof Error && err.message === "PAYLOAD_TOO_LARGE") {
+      const outcome = await ingestTelemetryBatch(env.DB, sessionId, validated.events);
+      switch (outcome.kind) {
+        case "too_large":
           return error("payload too large", 413);
+        case "failed":
+          // Storage failure at submit: the submission itself can still be
+          // finalized, but interaction scoring would silently read a stream
+          // missing its final events. Treat as a hard 5xx — the client
+          // retains its queue and can retry the whole submit.
+          console.error("telemetry persist at submit failed");
+          return error("telemetry storage failure", 500);
+        case "conflict":
+          // Concurrent writer covered this range. The authoritative stream
+          // is complete; fold nothing new. (outcome.acceptedThrough is
+          // server truth.)
+          break;
+        case "accepted":
+          finalTelemetryBatch = outcome.stored;
+          break;
+      }
+      // Fold the newly-stored suffix into the compact metrics state so
+      // scoring below sees the complete session. Production only.
+      if (!isLabMode(env) && finalTelemetryBatch.length > 0) {
+        try {
+          await mergeSessionMetrics(
+            env.DB,
+            sessionId,
+            finalTelemetryBatch,
+            {
+              capturePointer: profile.telemetry.capturePointer,
+              captureKey: profile.telemetry.captureKey,
+            }
+          );
+        } catch (mergeErr) {
+          console.warn("session_metrics merge at submit failed:", mergeErr);
         }
-        // Watermark/identity violations at submit: the final telemetry batch
-        // may have already been delivered via /api/events — treat duplicate
-        // delivery as benign, log anything else.
-        console.warn("telemetry persist at submit failed:", err instanceof Error ? err.message : err);
       }
     }
   }
 
   // FR-R6-018: interaction evidence — aggregate the session's telemetry and
   // populate the observation set when the interaction family is scoring.
-  // FR-R7-022: production reads the compact per-session metrics row in
-  // ONE D1 hit instead of scanning every event_batches row; lab mode still
-  // uses the raw aggregator for research fidelity.
+  // FR-P0-1: production reads the compact incremental state (the same state
+  // machine proven equivalent to full aggregation by the parity test) in ONE
+  // D1 row read; lab mode uses the raw aggregator for research fidelity.
   if (profile.interaction?.scoringEnabled) {
     let metrics: TelemetryMetrics | null = !isLabMode(env)
       ? await loadSessionMetrics(env.DB, sessionId).catch(() => null)
@@ -383,7 +426,10 @@ export async function submit(req: Request, env: Env): Promise<Response> {
       publicId,
       sessionId,
       createdAt: Date.now(),
-      turnstileOk: true,
+      // FR-P0-16: reality, not a constant — false when no challenge ran.
+      // FR-P0-16: reality, not a constant — false when no challenge ran.
+      turnstileOk: verificationProvider !== "none",
+      verificationProvider,
       causalHits: decision.signals.filter((e) => e.class === "A").length,
       strongHits: decision.signals.filter((e) => e.class === "B").length,
       weakHits: decision.signals.filter((e) => e.class === "C").length,

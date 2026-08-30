@@ -11,7 +11,7 @@ import { submit } from "./routes/submit.js";
 import { canary } from "./routes/canary.js";
 import { events } from "./routes/telemetry.js";
 import { adminLogin, adminSummary, adminSessions, adminSessionDetail, adminExperiments, adminExperimentDetail, adminExport, adminLogout, adminCleanup } from "./routes/admin.js";
-import { createLabRun, getLabRun, ingestLabRuns, postLabRunOutcome } from "./routes/lab.js";
+import { createLabRun, getLabRun, ingestLabRuns, postLabRunOutcome, expireStaleLabRuns } from "./routes/lab.js";
 import { error, html } from "./security/headers.js";
 import { readAdminHtml } from "./core/static.js";
 import { looksLikeTestSiteKey, looksLikeTestSecret } from "./turnstile/verify.js";
@@ -98,7 +98,12 @@ export default {
         );
         const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
         const sweep = await runRetentionSweep(env.DB, cutoff);
-        console.log("fireraid retention sweep", { retentionDays, cutoff, ...sweep });
+        // FR-P0-15: the lab-run lifecycle sweep (PENDING→EXPIRED,
+        // stale-BOUND→ABANDONED) runs in the SAME cron — one scheduled
+        // invocation owns all background DB maintenance, so lab-run state
+        // can't silently rot if an operator only schedules one trigger.
+        const expiredLabRuns = await expireStaleLabRuns(env.DB, Date.now());
+        console.log("fireraid retention sweep", { retentionDays, cutoff, ...sweep, expiredLabRuns });
       } catch (err) {
         console.error("fireraid retention sweep failed:", err);
       }

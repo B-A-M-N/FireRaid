@@ -109,11 +109,15 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
   // families somehow derived zero families would silently dilute the
   // experiment condition (deriveProfilePure already throws INVALID_RECIPE
   // fail-closed, but log here for debug observability).
-  if (labBindRequested && bindToken && bindHash && recipe?.families) {
+  // FR-P1: `recipe.families` alone is truthy for CONTROL's legitimately
+  // EMPTY families array ([] is truthy in JS) — a CONTROL bind would log a
+  // bogus "recipe requested families but derived none" error. The guard's
+  // subject is "requested families", so test length, not presence.
+  if (labBindRequested && bindToken && bindHash && (recipe?.families?.length ?? 0) > 0) {
     if (profile.families.length === 0) {
       console.error("lab run bind: recipe requested families but derived profile has none", {
         run_id: labRunId,
-        recipe_families: recipe.families,
+        recipe_families: recipe?.families,
         derived_families: profile.families,
       });
     }

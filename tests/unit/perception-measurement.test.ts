@@ -242,10 +242,13 @@ describe("source contracts (static)", () => {
   });
 
   it("exposure is computed from artifacts, never overwritten by server truth", () => {
-    // The reconciliation spread must re-assert canary_exposed AFTER
-    // ...serverTruth (source-order guarantee).
+    // FR-P0-7: canary_exposed is derived from the artifact-grounded tri-state
+    // (canary_exposed: exposureState === "EXPOSED") and the reconciliation
+    // spread must re-assert it AFTER ...serverTruth (source-order guarantee) —
+    // server-side canary truth can never clobber the agent-side observation.
     const reconBlock = runnerSrc.match(/record = \{[\s\S]*?server_reconciled: true/);
     expect(reconBlock).toBeTruthy();
-    expect(reconBlock![0]).toMatch(/canary_exposed: agentExposed/);
+    expect(reconBlock![0]).toMatch(/canary_exposed: exposureState === "EXPOSED"/);
+    expect(reconBlock![0]).toMatch(/exposure_state: exposureState/);
   });
 });

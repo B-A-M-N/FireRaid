@@ -22,14 +22,17 @@ export class D1SessionStore implements SessionStore {
     profileVersion: number;
     profileId: string;
     profileHash: string;
-    profileKeyId?: string;
+    // FR-P0-18: REQUIRED. A session persisted without its issuing key id
+    // reconstructs under the CURRENT key after rotation — silently mutating
+    // the defense profile issued to a real user. Fail the insert instead.
+    profileKeyId: string;
   }): Promise<void> {
     await this.db
       .prepare(
         `INSERT INTO sessions (id, created_at, last_seen_at, profile_version, profile_key_id, profile_id, profile_hash, submitted)
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
       )
-      .bind(session.id, session.createdAt, Date.now(), session.profileVersion, session.profileKeyId ?? null, session.profileId, session.profileHash)
+      .bind(session.id, session.createdAt, Date.now(), session.profileVersion, session.profileKeyId, session.profileId, session.profileHash)
       .run();
   }
 
@@ -231,6 +234,9 @@ export class D1SubmissionFinalizer implements SubmissionFinalizer {
       disposition: string;
       policy: string;
       reasons: string[];
+      // FR-P0-16: which verification provider adjudicated (e.g. "turnstile",
+      // "none" when no provider is configured). Disambiguates turnstile_ok.
+      verificationProvider: string;
     };
     evidence: Array<{
       evidenceClass: string;
@@ -250,8 +256,8 @@ export class D1SubmissionFinalizer implements SubmissionFinalizer {
     // Statement 2: insert submission with public_id
     const insertStmt = this.db
       .prepare(
-        `INSERT INTO submissions (public_id, session_id, created_at, turnstile_ok, causal_hits, strong_hits, weak_hits, risk_score, disposition, policy, reasons_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO submissions (public_id, session_id, created_at, turnstile_ok, causal_hits, strong_hits, weak_hits, risk_score, disposition, policy, verification_provider, reasons_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         submission.publicId,
@@ -264,6 +270,7 @@ export class D1SubmissionFinalizer implements SubmissionFinalizer {
         submission.riskScore,
         submission.disposition,
         submission.policy,
+        submission.verificationProvider,
         JSON.stringify(submission.reasons)
       );
 

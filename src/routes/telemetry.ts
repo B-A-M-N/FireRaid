@@ -143,43 +143,120 @@ export function validateTelemetryBatch(events: unknown): ValidateResult {
 }
 
 /**
- * Persist a validated batch with a first-edge watermark (FR-R6-031/032/033).
- *
- * Single D1 batch (transactional), both statements gated on the SAME
- * predicate — the watermark's PRE-UPDATE value must be below the batch's
- * FIRST seq:
- *   1. INSERT ... SELECT ... WHERE COALESCE((SELECT last_event_seq FROM
- *      sessions WHERE id = ?), -1) < ?first_seq
- *   2. UPDATE sessions SET last_event_seq = ?last_seq WHERE id = ? AND
- *      COALESCE(last_event_seq, -1) < ?first_seq
- *
- * If statement 2 changes 0 rows, the batch lost a race or replayed — nothing
- * observable was committed (statement 1's predicate is the identical
- * pre-update read, so a "changed 0" means its INSERT also matched 0 rows).
- * A unique-violation on idx_event_batches_identity (migration 0008) means an
- * EXACT replay of an already-accepted batch → BATCH_IDENTITY_CONFLICT.
- * Empty batches resolve 0. Throws PAYLOAD_TOO_LARGE over 16 KiB.
+ * FR-P0-3: read the authoritative telemetry watermark for a session.
+ * One indexed SELECT; -1 when the session has no stored events yet.
  */
-export async function persistTelemetryBatch(
+export async function readWatermark(db: D1Database, sessionId: string): Promise<number> {
+  const row = await db
+    .prepare(`SELECT last_event_seq FROM sessions WHERE id = ?`)
+    .bind(sessionId)
+    .first<{ last_event_seq: number | null }>();
+  return row?.last_event_seq ?? -1;
+}
+
+export type IngestOutcome =
+  | {
+      kind: "accepted";
+      /** Events actually persisted (the never-stored suffix). */
+      stored: ValidatedEvent[];
+      /** Authoritative watermark after persistence = last stored seq. */
+      acceptedThrough: number;
+      /** True when the incoming batch was an exact replay (nothing new). */
+      duplicate: boolean;
+    }
+  | { kind: "conflict"; acceptedThrough: number }
+  | { kind: "too_large" }
+  | { kind: "failed" };
+
+/**
+ * FR-P0-2/P0-3: the ONE canonical telemetry ingestion path, shared by
+ * /api/events and /api/submit. Given a validated batch:
+ *
+ *   1. Read the authoritative watermark (sessions.last_event_seq).
+ *   2. If the batch's FIRST seq is <= watermark, strip the already-accepted
+ *      prefix — an overlap carries both stored events AND never-stored ones;
+ *      dropping the whole batch silently loses the suffix (the FR-R7-022-era
+ *      submit bug).
+ *   3. If nothing remains, the batch was fully stored → duplicate success
+ *      reporting the current watermark.
+ *   4. Otherwise persist the suffix with the first-edge watermark gate
+ *      (transactional INSERT + UPDATE below), then fold the suffix into the
+ *      compact metrics state.
+ *
+ * An overlapping batch whose suffix is empty is a duplicate; a batch whose
+ * first seq exceeds watermark+1 has a gap but is still accepted — clients
+ * may legitimately skip events (kind gating client-side) and the seq stream
+ * is an ordering guarantee, not a completeness one.
+ */
+export async function ingestTelemetryBatch(
   db: D1Database,
   sessionId: string,
   events: ValidatedEvent[]
-): Promise<number> {
-  if (events.length === 0) return 0;
+): Promise<IngestOutcome> {
+  if (events.length === 0) {
+    const wm = await readWatermark(db, sessionId);
+    return { kind: "accepted", stored: [], acceptedThrough: wm, duplicate: true };
+  }
 
+  const watermark = await readWatermark(db, sessionId);
+  // Strip everything the server already stores. Events are seq-sorted and
+  // strictly increasing (validated), so a simple first-seq comparison
+  // identifies the accepted prefix.
+  const suffix = events.filter((e) => e.seq > watermark);
+  if (suffix.length === 0) {
+    // Fully-stored batch: exact replay, idempotent success.
+    return { kind: "accepted", stored: [], acceptedThrough: watermark, duplicate: true };
+  }
+
+  const persisted = await persistEventSuffix(db, sessionId, suffix);
+  if (persisted === "TOO_LARGE") return { kind: "too_large" };
+  if (persisted === "CONFLICT") {
+    // Lost a race with a concurrent batch covering this range — report the
+    // authoritative watermark so the client can trim exactly.
+    return { kind: "conflict", acceptedThrough: await readWatermark(db, sessionId) };
+  }
+  if (persisted === "FAILED") return { kind: "failed" };
+
+  // Fold the SAME suffix into the compact metrics state (production only;
+  // callers gate this behind isLabMode — the raw rows must stay intact for
+  // research replay).
+  return {
+    kind: "accepted",
+    stored: suffix,
+    acceptedThrough: suffix[suffix.length - 1].seq,
+    duplicate: false,
+  };
+}
+
+type PersistResult = "OK" | "TOO_LARGE" | "CONFLICT" | "FAILED";
+
+/**
+ * Persist a never-stored suffix of events with the first-edge watermark
+ * gate (FR-R6-032/033 semantics retained). Single D1 batch (transactional):
+ *   1. INSERT ... WHERE COALESCE((SELECT last_event_seq ...), -1) < ?first
+ *   2. UPDATE sessions SET last_event_seq = ?last, last_seen_at = now
+ *      WHERE COALESCE(last_event_seq, -1) < ?first
+ *
+ * If statement 2 changes 0 rows, a concurrent batch won — nothing was
+ * committed (statement 1 shares the identical pre-update predicate).
+ * A unique-violation on idx_event_batches_identity means an exact replay
+ * raced through the prefix strip → treated as CONFLICT (benign; the other
+ * writer won and the data is stored).
+ */
+async function persistEventSuffix(
+  db: D1Database,
+  sessionId: string,
+  events: ValidatedEvent[]
+): Promise<PersistResult> {
   const payload = JSON.stringify(events);
   if (payloadByteLength(payload) > MAX_EVENT_PAYLOAD_BYTES) {
-    throw new Error("PAYLOAD_TOO_LARGE");
+    return "TOO_LARGE";
   }
 
   const firstSeq = events[0].seq;
   const lastSeq = events[events.length - 1].seq;
-
-  // FR-R6-032/033: BOTH statements gated on the first edge of the incoming
-  // batch vs the stored watermark (COALESCE handles fresh NULL rows).
-  // FR-R7-017: the watermark UPDATE also bumps last_seen_at — previously
-  // the route called touchSession() after this, causing a second UPDATE.
   const now = Date.now();
+
   const insertStmt = db
     .prepare(
       `INSERT INTO event_batches (session_id, created_at, first_seq, last_seq, event_count, payload_json)
@@ -198,22 +275,20 @@ export async function persistTelemetryBatch(
   try {
     results = (await db.batch([insertStmt, watermarkStmt])) as { meta?: { changes?: number } }[];
   } catch (err) {
-    // FR-R6-032: unique violation on the identity index = exact replay of an
-    // accepted batch. Distinguishable, benign, and NOT a watermark violation.
     const msg = err instanceof Error ? err.message : String(err);
     if (/UNIQUE\s+constraint\s+failed.*idx_event_batches_identity|constraint\s+failed.*event_batches/i.test(msg)) {
-      throw new Error("BATCH_IDENTITY_CONFLICT");
+      // The concurrent writer stored this exact range first. Not an error:
+      // report conflict with the authoritative watermark.
+      return "CONFLICT";
     }
-    throw err;
+    return "FAILED";
   }
 
   const watermark = results[1] ?? {};
   if ((watermark.meta?.changes ?? 0) !== 1) {
-    // Overlapping/stale replay: the INSERT's identical predicate already
-    // selected 0 rows, so nothing was committed.
-    throw new Error("SEQ_WATERMARK_VIOLATION");
+    return "CONFLICT";
   }
-  return lastSeq;
+  return "OK";
 }
 
 export async function events(req: Request, env: Env): Promise<Response> {
@@ -244,47 +319,75 @@ export async function events(req: Request, env: Env): Promise<Response> {
     return error(`telemetry rejected: ${validated.code}${validated.detail ? ` (${validated.detail})` : ""}`, 400);
   }
 
-  if (validated.events.length > 0) {
-    try {
-      await persistTelemetryBatch(env.DB, sessionId, validated.events);
-      // FR-R7-022: production sessions maintain a compact per-session
-      // metrics row that submit scoring reads at finalize time. Lab mode
-      // skips this — research needs the raw event_batches rows intact.
-      if (!isLabMode(env)) {
-        // Read capture config from the session's persisted profile — we
-        // already SELECTed the session above, so the capture flags are not
-        // yet in hand. Use the page-config defaults (pointer/key both on,
-        // matching the most common production profile shape); when the
-        // profile disables capture the resulting noPointerEvents/noKeyEvents
-        // fields become NULL (unknown) rather than scoring the user.
+  const outcome = await ingestTelemetryBatch(env.DB, sessionId, validated.events);
+
+  switch (outcome.kind) {
+    case "too_large":
+      return error("payload too large", 413);
+    case "failed":
+      return error("failed to persist events", 500);
+    case "conflict":
+      // FR-P0-2: a watermark conflict is NOT a drop-everything signal — the
+      // response carries the authoritative acceptedThrough so the client
+      // trims exactly the stored prefix and retries the remainder.
+      return json({ received: 0, duplicate: true, acceptedThrough: outcome.acceptedThrough });
+    case "accepted": {
+      // FR-P0-6: fold the newly-stored suffix into the compact metrics row
+      // using the PROFILE's actual capture mask (not assumed true/true).
+      // Production only — lab needs the raw rows and nothing else.
+      if (!isLabMode(env) && outcome.stored.length > 0) {
         try {
-          await mergeSessionMetrics(
-            env.DB,
-            sessionId,
-            validated.events,
-            { capturePointer: true, captureKey: true }
-          );
+          const capture = await resolveCaptureMask(env, session);
+          await mergeSessionMetrics(env.DB, sessionId, outcome.stored, capture);
         } catch (mergeErr) {
           // Metrics merge is best-effort; never block an event batch.
           console.warn("session_metrics merge failed:", mergeErr);
         }
       }
-    } catch (err) {
-      if (err instanceof Error && err.message === "PAYLOAD_TOO_LARGE") {
-        return error("payload too large", 413);
-      }
-      if (err instanceof Error && err.message === "SEQ_WATERMARK_VIOLATION") {
-        return error("stale event batch (watermark)", 409);
-      }
-      if (err instanceof Error && err.message === "BATCH_IDENTITY_CONFLICT") {
-        // FR-R6-032: exact replay of an accepted batch — idempotent success.
-        return json({ received: 0, duplicate: true });
-      }
-      return error("failed to persist events", 500);
+      return json({
+        received: outcome.stored.length,
+        duplicate: outcome.duplicate,
+        acceptedThrough: outcome.acceptedThrough,
+      });
     }
   }
+}
 
-  return json({ received: validated.events.length, acceptedThrough: validated.events[validated.events.length - 1].seq });
+/**
+ * FR-P0-6: resolve the capture mask from the session's ISSUED PROFILE, not
+ * from page-config assumptions. The profile was randomized per session —
+ * capturePointer/captureKey are treatment variables, and scoring a user as
+ * noPointerEvents because the profile disabled pointer capture is a false
+ * positive by construction.
+ *
+ * Reconstruction is the same canonical path submit uses (reconstructIssued
+ * Profile honors the persisted profile_key_id); on failure the mask is
+ * treated as unknown → both channels enabled=false → metrics stay NULL
+ * (never scored) rather than assumed-on.
+ */
+async function resolveCaptureMask(
+  env: Env,
+  session: { profileVersion: number; profileKeyId: string | null; labModeHoldout?: boolean }
+): Promise<{ capturePointer: boolean; captureKey: boolean }> {
+  try {
+    const { reconstructIssuedProfile } = await import("../core/reconstruct.js");
+    const reconstructed = await reconstructIssuedProfile(env, {
+      id: "", // unused by derivation; derivation keys on profileVersion/keyId
+      profileVersion: session.profileVersion,
+      profileKeyId: session.profileKeyId,
+    });
+    if (reconstructed.ok) {
+      return {
+        capturePointer: reconstructed.profile.telemetry.capturePointer,
+        captureKey: reconstructed.profile.telemetry.captureKey,
+      };
+    }
+  } catch (err) {
+    console.warn("capture-mask reconstruction failed:", err instanceof Error ? err.message : err);
+  }
+  // Unknown profile → treat capture as OFF for both channels: metrics become
+  // NULL (unknown), never false-positive.
+  return { capturePointer: false, captureKey: false };
 }
 
 /**

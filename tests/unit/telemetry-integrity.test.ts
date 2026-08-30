@@ -371,80 +371,105 @@ describe("payloadByteLength (FR-R5-020)", () => {
   });
 });
 
-// ── persistTelemetryBatch watermark semantics (FR-R5-018) ────────────
+// ── ingestTelemetryBatch semantics (FR-R5-018 + FR-P0-2/3) ───────────
 
-import { persistTelemetryBatch } from "../../src/routes/telemetry.js";
+import { ingestTelemetryBatch } from "../../src/routes/telemetry.js";
 
-describe("persistTelemetryBatch — watermark semantics (FR-R5-018)", () => {
-  // Mock D1 that captures batch() calls and returns configurable results
-  function makeMockDB(stmts: { meta: { changes: number } }[]) {
+describe("ingestTelemetryBatch — watermark semantics (FR-R5-018 + FR-P0-2/3)", () => {
+  // Mock D1: watermark reads return a fixed value; batch() returns
+  // configurable changes counts. watermarkAfter models the concurrent
+  // writer that won the race: it becomes visible to watermark reads only
+  // AFTER the first db.batch() call (the ingest's own persist attempt).
+  function makeMockDB(opts: { watermark?: number | null; watermarkAfter?: number; changes?: number[] }) {
+    let persisted = false;
     return {
       prepare(_sql: string) {
         return {
           bind(..._args: unknown[]) {
-            return this;
+            return {
+              first: async () => {
+                if (!_sql.includes("last_event_seq")) return null;
+                // After the batch raced-and-lost, the concurrent writer's
+                // watermark is what the re-read must return.
+                if (persisted && opts.watermarkAfter !== undefined) {
+                  return { last_event_seq: opts.watermarkAfter };
+                }
+                return { last_event_seq: opts.watermark ?? null };
+              },
+              run: async () => ({ meta: { changes: 1 } }),
+            };
           },
         };
       },
       async batch(_stmts: unknown[]) {
-        const results = stmts.map((s, i) => {
-          if (i < stmts.length) return s;
-          return { meta: { changes: 0 } };
-        });
-        // D1 batch returns array of results in order
-        return results as unknown[];
+        persisted = true;
+        const changes = opts.changes ?? [1, 1];
+        return changes.map((c) => ({ meta: { changes: c } }));
       },
     } as unknown as D1Database;
   }
 
-  it("both statements succeed (changes:1, changes:1) → resolves with lastSeq", async () => {
-    const mockDb = makeMockDB([
-      { meta: { changes: 1 } },
-      { meta: { changes: 1 } },
-    ]);
+  it("fresh watermark (-1) accepts a new batch", async () => {
+    const mockDb = makeMockDB({ watermark: -1, changes: [1, 1] });
     const testEvents: ValidatedEvent[] = [
       { seq: 1, dt: 100, kind: "focus" },
       { seq: 5, dt: 500, kind: "input" },
     ];
-    const lastSeq = await persistTelemetryBatch(mockDb as D1Database, "test-session", testEvents);
-    expect(lastSeq).toBe(5);
+    const outcome = await ingestTelemetryBatch(mockDb, "test-session", testEvents);
+    expect(outcome.kind).toBe("accepted");
+    if (outcome.kind === "accepted") {
+      expect(outcome.acceptedThrough).toBe(5);
+      expect(outcome.stored).toHaveLength(2);
+    }
   });
 
-  it("empty events → resolves with 0", async () => {
-    const mockDb = makeMockDB([{ meta: { changes: 0 } }, { meta: { changes: 0 } }]);
-    const lastSeq = await persistTelemetryBatch(mockDb as D1Database, "test-session", []);
-    expect(lastSeq).toBe(0);
+  it("empty events → duplicate success with the current watermark", async () => {
+    const mockDb = makeMockDB({ watermark: 7 });
+    const outcome = await ingestTelemetryBatch(mockDb, "test-session", []);
+    expect(outcome.kind).toBe("accepted");
+    if (outcome.kind === "accepted") {
+      expect(outcome.duplicate).toBe(true);
+      expect(outcome.acceptedThrough).toBe(7);
+    }
   });
 
-  it("first statement changes === 0 → throws SEQ_WATERMARK_VIOLATION", async () => {
-    const mockDb = makeMockDB([
-      { meta: { changes: 0 } },
-      { meta: { changes: 0 } },
-    ]);
+  it("fully-stored batch (watermark >= last seq) → duplicate, nothing stored", async () => {
+    const mockDb = makeMockDB({ watermark: 10, changes: [1, 1] });
     const testEvents: ValidatedEvent[] = [{ seq: 1, dt: 100, kind: "focus" }];
-    await expect(
-      persistTelemetryBatch(mockDb as D1Database, "test-session", testEvents)
-    ).rejects.toThrow("SEQ_WATERMARK_VIOLATION");
+    const outcome = await ingestTelemetryBatch(mockDb, "test-session", testEvents);
+    expect(outcome.kind).toBe("accepted");
+    if (outcome.kind === "accepted") {
+      expect(outcome.duplicate).toBe(true);
+      expect(outcome.stored).toHaveLength(0);
+      expect(outcome.acceptedThrough).toBe(10);
+    }
   });
 
-  it("PAYLOAD_TOO_LARGE error for oversized payload", async () => {
-    // Build a payload that exceeds 16KB — use events with large targets
-    const largeTarget = "x".repeat(300); // each event ~350 bytes of JSON
-    const tooManyEvents: ValidatedEvent[] = Array.from({ length: 65 }, (_, i) => ({
-      seq: i + 1,
-      dt: (i + 1) * 100,
-      kind: "focus",
-      target: largeTarget,
-    }));
-    // 65 events would be rejected by validateTelemetryBatch (TOO_MANY_EVENTS),
-    // but we pass already-validated events directly to persistTelemetryBatch.
-    // 65 events * ~350 bytes ≈ 22.75KB > 16KB — should trigger PAYLOAD_TOO_LARGE.
-    const mockDbOversize = makeMockDB([
-      { meta: { changes: 1 } },
-      { meta: { changes: 1 } },
-    ]);
-    await expect(
-      persistTelemetryBatch(mockDbOversize as D1Database, "test-session", tooManyEvents)
-    ).rejects.toThrow("PAYLOAD_TOO_LARGE");
+  it("suffix after the watermark is stored (overlap stripped)", async () => {
+    const mockDb = makeMockDB({ watermark: 5, changes: [1, 1] });
+    const testEvents: ValidatedEvent[] = [
+      { seq: 4, dt: 400, kind: "focus" },
+      { seq: 6, dt: 600, kind: "input" },
+      { seq: 9, dt: 900, kind: "key" },
+    ];
+    const outcome = await ingestTelemetryBatch(mockDb, "test-session", testEvents);
+    expect(outcome.kind).toBe("accepted");
+    if (outcome.kind === "accepted") {
+      expect(outcome.stored.map((e) => e.seq)).toEqual([6, 9]);
+      expect(outcome.acceptedThrough).toBe(9);
+    }
+  });
+
+  it("watermark statement changes===0 → conflict outcome (not a silent drop)", async () => {
+    // The concurrent writer won: the authoritative watermark after the race
+    // is 1 (it stored this event first).
+    const mockDb = makeMockDB({ watermark: -1, watermarkAfter: 1, changes: [1, 0] });
+    const testEvents: ValidatedEvent[] = [{ seq: 1, dt: 100, kind: "focus" }];
+    const outcome = await ingestTelemetryBatch(mockDb, "test-session", testEvents);
+    expect(outcome.kind).toBe("conflict");
+    if (outcome.kind === "conflict") {
+      // Re-reads the authoritative watermark for the ACK.
+      expect(outcome.acceptedThrough).toBe(1);
+    }
   });
 });
