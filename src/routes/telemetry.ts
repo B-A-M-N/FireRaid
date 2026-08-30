@@ -23,8 +23,8 @@ import {
   isExpired,
 } from "../core/session.js";
 import {
-  loadSession,
-} from "../cloudflare/session.js";;
+  ensureSessionRow,
+} from "../cloudflare/session-envelope.js";;
 import {
   ALLOWED_EVENT_TYPES,
   MAX_EVENTS_PER_BATCH,
@@ -294,11 +294,18 @@ async function persistEventSuffix(
 export async function events(req: Request, env: Env): Promise<Response> {
   if (req.method !== "POST") return error("method not allowed", 405);
 
-  const sessionId = getSessionId(req);
-  if (!sessionId) return error("no session", 403);
-  const session = await loadSession(env.DB, sessionId);
+  const cookieSessionId = getSessionId(req);
+  if (!cookieSessionId) return error("no session", 403);
+  // FR-P1-19: first stateful action on the stateless production path —
+  // materializes the session row from the signed envelope (INSERT OR IGNORE).
+  const session = await ensureSessionRow(env, cookieSessionId);
   if (!session) return error("invalid session", 403);
   if (isExpired(session.createdAt)) return error("session expired", 403);
+  // Canonical id: the row materialized under the envelope's INNER sid, not
+  // the envelope string itself. Downstream FKs (event_batches, submissions)
+  // reference sessions.id — persisting under the envelope string would
+  // violate the foreign key (found live in the production-mode suite).
+  const sessionId = session.id;
 
   let body: { events?: unknown };
   try {

@@ -14,8 +14,8 @@ import {
   now,
 } from "../core/session.js";
 import {
-  loadSession,
-} from "../cloudflare/session.js";;
+  ensureSessionRow,
+} from "../cloudflare/session-envelope.js";;
 import { reconstructIssuedProfile } from "../core/reconstruct.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
 
@@ -49,11 +49,18 @@ export async function canary(req: Request, env: Env): Promise<Response> {
   const token = url.pathname.replace(/^\/c\//, "");
   if (!token) return error("missing token", 400);
 
-  const sessionId = getSessionId(req);
+  // FR-P1-19: let — reassigned to the canonical (envelope-unwrapped) id
+  // after ensureSessionRow.
+  let sessionId = getSessionId(req);
   if (!sessionId) return error("no session", 403);
-  const session = await loadSession(env.DB, sessionId);
+  // FR-P1-19: a canary hit is a stateful first action — materializes the
+  // stateless production session row from the signed envelope.
+  const session = await ensureSessionRow(env, sessionId);
   if (!session) return error("invalid session", 403);
   if (isExpired(session.createdAt)) return error("session expired", 403);
+  // FR-P1-19: canonical id — FK targets materialize under the envelope's
+  // inner sid, never the envelope string.
+  sessionId = session.id;
 
   // FR-R6-050: canonical reconstruction (recipe + key-id aware), never a
   // route-local deriveProfile with ad-hoc arguments.

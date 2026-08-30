@@ -30,8 +30,9 @@ import {
   isExpired,
 } from "../core/session.js";
 import {
-  loadSession,
-} from "../cloudflare/session.js";;
+  ensureSessionRow,
+} from "../cloudflare/session-envelope.js";
+import { loadSession } from "../cloudflare/session.js";;
 import { getPolicy } from "../core/decision.js";
 import { reconstructIssuedProfile } from "../core/reconstruct.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
@@ -93,11 +94,18 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   }
 
   // 2. resolve session
-  const sessionId = getSessionId(req);
+  // FR-P1-19: let — reassigned to the canonical (envelope-unwrapped) id
+  // after ensureSessionRow.
+  let sessionId = getSessionId(req);
   if (!sessionId) return error("no session", 403);
-  const session = await loadSession(env.DB, sessionId);
+  // FR-P1-19: submit is a stateful first action — materializes the
+  // stateless production session row from the signed envelope.
+  const session = await ensureSessionRow(env, sessionId);
   if (!session) return error("invalid session", 403);
   if (isExpired(session.createdAt)) return error("session expired", 403);
+  // FR-P1-19: canonical id — FK targets materialize under the envelope's
+  // inner sid, never the envelope string.
+  sessionId = session.id;
 
   // FIX: Check for resubmission (idempotent)
   // FR-R6-023: goes through the SAME projection as the primary path — the

@@ -17,7 +17,10 @@ import {
 } from "../core/session.js";
 import {
   persistSession,
-} from "../cloudflare/session.js";;
+} from "../cloudflare/session.js";
+// FR-P1-19: production GET /signup is STATELESS — a signed envelope replaces
+// the D1 write; the session row materializes on the first stateful action.
+import { signSessionEnvelope } from "../core/session-envelope.js";
 import { deriveProfile, hashProfile, type DefenseRecipe } from "../core/profile.js";
 import { renderSignupPage } from "../core/renderer.js";
 import { makeCsrfToken } from "../security/csrf.js";
@@ -111,6 +114,9 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
     }
   }
   const profile = await deriveProfile(env, sessionId, undefined, recipe, holdoutMode, turnstileRequired);
+  // FR-P1-19: the session-cookie VALUE. Lab = bare sid (stateful); production
+  // = signed envelope (stateless until first stateful action).
+  let cookieValue: string = sessionId;
   // FR-R6-003: belt-and-braces — a bound lab run whose recipe requested
   // families somehow derived zero families would silently dilute the
   // experiment condition (deriveProfilePure already throws INVALID_RECIPE
@@ -164,13 +170,21 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
     } catch {
       return error("lab run bind failed: internal error", 500);
     }
-  } else {
-    // Unbound / production path.
+  } else if (isLabMode(env)) {
+    // Unbound LAB session — still stateful (lab analysis joins on session
+    // rows existing from issuance, and lab runs bind server-side anyway).
     await persistSession(env.DB, {
       id: sessionId,
       createdAt: now(),
       profileVersion: profileVersion(env),
     }, profile.profileId, profileHash, profileKeyId);
+  } else {
+    // FR-P1-19 production path: NO D1 WRITE. The cookie carries a signed
+    // envelope; ensureSessionRow() materializes the row on the first
+    // stateful action (telemetry / canary / audited verification / submit).
+    // profileId/profileHash were derived above but are NOT persisted —
+    // derivation is deterministic, so materialization recomputes them.
+    cookieValue = await signSessionEnvelope(resolveProfileKey(env), sessionId, now(), profileVersion(env));
   }
 
   let staticHtml: string;
@@ -189,7 +203,8 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
   });
 
   const resp = html(page);
-  resp.headers.append("set-cookie", sessionCookieHeader(sessionId));
+  // FR-P1-19: lab emits the bare sid; production emits the signed envelope.
+  resp.headers.append("set-cookie", sessionCookieHeader(cookieValue));
   resp.headers.append("set-cookie", csrfCookieHeader(csrfToken));
   return resp;
 }

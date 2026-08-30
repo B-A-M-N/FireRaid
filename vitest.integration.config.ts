@@ -12,6 +12,11 @@ export default defineConfig({
   test: {
     globals: true,
     include: ["tests/integration/**/*.test.ts"],
+    // FR-P1-19: the stateless-envelope spec requires the production-mode
+    // worker (LAB_MODE=false); it runs via `npm run test:envelope` with
+    // --wrangler-env production and would fail against the lab-mode worker
+    // here (production cookie shapes don't exist in lab mode).
+    exclude: ["tests/integration/session-envelope-flow.test.ts"],
     pool: "forks",
     poolOptions: {
       forks: { singleFork: true },

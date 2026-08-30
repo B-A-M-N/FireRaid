@@ -40,9 +40,16 @@ const WRANGLER_STATE = join(ROOT, ".wrangler");
 /** Local installs ship this bin; it keeps wrangler (and workerd) in our tree. */
 const WRANGLER_BIN = join(ROOT, "node_modules", "wrangler", "bin", "wrangler.js");
 const D1_BINDING = "fireraid";
-const WRANGLER_ENV = "test";
-/** FR-R5-039: must stay Turnstile-free. .dev.vars DOES carry Turnstile keys. */
-const DEV_VARS_TEST = join(ROOT, ".dev.vars.test");
+/** FR-P1-19: per-env D1 database NAME (wrangler resolves by name first).
+ * test → "fireraid"; production → "fireraid-production" (wrangler.jsonc). */
+function d1DatabaseName(wranglerEnv) {
+  return wranglerEnv === "production" ? "fireraid-production" : "fireraid";
+}
+// (WRANGLER_ENV is derived below, after parseArgs — FR-P1-19.)
+/** FR-R5-039: must stay Turnstile-free. .dev.vars DOES carry Turnstile keys.
+ * FR-P1-19: the file is per wrangler env (.dev.vars.<env> is what wrangler
+ * loads for `-e <env>`); production-mode tests use .dev.vars.production. */
+
 /** FR-R6-002: these tables MUST exist after `d1 migrations apply`. */
 const REQUIRED_TABLES = [
   "sessions",
@@ -55,7 +62,12 @@ const REQUIRED_TABLES = [
 const SESSION_COOKIE = "__Host-fr_sid";
 
 function parseArgs(argv) {
-  const args = { suite: "test-e2e", port: 9999, command: [], persist: null, https: false };
+  const args = {
+    suite: "test-e2e", port: 9999, command: [], persist: null, https: false,
+    // FR-P1-19: wrangler env selector — "test" (lab) by default;
+    // "production" boots LAB_MODE=false for stateless-envelope tests.
+    wranglerEnv: "test",
+  };
   let i = 0;
   while (i < argv.length) {
     const a = argv[i];
@@ -63,6 +75,7 @@ function parseArgs(argv) {
     else if (a === "--port") args.port = Number(argv[++i]);
     else if (a === "--persist") args.persist = argv[++i];
     else if (a === "--https") args.https = true;
+    else if (a === "--wrangler-env") args.wranglerEnv = argv[++i];
     else if (a === "--") { args.command = argv.slice(i + 1); break; }
     i++;
   }
@@ -72,6 +85,10 @@ function parseArgs(argv) {
 const log = (msg) => console.error(`[test-worker] ${msg}`);
 
 const args = parseArgs(process.argv.slice(2));
+// FR-P1-19: wrangler env selector — "test" (lab) by default; "production"
+// boots LAB_MODE=false for stateless-envelope tests.
+const WRANGLER_ENV = args.wranglerEnv;
+const DEV_VARS_FILE = join(ROOT, `.dev.vars.${WRANGLER_ENV}`);
 const persistDir = args.persist ?? join(WRANGLER_STATE, args.suite);
 const port = args.port;
 // HTTPS default off; `--https` (Playwright suites) is required for __Host-
@@ -101,9 +118,9 @@ if (migrations.length === 0) {
 }
 log(`migrations present: ${migrations.join(", ")}`);
 
-if (!existsSync(DEV_VARS_TEST)) {
+if (!existsSync(DEV_VARS_FILE)) {
   console.error(
-    `[test-worker] FATAL: ${DEV_VARS_TEST} is missing. Wrangler (-e test) must load it ` +
+    `[test-worker] FATAL: ${DEV_VARS_FILE} is missing. Wrangler (-e ${args.wranglerEnv}) must load it ` +
     `so the test Worker has NO Turnstile credentials (FR-R5-039).`
   );
   process.exit(1);
@@ -128,7 +145,7 @@ function wranglerArgs(argv) {
 log("applying migrations (single `d1 migrations apply`)…");
 {
   const { cmd, argv } = wranglerArgs([
-    "d1", "migrations", "apply", D1_BINDING,
+    "d1", "migrations", "apply", d1DatabaseName(WRANGLER_ENV),
     "--local",
     "--persist-to", persistDir,
     "-e", WRANGLER_ENV,
@@ -165,7 +182,7 @@ const { DatabaseSync } = require("node:sqlite");
 
 async function readTablesViaWrangler() {
   const { cmd, argv } = wranglerArgs([
-    "d1", "execute", D1_BINDING,
+    "d1", "execute", d1DatabaseName(WRANGLER_ENV),
     "--local",
     "--persist-to", persistDir,
     "-e", WRANGLER_ENV,
@@ -235,13 +252,18 @@ const csrfSecret = process.env.FIRERAID_TEST_CSRF_SECRET ?? "test-csrf-secret-01
  * Secrets the Worker needs, matching .dev.vars.test exactly (they are only a
  * fallback — `-e test` loads that file — but explicit is safer than implicit).
  */
+/**
+ * FR-P1-19: LAB_MODE comes from the wrangler env block (-e test → true,
+ * -e production → false); overriding it here would desync the test worker
+ * from the deployment shape it is supposed to exercise. The remaining
+ * secrets are identical across envs (they mirror .dev.vars.<env>).
+ */
 const SECRET_ENV = {
   FIRERAID_PROFILE_SECRET: profileSecret,
   FIRERAID_CSRF_SECRET: csrfSecret,
   ADMIN_SECRET: adminSecret,
   FIRERAID_LAB_API_SECRET: labSecret,
   PROFILE_VERSION: "1",
-  LAB_MODE: "true",
 };
 
 /**
