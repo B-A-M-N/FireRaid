@@ -1,0 +1,30 @@
+
+ RUN  v3.2.7 /home/bamn/FireRaid
+
+ ✓ tests/unit/security.test.ts (9 tests) 486ms
+   ✓ correctness: semantic canary with requiresRoute implies decoy-route > profile with semantic template requiring route also has decoy-route  467ms
+ ✓ tests/unit/profile.test.ts (21 tests) 285ms
+ ✓ tests/unit/browser-use-adapter.test.ts (7 tests) 270ms
+ ✓ tests/unit/pass-b-regression.test.ts (21 tests) 163ms
+ ✓ tests/unit/perception-measurement.test.ts (11 tests) 81ms
+(node:2018093) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ tests/unit/schema-migration.test.ts (10 tests) 35ms
+ ✓ tests/unit/profile-recipe.test.ts (17 tests) 62ms
+ ✓ tests/unit/telemetry-watermark-sqlite.test.ts (6 tests) 44ms
+ ✓ tests/unit/raw-http-adapter.test.ts (9 tests) 30ms
+ ✓ tests/unit/ablation-recipes.test.ts (11 tests) 30ms
+ ✓ tests/unit/admin-auth.test.ts (20 tests) 12ms
+ ✓ tests/unit/pass-a-regression.test.ts (13 tests) 11ms
+ ✓ tests/unit/telemetry-integrity.test.ts (42 tests) 15ms
+ ✓ tests/unit/manifests.test.ts (50 tests) 8ms
+ ✓ tests/unit/turnstile.test.ts (15 tests) 10ms
+ ✓ tests/unit/lab-runs.test.ts (15 tests) 9ms
+ ✓ tests/unit/lab-lifecycle.test.ts (6 tests) 3ms
+ ✓ tests/unit/canary.test.ts (8 tests) 1ms
+
+ Test Files  18 passed (18)
+      Tests  291 passed (291)
+   Start at  02:35:20
+   Duration  3.11s (transform 770ms, setup 0ms, collect 1.11s, tests 1.55s, environment 0ms, prepare 96ms)
+

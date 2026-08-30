@@ -1,0 +1,307 @@
+
+> fireraid@0.1.0 test:a11y
+> playwright test --config=playwright.a11y.config.ts
+
+[WebServer] [test-worker] suite=test-a11y persistence=/home/bamn/FireRaid/.wrangler/test-a11y port=9999
+[WebServer] [test-worker] migrations present: 0001_initial.sql, 0002_decision_records.sql, 0003_canary_dedup.sql, 0004_lab_runs.sql, 0005_lab_lifecycle.sql, 0006_profile_key_id.sql, 0007_lab_bound_at.sql, 0008_telemetry_integrity.sql, 0009_lab_holdout_mode.sql
+[WebServer] [test-worker] applying migrations (single `d1 migrations apply`)…
+[WebServer] [test-worker] schema verified via sqlite .wrangler/test-a11y/v3/d1/miniflare-D1DatabaseObject/f24e8d7b54658c2b20bf0562f68bebe67a2ad5d80b2a4033246efd655415eb07.sqlite: sessions, lab_runs, event_batches, submissions, canary_hits present
+[WebServer] [test-worker] wrangler dev pid=2023366 group=2023366 (/home/bamn/.nvm/versions/node/v22.22.3/bin/node)
+[WebServer] (node:2023012) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] (node:2023012) Warning: Setting the NODE_TLS_REJECT_UNAUTHORIZED environment variable to '0' makes TLS connections and HTTPS requests insecure by disabling certificate verification.
+[WebServer] [wrangler] 
+[WebServer]  ⛅️ wrangler 4.127.1
+[WebServer] ────────────────────
+[WebServer] [wrangler] Using secrets defined in .dev.vars.test
+[WebServer] [wrangler] Your Worker has access to the following bindings:
+[WebServer] [wrangler] Binding                                       Resource                  Mode
+[WebServer] env.DB (fireraid)                             D1 Database               local
+[WebServer] [wrangler] env.ASSETS                                    Assets                    local
+[WebServer] [wrangler] env.PROFILE_VERSION ("1")                     Environment Variable      local
+[WebServer] [wrangler] env.LAB_MODE ("true")                         Environment Variable      local
+[WebServer] [wrangler] env.FIRERAID_PROFILE_SECRET ("(hidden)")      Environment Variable      local
+[WebServer] [wrangler] env.FIRERAID_CSRF_SECRET ("(hidden)")         Environment Variable      local
+[WebServer] [wrangler] env.ADMIN_SECRET ("(hidden)")                 Environment Variable      local
+[WebServer] env.FIRERAID_LAB_API_SECRET ("(hidden)")      Environment Variable      local
+[WebServer] 
+[WebServer] [wrangler] ⎔ Starting local server...
+[WebServer] [wrangler] Wrangler detected this dev session is running in an AI agent.
+[WebServer] The Local Explorer API is available at https://localhost:9999/cdn-cgi/local/explorer/api
+[WebServer] Useful routes:
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/d1/database - D1 databases
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/workflows - Workflows
+[WebServer]   POST https://localhost:9999/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:
+[WebServer]     curl -X POST https://localhost:9999/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{"sql":"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20"}'
+[WebServer] If the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api - OpenAPI schema
+[WebServer] [wrangler] [wrangler:info] Ready on https://localhost:9999
+[WebServer] [test-worker] healthy at https://localhost:9999
+[WebServer] [wrangler] [wrangler:info] GET /health 200 OK (284ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 403 Forbidden (16ms)
+[WebServer] [test-worker] turnstile disabled (probe: HTTP 403 {"error":"invalid session"})
+[WebServer] [test-worker] no command given — idling (Ctrl-C to stop)
+[WebServer] [wrangler] [wrangler:info] GET /health 200 OK (7ms)
+
+Running 18 tests using 1 worker
+
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46340
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46356
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (17ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (9ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (6ms)
+  ✓   1 [chromium] › tests/accessibility/ax-tree.spec.ts:47:3 › accessibility › signup page has no critical axe violations (1.2s)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46380
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (15ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46402
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (7ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (7ms)
+  ✓   2 [chromium] › tests/accessibility/ax-tree.spec.ts:55:3 › accessibility › visible labels are stable (309ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46420
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (14ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46450
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (8ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (7ms)
+  ✓   3 [chromium] › tests/accessibility/ax-tree.spec.ts:61:3 › accessibility › tab order reaches all interactive elements (317ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46464
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (21ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46478
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (7ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (6ms)
+  ✓   4 [chromium] › tests/accessibility/ax-tree.spec.ts:68:3 › accessibility › canary with aria-hidden is excluded from AX tree (319ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46486
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (13ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46502
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (7ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (5ms)
+  ✓   5 [chromium] › tests/accessibility/ax-tree.spec.ts:77:3 › accessibility › production-eligible canaries are visible (not display:none) (312ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46520
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (10ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46538
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (7ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (5ms)
+  ✓   6 [chromium] › tests/accessibility/ax-tree.spec.ts:96:3 › accessible names › all form fields have accessible names (FR-R4-058) (336ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46570
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (11ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46594
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (5ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (3ms)
+  ✓   7 [chromium] › tests/accessibility/ax-tree.spec.ts:117:3 › accessible names › submit button has accessible name (290ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46610
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (16ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46638
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (6ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (6ms)
+  ✓   8 [chromium] › tests/accessibility/ax-tree.spec.ts:126:3 › accessible names › canary elements have no accessible name when hidden (770ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46656
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (15ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46666
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (5ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (4ms)
+  ✓   9 [chromium] › tests/accessibility/ax-tree.spec.ts:159:3 › AX tree verification › canary marker exclusion from AX tree (random-profile smoke) (319ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46678
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (15ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46698
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (3ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (4ms)
+  ✓  10 [chromium] › tests/accessibility/ax-tree.spec.ts:201:3 › AX tree verification › AX tree structure for documentation (764ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46716
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (10ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46738
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (6ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (4ms)
+  ✓  11 [chromium] › tests/accessibility/ax-tree.spec.ts:211:3 › AX tree verification › P06 canary elements are not in accessibility tree (758ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/lab/runs 200 OK (12ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46766
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (11ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46786
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (5ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (4ms)
+  ✓  12 [chromium] › tests/accessibility/ax-tree.spec.ts:242:3 › deterministic canary controls › S09/P06 hidden canary is excluded from AX tree (FR-R5-043) (315ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/lab/runs 200 OK (14ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46802
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (14ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46820
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (3ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (2ms)
+  ✓  13 [chromium] › tests/accessibility/ax-tree.spec.ts:285:3 › deterministic canary controls › S01/P01 visible canary IS in AX tree (FR-R5-043) (285ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46838
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (9ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46852
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (7ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (5ms)
+  ✓  14 [chromium] › tests/accessibility/axe.spec.ts:9:3 › accessibility › signup page has no critical axe violations (886ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46876
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (13ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46894
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (5ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (4ms)
+  ✓  15 [chromium] › tests/accessibility/axe.spec.ts:16:3 › accessibility › visible labels are stable (263ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46904
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (13ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46916
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (7ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (5ms)
+  ✓  16 [chromium] › tests/accessibility/axe.spec.ts:23:3 › accessibility › tab order reaches all interactive elements (247ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46940
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (21ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46966
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (6ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (3ms)
+  ✓  17 [chromium] › tests/accessibility/axe.spec.ts:30:3 › accessibility › canary with aria-hidden is excluded from AX tree (312ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46976
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (16ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:46990
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (6ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (5ms)
+  ✓  18 [chromium] › tests/accessibility/axe.spec.ts:40:3 › accessibility › production-eligible canaries are visible (not display:none) (322ms)
+
+  18 passed (15.9s)

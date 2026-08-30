@@ -1,0 +1,163 @@
+
+> fireraid@0.1.0 test:e2e
+> playwright test
+
+[WebServer] [test-worker] suite=test-e2e persistence=/home/bamn/FireRaid/.wrangler/test-e2e port=9999
+[WebServer] [test-worker] migrations present: 0001_initial.sql, 0002_decision_records.sql, 0003_canary_dedup.sql, 0004_lab_runs.sql, 0005_lab_lifecycle.sql, 0006_profile_key_id.sql, 0007_lab_bound_at.sql, 0008_telemetry_integrity.sql, 0009_lab_holdout_mode.sql
+[WebServer] [test-worker] applying migrations (single `d1 migrations apply`)…
+[WebServer] [test-worker] schema verified via sqlite .wrangler/test-e2e/v3/d1/miniflare-D1DatabaseObject/f24e8d7b54658c2b20bf0562f68bebe67a2ad5d80b2a4033246efd655415eb07.sqlite: sessions, lab_runs, event_batches, submissions, canary_hits present
+[WebServer] [test-worker] wrangler dev pid=2020388 group=2020388 (/home/bamn/.nvm/versions/node/v22.22.3/bin/node)
+[WebServer] (node:2020042) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] (node:2020042) Warning: Setting the NODE_TLS_REJECT_UNAUTHORIZED environment variable to '0' makes TLS connections and HTTPS requests insecure by disabling certificate verification.
+[WebServer] [wrangler] 
+[WebServer]  ⛅️ wrangler 4.127.1
+[WebServer] ────────────────────
+[WebServer] [wrangler] Using secrets defined in .dev.vars.test
+[WebServer] [wrangler] Your Worker has access to the following bindings:
+[WebServer] [wrangler] Binding                                       Resource                  Mode
+[WebServer] [wrangler] env.DB (fireraid)                             D1 Database               local
+[WebServer] [wrangler] env.ASSETS                                    Assets                    local
+[WebServer] [wrangler] env.PROFILE_VERSION ("1")                     Environment Variable      local
+[WebServer] [wrangler] env.LAB_MODE ("true")                         Environment Variable      local
+[WebServer] [wrangler] env.FIRERAID_PROFILE_SECRET ("(hidden)")      Environment Variable      local
+[WebServer] [wrangler] env.FIRERAID_CSRF_SECRET ("(hidden)")         Environment Variable      local
+[WebServer] [wrangler] env.ADMIN_SECRET ("(hidden)")                 Environment Variable      local
+[WebServer] [wrangler] env.FIRERAID_LAB_API_SECRET ("(hidden)")      Environment Variable      local
+[WebServer] [wrangler] 
+[WebServer] [wrangler] ⎔ Starting local server...
+[WebServer] [wrangler] Wrangler detected this dev session is running in an AI agent.
+[WebServer] The Local Explorer API is available at https://localhost:9999/cdn-cgi/local/explorer/api
+[WebServer] Useful routes:
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/d1/database - D1 databases
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api/workflows - Workflows
+[WebServer]   POST https://localhost:9999/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:
+[WebServer]     curl -X POST https://localhost:9999/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{"sql":"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20"}'
+[WebServer] If the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):
+[WebServer]   GET https://localhost:9999/cdn-cgi/local/explorer/api - OpenAPI schema
+[WebServer] [wrangler] [wrangler:info] Ready on https://localhost:9999
+[WebServer] [test-worker] healthy at https://localhost:9999
+[WebServer] [wrangler] [wrangler:info] GET /health 200 OK (92ms)
+[WebServer] [wrangler:info] GET /health 200 OK (33ms)
+
+Running 12 tests using 1 worker
+
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 403 Forbidden (11ms)
+[WebServer] [test-worker] turnstile disabled (probe: HTTP 403 {"error":"invalid session"})
+[WebServer] [test-worker] no command given — idling (Ctrl-C to stop)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:54972
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:55000
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (10ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (4ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (4ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 200 OK (22ms)
+  ✓   1 [chromium] › tests/e2e/normal-user.spec.ts:20:3 › normal user › form works and submits with verified API response (365ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:55006
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (10ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:55036
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (5ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (4ms)
+  ✓   2 [chromium] › tests/e2e/normal-user.spec.ts:57:3 › normal user › canary is visible in DOM but not in AX tree (production placements) (242ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:55054
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (7ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:55070
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (3ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (2ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/events 200 OK (8ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/events 200 OK (8ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/events 200 OK (8ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 200 OK (13ms)
+  ✓   3 [chromium] › tests/e2e/normal-user.spec.ts:68:3 › keyboard-only user › tab navigation and submit works with verified API response (344ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:55084
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (9ms)
+[WebServer] [wrangler] ✘ [ERROR] error accepting tls connection; kj::mv(e) = kj/compat/tls.c++:82: failed: OpenSSL error; message = error:10000416:SSL routines:OPENSSL_internal:SSLV3_ALERT_CERTIFICATE_UNKNOWN; clientId = [::1]:55090
+[WebServer] 
+[WebServer]   stack: /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@311ade0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31228c0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122cf0 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@3122ddb /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31231b4 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@5998b48 /home/bamn/FireRaid/node_modules/@cloudflare/workerd-linux-64/bin/workerd@31244e0
+[WebServer] 
+[WebServer] 
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (4ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (2ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 200 OK (28ms)
+  ✓   4 [chromium] › tests/e2e/normal-user.spec.ts:108:3 › autofill-like user › programmatic fill does not trigger canary with verified API response (290ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (8ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (6ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (5ms)
+[WebServer] [wrangler] [wrangler:info] GET /favicon.ico 404 Not Found (10ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 200 OK (21ms)
+  ✓   5 [firefox] › tests/e2e/normal-user.spec.ts:20:3 › normal user › form works and submits with verified API response (2.3s)
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (11ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (2ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (2ms)
+[WebServer] [wrangler] [wrangler:info] GET /favicon.ico 404 Not Found (10ms)
+  ✓   6 [firefox] › tests/e2e/normal-user.spec.ts:57:3 › normal user › canary is visible in DOM but not in AX tree (production placements) (451ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (8ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (5ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (5ms)
+[WebServer] [wrangler] [wrangler:info] GET /favicon.ico 404 Not Found (8ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/events 200 OK (12ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/events 200 OK (11ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/events 200 OK (11ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 200 OK (24ms)
+  ✓   7 [firefox] › tests/e2e/normal-user.spec.ts:68:3 › keyboard-only user › tab navigation and submit works with verified API response (789ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (8ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (4ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (2ms)
+[WebServer] [wrangler] [wrangler:info] GET /favicon.ico 404 Not Found (10ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 200 OK (24ms)
+  ✓   8 [firefox] › tests/e2e/normal-user.spec.ts:108:3 › autofill-like user › programmatic fill does not trigger canary with verified API response (520ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (7ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (2ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (5ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 200 OK (21ms)
+  ✓   9 [webkit] › tests/e2e/normal-user.spec.ts:20:3 › normal user › form works and submits with verified API response (1.5s)
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (15ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (3ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (3ms)
+  ✓  10 [webkit] › tests/e2e/normal-user.spec.ts:57:3 › normal user › canary is visible in DOM but not in AX tree (production placements) (1.2s)
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (12ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (4ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (3ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/events 200 OK (10ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/events 200 OK (11ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/events 200 OK (11ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 200 OK (26ms)
+  ✓  11 [webkit] › tests/e2e/normal-user.spec.ts:68:3 › keyboard-only user › tab navigation and submit works with verified API response (1.3s)
+[WebServer] [wrangler] [wrangler:info] GET /signup 200 OK (7ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.css 200 OK (2ms)
+[WebServer] [wrangler] [wrangler:info] GET /signup.js 200 OK (2ms)
+[WebServer] [wrangler] [wrangler:info] POST /api/submit 200 OK (20ms)
+  ✓  12 [webkit] › tests/e2e/normal-user.spec.ts:108:3 › autofill-like user › programmatic fill does not trigger canary with verified API response (1.2s)
+
+  12 passed (17.9s)
