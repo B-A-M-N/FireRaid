@@ -1,14 +1,17 @@
 /**
- * Recorder — persists canonical RunRecordV1 results.
+ * Recorder — persists canonical RunRecordV2 results.
  * FR-R3-029: The runner owns serialization. Adapters do not write final records.
  * FR-R4-084: validates every record through the schema; loadExperiment collects
  *             invalid records with warnings instead of crashing.
+ * FR-P0-7: v2 is the NATIVE write format. Archived v1 evidence loads through
+ *             parseRunRecord's v1→v2 normalizer, so all in-memory records are
+ *             v2 regardless of on-disk schema version.
  */
 import { randomUUID } from "node:crypto";
 import { writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { RunRecordV1 } from "./run-schema.js";
-import { RunRecordV1Schema } from "./run-schema.js";
+import type { RunRecordV2 } from "./run-schema.js";
+import { parseRunRecord, RunRecordV2Schema } from "./run-schema.js";
 
 const RESULTS_DIR = join(process.cwd(), "harness", "results");
 
@@ -27,7 +30,7 @@ export interface RecordLoadWarning {
 
 export class Recorder {
   private experimentId: string;
-  private records: RunRecordV1[] = [];
+  private records: RunRecordV2[] = [];
 
   /** Static holder for the most recent load warnings. */
   static lastLoadWarnings: RecordLoadWarning[] = [];
@@ -39,9 +42,11 @@ export class Recorder {
   /**
    * Persist a single run record.
    * FR-R4-084: validates via Zod before writing.
+   * FR-P0-7: v2 schema — a v1 record handed here is a caller bug (the runner
+   * builds v2); fail loudly instead of silently migrating.
    */
-  record(run: RunRecordV1): void {
-    RunRecordV1Schema.parse(run);
+  record(run: RunRecordV2): void {
+    RunRecordV2Schema.parse(run);
 
     const dir = join(RESULTS_DIR, this.experimentId);
     if (!existsSync(dir)) {
@@ -53,26 +58,27 @@ export class Recorder {
   }
 
   /**
-   * Load all records for an experiment.
-   * FR-R4-084: parses each file, collects invalid ones with Zod errors into
-   * warnings. Invalid records are excluded from the returned array.
+   * Load all records for an experiment. Both schema versions parse (v1 via
+   * the normalizer); the returned records are ALWAYS v2 so analysis code
+   * sees one shape.
+   * FR-R4-084: collects invalid records with Zod errors into warnings.
    */
-  static loadExperiment(experimentId: string): RunRecordV1[] {
+  static loadExperiment(experimentId: string): RunRecordV2[] {
     Recorder.lastLoadWarnings = [];
 
     const dir = join(RESULTS_DIR, experimentId);
     if (!existsSync(dir)) return [];
-    // Run records only — skip resume.json (runner state, not a RunRecordV1).
+    // Run records only — skip resume.json (runner state, not a RunRecord).
     const files = readdirSync(dir).filter((f) => f.endsWith(".json") && f !== "resume.json");
 
-    const valid: RunRecordV1[] = [];
+    const valid: RunRecordV2[] = [];
     for (const f of files) {
       try {
         const content = readFileSync(join(dir, f), "utf-8");
         const parsed = JSON.parse(content) as unknown;
-        const result = RunRecordV1Schema.safeParse(parsed);
-        if (result.success) {
-          valid.push(result.data);
+        const result = parseRunRecord(parsed);
+        if (result.ok) {
+          valid.push(result.record);
         } else {
           const runId =
             typeof parsed === "object" && parsed !== null && "run_id" in parsed
@@ -81,11 +87,11 @@ export class Recorder {
           Recorder.lastLoadWarnings.push({
             fileName: f,
             runId,
-            errors: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
+            errors: result.errors,
           });
           console.warn(
             `[Recorder] invalid record in ${f} (run ${runId ?? "unknown"}):`,
-            result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")
+            result.errors.join("; ")
           );
         }
       } catch {
@@ -102,7 +108,7 @@ export class Recorder {
   /**
    * Get summary metrics for an experiment.
    */
-  static computeMetrics(runs: RunRecordV1[]): {
+  static computeMetrics(runs: RunRecordV2[]): {
     attempts: number;
     valid: number;
     submitted: number;
@@ -110,6 +116,8 @@ export class Recorder {
     handoff: number;
     canary_exposed: number;
     canary_verified: number;
+    /** FR-P0-7: measured-exposure denominator — artifacts actually captured. */
+    exposure_measured: number;
     quarantined: number;
     review: number;
     median_elapsed: number;
@@ -126,7 +134,10 @@ export class Recorder {
     const submitted = valid.filter((r) => r.submitted === true);
     const stopped = valid.filter((r) => r.outcome === "stopped");
     const handoff = valid.filter((r) => r.outcome === "handoff");
-    const exposed = valid.filter((r) => r.canary_exposed);
+    const exposed = valid.filter((r) => r.exposure_state === "EXPOSED");
+    const exposureMeasured = valid.filter(
+      (r) => r.exposure_state === "EXPOSED" || r.exposure_state === "NOT_EXPOSED"
+    );
     const verified = valid.filter((r) => r.canary_verified_server);
     const quarantined = valid.filter((r) => r.disposition === "QUARANTINE");
     const review = valid.filter((r) => r.disposition === "REVIEW");
@@ -150,6 +161,7 @@ export class Recorder {
       stopped: stopped.length,
       handoff: handoff.length,
       canary_exposed: exposed.length,
+      exposure_measured: exposureMeasured.length,
       canary_verified: verified.length,
       quarantined: quarantined.length,
       review: review.length,

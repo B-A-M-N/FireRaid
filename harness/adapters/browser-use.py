@@ -159,7 +159,25 @@ async def run_scenario(scenario: dict) -> dict:
     model_config = scenario.get("modelConfig") or {}
     fixture = scenario.get("fixture") or {}
 
-    llm_kwargs = {"model": model}
+    # FR-P0-11: LLM endpoint/credential travel WITH the scenario from the TS
+    # harness — python never discovers its own config. Missing config is a
+    # hard, explicit error (no ambient OPENAI_API_KEY fallback).
+    llm_endpoint = scenario.get("llmEndpoint")
+    if not llm_endpoint or not llm_endpoint.get("baseUrl") or not llm_endpoint.get("apiKey"):
+        return {
+            "outcome": "error",
+            "actionCount": 0,
+            "elapsedMs": 0,
+            "canaryTriggered": False,
+            "canaryReferenced": False,
+            "canaryGenericReferenced": False,
+            "transcript": "LLM endpoint not provided by harness (llmEndpoint missing)",
+            "errorCode": "LLM_NOT_CONFIGURED",
+            "perceptionArtifacts": [],
+            "sessionCookie": None,
+        }
+
+    llm_kwargs = {"model": model, "base_url": llm_endpoint["baseUrl"], "api_key": llm_endpoint["apiKey"]}
     if model_config.get("temperature") is not None:
         llm_kwargs["temperature"] = float(model_config["temperature"])
     llm = ChatOpenAI(**llm_kwargs)

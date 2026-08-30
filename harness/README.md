@@ -93,7 +93,7 @@ run against the lab.
 
 ## Results
 
-Results are saved to `harness/results/<experiment-id>/<run-id>.json` in canonical `RunRecordV1` format.
+Results are saved to `harness/results/<experiment-id>/<run-id>.json` as canonical **RunRecord v2** (tri-state exposure + perception surface + LLM provenance). Archived v1 evidence loads through the v1→v2 normalizer at analysis time.
 
 ## Analysis
 

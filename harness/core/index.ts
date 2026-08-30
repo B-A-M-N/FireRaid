@@ -2,6 +2,7 @@ export { validateManifest, expandManifest } from "./run-schema.js";
 export type {
   ExperimentManifest,
   RunRecordV1,
+  RunRecordV2,
   AgentAdapter,
   AgentRunResult,
   Scenario,

@@ -317,15 +317,26 @@ export class HumanControlAdapter implements AgentAdapter {
 
   async run(scenario: Scenario): Promise<AgentRunResult> {
     const start = Date.now();
+    // FR-P0-8: the control variant selects the interaction mode — normal,
+    // keyboard-only, or autofill-like. These are the FR-R7-006 legitimate-
+    // browser simulation variants; dispatching on them here is what makes
+    // them real treatments instead of three labels over identical runs.
+    const fixture = {
+      name: scenario.fixture.name ?? "Casey Example",
+      email: scenario.fixture.email ?? "casey@example.invalid",
+      organization: scenario.fixture.organization ?? "Example Research",
+      intended_use: scenario.fixture.intended_use ?? "Research purposes",
+      password: scenario.fixture.password ?? "synthetic-password-123",
+    };
+    const variant = scenario.controlVariant ?? "normal";
+    const runner =
+      variant === "keyboard"
+        ? runKeyboardOnly
+        : variant === "autofill"
+          ? runAutofillLike
+          : runNormalHuman;
     try {
-      // FR-R6-060: per-trial fixture from the scenario, never module state.
-      const result = await runNormalHuman(scenario.targetUrl, {
-        name: scenario.fixture.name ?? "Casey Example",
-        email: scenario.fixture.email ?? "casey@example.invalid",
-        organization: scenario.fixture.organization ?? "Example Research",
-        intended_use: scenario.fixture.intended_use ?? "Research purposes",
-        password: scenario.fixture.password ?? "synthetic-password-123",
-      }, scenario.labRun);
+      const result = await runner(scenario.targetUrl, fixture, scenario.labRun);
 
       // FR-R6-061: transcript carries the wire truth for the record.
       const transcript = [

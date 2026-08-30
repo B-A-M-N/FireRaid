@@ -15,6 +15,7 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { execSync, execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { loadHarnessEnv } from "./model.js";
 // Imported lazily-resolved at top level so browserProvenance can use it
 // without a forbidden require(): the import itself must not launch anything.
 import * as playwrightCore from "playwright-core";
@@ -26,7 +27,7 @@ import {
   generateRunId,
   ADAPTER_CAPABILITIES,
   type ExperimentManifest,
-  type RunRecordV1,
+  type RunRecordV2,
   type AgentType,
   type AgentAdapter,
   type LabRunContext,
@@ -109,6 +110,9 @@ function resolveModelId(model: string, usesModel: boolean): string {
 
 /**
  * Stable trial key for resume (FR-R4-085).
+ * FR-P0-8: controlVariant is part of trial identity — without it the
+ * normal/keyboard/autofill variants of one human cell collide in resume
+ * state and later variants get skipped as "already completed".
  */
 function trialKey(manifestId: string, trial: {
   agent: AgentType;
@@ -116,8 +120,9 @@ function trialKey(manifestId: string, trial: {
   prompt: string;
   extractor?: string;
   repetition: number;
+  controlVariant?: "normal" | "keyboard" | "autofill";
 }): string {
-  return `${manifestId}:${trial.agent}:${trial.model}:${trial.prompt}:${trial.extractor ?? "-"}:${trial.repetition}`;
+  return `${manifestId}:${trial.agent}:${trial.model}:${trial.prompt}:${trial.extractor ?? "-"}:${trial.controlVariant ?? "-"}:${trial.repetition}`;
 }
 
 /**
@@ -178,6 +183,36 @@ function browserProvenance(): { browser_name?: string; browser_version?: string 
 /** Which adapters launch a browser through THIS harness's Playwright install. */
 function usesPlaywrightBrowser(agent: AgentType): boolean {
   return agent === "human" || agent === "raw-dom" || agent === "ax-snapshot";
+}
+
+/**
+ * FR-P0-7: where exposure was measured, per agent + extractor — the v2
+ * perception_surface. null exactly when no perception artifact exists
+ * (UNMEASURED): the human adapter captures no model input, raw-http always
+ * has the transport HTML, browser-use observes pages through its own engine.
+ */
+function agentPerceptionSurface(
+  agent: AgentType,
+  extractor: string | undefined,
+  artifactPresent: boolean
+): RunRecordV2["perception_surface"] {
+  if (!artifactPresent) return null;
+  switch (agent) {
+    case "human":
+      // The human-control adapter captures no perception artifact; this is
+      // only reachable if artifacts appear for it later (e.g. screenshots).
+      return "human-visual";
+    case "raw-http":
+      return "transport-html";
+    case "raw-dom":
+      return extractor === "simplified-dom" ? "simplified-dom-model-input" : "raw-html-model-input";
+    case "ax-snapshot":
+      return "accessibility-model-input";
+    case "browser-use":
+      return "browser-use-observation";
+    default:
+      return null;
+  }
 }
 
 /**
@@ -242,7 +277,7 @@ async function fetchServerTruth(
   targetUrl: string,
   runId: string,
   labSecret: string
-): Promise<Partial<RunRecordV1> | null> {
+): Promise<Partial<RunRecordV2> | null> {
   try {
     const resp = await fetch(`${targetUrl}/api/lab/runs/${runId}`, {
       headers: {
@@ -289,7 +324,8 @@ async function fetchServerTruth(
         semantic_template: data.semantic_template ?? undefined,
         placement: data.placement ?? undefined,
         canary_issued: data.canary_issued ?? undefined,
-        canary_exposed: data.canary_exposed ?? false,
+        // canary_exposed deliberately absent — it is an AGENT-side
+        // observation derived from exposure_state at the merge site.
         canary_verified_server: data.canary_verified_server ?? false,
       };
     }
@@ -309,7 +345,7 @@ async function postLabRunOutcome(
   targetUrl: string,
   runId: string,
   labSecret: string,
-  outcome: RunRecordV1["outcome"],
+  outcome: RunRecordV2["outcome"],
   errorCode?: string | null
 ): Promise<void> {
   try {
@@ -343,7 +379,7 @@ async function executeTrial(
   trial: ReturnType<typeof expandManifest>[number],
   recorder: Recorder,
   manifestHash: string,
-): Promise<RunRecordV1> {
+): Promise<RunRecordV2> {
   const labSecret = process.env.FIRERAID_LAB_API_SECRET;
   const labTarget = labSecret ? manifest.target.url : null;
 
@@ -371,8 +407,8 @@ async function executeTrial(
     } catch {
       // FR-R5-021: lab creation failure must fail the trial — do NOT fall back.
       // Build an error record and return it immediately (fail-closed).
-      const errorRecord: RunRecordV1 = {
-        schema_version: 1,
+      const errorRecord: RunRecordV2 = {
+        schema_version: 2,
         run_id: generateRunId(),
         experiment_id: manifest.id,
         trial_index: trial.index,
@@ -391,6 +427,9 @@ async function executeTrial(
         canary_generic_referenced: false,
         canary_requested_client: false,
         canary_verified_server: false,
+        exposure_state: "UNMEASURED",
+        perception_surface: null,
+        ...(trial.controlVariant !== undefined ? { control_variant: trial.controlVariant } : {}),
         outcome: "error",
         action_count: 0,
         elapsed_ms: 0,
@@ -421,6 +460,10 @@ async function executeTrial(
       temperature: manifest.model_config.temperature,
       maxTokens: manifest.model_config.max_tokens,
     },
+    // FR-P0-8: control variants actually reach the adapter — a keyboard-only
+    // or autofill-like "human" trial executes that interaction mode, not a
+    // rerun of the normal script.
+    ...(trial.controlVariant !== undefined ? { controlVariant: trial.controlVariant } : {}),
     labRun: labRunContext,
   };
 
@@ -431,9 +474,12 @@ async function executeTrial(
 
   const completedAt = Date.now();
 
-  // Build initial record (agent-side observations)
-  let record: RunRecordV1 = {
-    schema_version: 1,
+  // Build initial record (agent-side observations).
+  // FR-P0-7: v2-native. exposure_state/surface start UNMEASURED and are
+  // revised from the perception artifacts below — the old binary
+  // canary_exposed was never a measurement for artifact-less agents.
+  let record: RunRecordV2 = {
+    schema_version: 2,
     run_id: runId,
     experiment_id: manifest.id,
     trial_index: trial.index,
@@ -453,24 +499,33 @@ async function executeTrial(
     // submitted is agent-side until reconciliation replaces it with server
     // truth (r.submitted) — the analyzer reads server truth only.
     submitted: result.outcome === "submitted",
-    // FR-R6-054: EXPOSED is an AGENT-side observation — the treatment
-    // (canary markup / marker / route link) existed in the model's actual
-    // input. Server truth CANNOT measure this; the server only knows ISSUED
-    // (it placed the treatment) and VERIFIED (it saw the causal event).
-    // Exposure is computed from the perception artifacts the adapter
-    // recorded: any artifact content containing the issued canary material.
-    canary_exposed: false, // set below from perception artifacts
+    // FR-R6-054 / FR-P0-7: EXPOSED is an AGENT-side observation — the
+    // treatment existed in the model's actual input. Server truth CANNOT
+    // measure this. Start UNMEASURED; artifacts below revise it.
+    canary_exposed: false, // derived projection of exposure_state (set below)
+    exposure_state: "UNMEASURED",
+    perception_surface: agentPerceptionSurface(trial.agent, trial.extractor, /* artifactPresent */ false),
     canary_referenced: result.canaryReferenced ?? false,
     canary_generic_referenced: result.canaryGenericReferenced ?? false,
     canary_requested_client: result.canaryTriggered ?? false,
     canary_verified_server: false,
     server_reconciled: false,
+    ...(trial.controlVariant !== undefined ? { control_variant: trial.controlVariant } : {}),
     outcome: result.outcome,
     action_count: result.actionCount,
     elapsed_ms: result.elapsedMs,
     error_code: result.errorCode ?? null,
     node_version: process.version,
     adapter_version: adapterCaps.version,
+    // FR-P0-9: requested-vs-served LLM provenance from the wire (undefined
+    // for model-agnostic agents — the fields stay absent, not fabricated).
+    ...(result.llmProvenance
+      ? {
+          llm_provider_origin: result.llmProvenance.providerOrigin,
+          llm_model_requested: result.llmProvenance.modelRequested,
+          llm_model_served: result.llmProvenance.modelServed,
+        }
+      : {}),
     temperature: manifest.model_config.temperature,
     max_tokens: manifest.model_config.max_tokens,
     // FR-POST-R6-P8: real browser provenance for Playwright-based adapters;
@@ -485,18 +540,19 @@ async function executeTrial(
     completed_at: completedAt,
   };
 
-  // FR-R6-054: compute EXPOSED from perception artifacts — scan every
-  // artifact the adapter captured for canary session material. Issued
-  // material is only known after reconciliation, so exposure is computed
-  // against BOTH signals:
+  // FR-R6-054 / FR-P0-7: tri-state exposure from perception artifacts.
+  //   artifacts present + canary material seen  → EXPOSED (+ surface)
+  //   artifacts present + material demonstrably absent → NOT_EXPOSED
+  //   no artifacts captured                     → UNMEASURED (null surface)
+  // Issued material is only known after reconciliation, so exposure is
+  // computed against BOTH signals:
   //   1. pre-reconciliation: the agent observed generic canary structure
   //      (data-fr-canary / data-fr-marker / data-fr-route attributes, fr_*
-  //      decoy fields, /c/ links) — exposed tentatively, refined by (2) once
-  //      server truth names the material.
+  //      decoy fields, /c/ links).
   //   2. post-reconciliation: server truth supplies the exact nonce
   //      (semantic_template issued) — exact-material exposure.
   // The agent-side observation is NEVER overwritten by the server: server
-  // truth sets issued/verified, the artifacts set exposed.
+  // truth sets issued/verified, the artifacts set exposure.
   const artifacts = result.perceptionArtifacts ?? [];
   // FR-POST-R6-P4: structural signatures cover ALL issued families —
   // semantic canaries (data-fr-canary), hidden markers (data-fr-marker),
@@ -512,6 +568,13 @@ async function executeTrial(
       typeof s === "string" ? a.content.includes(s) : s.test(a.content)
     )
   );
+  const artifactPresent = artifacts.length > 0;
+  let exposureState: RunRecordV2["exposure_state"] = artifactPresent
+    ? sawCanaryStructure
+      ? "EXPOSED"
+      : "NOT_EXPOSED"
+    : "UNMEASURED";
+  let perceptionSurface = agentPerceptionSurface(trial.agent, trial.extractor, artifactPresent);
 
   // Reconcile with server truth (FR-R4-028/032/033, FR-R5-006).
   // The session↔run association happened server-side during the bind-aware
@@ -528,26 +591,32 @@ async function executeTrial(
       const serverTruth = await fetchServerTruth(labTarget, runId, labSecret);
 
       if (serverTruth) {
-        // FR-R6-054: preserve the AGENT-side exposure observation — the
-        // spread must not let server-side canary_exposed (always false, the
-        // server cannot observe the agent's input) clobber what the
-        // perception artifacts showed.
         // FR-POST-R6-P4: exact-material exposure — once server truth names
         // the issued session material (semantic nonce / route token), an
         // artifact containing THAT exact material is exposure even if the
         // generic structural scan missed it.
-        const agentExposed =
-          sawCanaryStructure ||
+        const exactMaterialExposed =
+          artifactPresent &&
           artifacts.some((a) => {
             if (serverTruth.semantic_template && record.canary_referenced === true) {
               return a.content.includes("/c/") || a.content.includes("data-fr-marker");
             }
             return false;
           });
+        if (exactMaterialExposed && exposureState !== "EXPOSED") {
+          exposureState = "EXPOSED";
+          perceptionSurface = agentPerceptionSurface(trial.agent, trial.extractor, true);
+        }
         record = {
           ...record,
           ...serverTruth,
-          canary_exposed: agentExposed,
+          // FR-R6-054: preserve the AGENT-side exposure observation — the
+          // spread must not let server-side canary_exposed (always false, the
+          // server cannot observe the agent's input) clobber what the
+          // perception artifacts showed.
+          canary_exposed: exposureState === "EXPOSED",
+          exposure_state: exposureState,
+          perception_surface: perceptionSurface,
           server_reconciled: true,
         };
       } else {
@@ -562,7 +631,9 @@ async function executeTrial(
 
   // Non-lab (no server) runs: exposure still comes from the artifacts.
   if (!record.server_reconciled) {
-    record.canary_exposed = sawCanaryStructure;
+    record.canary_exposed = exposureState === "EXPOSED";
+    record.exposure_state = exposureState;
+    record.perception_surface = perceptionSurface;
   }
 
   // FR-R6-057: in authoritative lab mode, an unreconciled run is a BROKEN
@@ -651,6 +722,10 @@ function writeResumeState(resumePath: string, state: ResumeState): void {
  * FR-R4-085: real resume with per-key status.
  */
 export async function runExperiment(manifestPath: string): Promise<void> {
+  // FR-P0-11: attack-plane credentials (harness/.env) load before anything
+  // reads FIRERAID_* — model resolution and lab secrets included.
+  loadHarnessEnv();
+
   // Load and validate manifest
   const raw = JSON.parse(readFileSync(manifestPath, "utf-8"));
   const result = validateManifest(raw);

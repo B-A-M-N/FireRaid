@@ -43,6 +43,7 @@ function sha256(text: string): string {
 function finish(
   result: Omit<AgentRunResult, "perceptionArtifacts"> & {
     perceptionArtifacts?: PerceptionArtifact[];
+    llmProvenance?: AgentRunResult["llmProvenance"];
   },
   perception: PerceptionArtifact[]
 ): AgentRunResult {
@@ -50,6 +51,19 @@ function finish(
     ...result,
     perceptionArtifacts: perception,
   };
+}
+
+/**
+ * FR-P0-9: every exit path from run() funnels through this wrapper so the
+ * last LLM call's requested-vs-served provenance reaches the record even on
+ * error/timeout paths (the call that produced the failure is itself
+ * provenance).
+ */
+function withProvenance(
+  provenance: AgentRunResult["llmProvenance"],
+  result: AgentRunResult
+): AgentRunResult {
+  return { ...result, llmProvenance: provenance };
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +147,9 @@ export class AxSnapshotAdapter implements AgentAdapter {
     let transcript = "";
     let sessionCookie: string | undefined;
     const perception: PerceptionArtifact[] = [];
+    // FR-P0-9: last-call LLM provenance (requested vs served), attached to
+    // the result so the runner can record it in the run record.
+    let llmProvenance: AgentRunResult["llmProvenance"];
     // FR-R4-050: Self-managed ax ref mapping
     let axRefs: Map<string, { role: string; name: string }> = new Map();
 
@@ -141,7 +158,7 @@ export class AxSnapshotAdapter implements AgentAdapter {
     try {
       systemPrompt = resolvePrompt(scenario.promptVariant);
     } catch {
-      return finish(
+      return withProvenance(llmProvenance, finish(
         {
           outcome: "error",
           actionCount: 0,
@@ -153,7 +170,7 @@ export class AxSnapshotAdapter implements AgentAdapter {
           errorCode: "invalid_prompt_variant",
         },
         perception
-      );
+      ));
     }
 
     // FR-R4-045: Document ref usage in system prompt
@@ -191,7 +208,7 @@ export class AxSnapshotAdapter implements AgentAdapter {
 
       for (let step = 0; step < scenario.maxSteps; step++) {
         if (Date.now() - start > scenario.timeoutMs) {
-          return finish(
+          return withProvenance(llmProvenance, finish(
             {
               outcome: "timeout",
               actionCount: steps.length,
@@ -202,7 +219,7 @@ export class AxSnapshotAdapter implements AgentAdapter {
               canaryReferenced,
             },
             perception
-          );
+          ));
         }
 
         // FR-R4-050: Extract and number snapshot
@@ -245,13 +262,22 @@ export class AxSnapshotAdapter implements AgentAdapter {
         // Call LLM
         let action: AgentAction;
         try {
-          const raw = await callLlm(
+          const llm = await callLlm(
             scenario.model,
             enrichedSystem,
             userPrompt,
-            {},
+            scenario.modelConfig ?? {},
             llmTimeout
           );
+          const raw = llm.content;
+          // FR-P0-9: requested-vs-served provenance from the wire.
+          llmProvenance = {
+            providerOrigin: llm.provenance.providerOrigin,
+            modelRequested: llm.provenance.modelRequested,
+            modelServed: llm.provenance.modelServed,
+            temperature: llm.provenance.temperature,
+            maxTokens: llm.provenance.maxTokens,
+          };
           transcript += `\n--- Step ${step + 1} ---\n${raw}\n`;
 
           // FR-R4-046 / FR-R5-024: Canary detection — log every result
@@ -266,7 +292,7 @@ export class AxSnapshotAdapter implements AgentAdapter {
 
           action = validateAction(raw);
         } catch {
-          return finish(
+          return withProvenance(llmProvenance, finish(
             {
               outcome: "error",
               actionCount: steps.length,
@@ -278,7 +304,7 @@ export class AxSnapshotAdapter implements AgentAdapter {
               errorCode: "llm_error",
             },
             perception
-          );
+          ));
         }
 
         steps.push({ action, observation: observation.slice(0, 4000), step: step + 1 });
@@ -369,7 +395,7 @@ export class AxSnapshotAdapter implements AgentAdapter {
               } catch {
                 // Response may not arrive
               }
-              return finish(
+              return withProvenance(llmProvenance, finish(
                 {
                   outcome: "submitted",
                   actionCount: steps.length,
@@ -380,10 +406,10 @@ export class AxSnapshotAdapter implements AgentAdapter {
                   canaryReferenced,
                 },
                 perception
-              );
+              ));
             }
             case "stop":
-              return finish(
+              return withProvenance(llmProvenance, finish(
                 {
                   outcome: "stopped",
                   actionCount: steps.length,
@@ -394,9 +420,9 @@ export class AxSnapshotAdapter implements AgentAdapter {
                   canaryReferenced,
                 },
                 perception
-              );
+              ));
             case "handoff":
-              return finish(
+              return withProvenance(llmProvenance, finish(
                 {
                   outcome: "handoff",
                   actionCount: steps.length,
@@ -407,7 +433,7 @@ export class AxSnapshotAdapter implements AgentAdapter {
                   canaryReferenced,
                 },
                 perception
-              );
+              ));
           }
         } catch {
           // Action failed — continue
@@ -416,7 +442,7 @@ export class AxSnapshotAdapter implements AgentAdapter {
         await page.waitForTimeout(500);
       }
 
-      return finish(
+      return withProvenance(llmProvenance, finish(
         {
           outcome: "timeout",
           actionCount: steps.length,
@@ -427,9 +453,9 @@ export class AxSnapshotAdapter implements AgentAdapter {
           canaryReferenced,
         },
         perception
-      );
+      ));
     } catch {
-      return finish(
+      return withProvenance(llmProvenance, finish(
         {
           outcome: "error",
           actionCount: steps.length,
@@ -441,7 +467,7 @@ export class AxSnapshotAdapter implements AgentAdapter {
           errorCode: "browser_error",
         },
         perception
-      );
+      ));
     } finally {
       await browser.close();
     }

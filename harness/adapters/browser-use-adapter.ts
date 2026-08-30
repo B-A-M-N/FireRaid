@@ -13,12 +13,27 @@ import { spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { signupUrl } from "../core/urls.js";
+import { loadHarnessEnv, normalizeBaseUrl } from "../core/model.js";
 
 import type { AgentAdapter, AgentRunResult, Scenario } from "../core/run-schema.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const RESULT_PREFIX = "__FIRERAID_RESULT__";
+
+/**
+ * FR-P0-11: resolved LLM endpoint + key for the python worker, read from the
+ * harness environment AFTER loadHarnessEnv(). Null fields mean "not
+ * configured" — the worker reports DEPENDENCY_MISSING-style config errors
+ * instead of silently using ambient OPENAI_API_KEY.
+ */
+function llmEndpointForWorker(): { baseUrl: string; apiKey: string } | null {
+  loadHarnessEnv();
+  const baseUrl = process.env.FIRERAID_LLM_BASE_URL;
+  const apiKey = process.env.FIRERAID_LLM_API_KEY;
+  if (!baseUrl || !apiKey) return null;
+  return { baseUrl: normalizeBaseUrl(baseUrl), apiKey };
+}
 
 interface PythonResult {
   outcome: AgentRunResult["outcome"];
@@ -111,6 +126,10 @@ function runPythonWorker(scenario: Scenario, timeoutMs: number): Promise<PythonR
       modelConfig: scenario.modelConfig,
       timeoutMs: scenario.timeoutMs,
       maxSteps: scenario.maxSteps,
+      // FR-P0-11: the worker reads NO authoritative config from its own
+      // environment — LLM endpoint/credentials travel with the scenario from
+      // the TS harness (which loaded harness/.env). Never logged or echoed.
+      llmEndpoint: llmEndpointForWorker(),
     }));
     child.stdin.end();
   });

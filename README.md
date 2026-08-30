@@ -80,8 +80,8 @@ npm run test:a11y         # Accessibility assertions
 ## Running Experiments
 
 ```bash
-npm run experiment -- --agent raw-dom --model model-a --runs 100
-npm run analyze           # Compute rates + confidence intervals
+npm run experiment -- harness/experiments/exp-001.json   # run a manifest
+python3 harness/analysis/analyze.py <experiment-id>      # rates + group deltas
 ```
 
 ## Repository Layout
