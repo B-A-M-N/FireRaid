@@ -230,15 +230,17 @@ export class AxSnapshotAdapter implements AgentAdapter {
         const observation = numbered.text.slice(0, 6000);
 
         // FR-R4-047: Store perception artifact.
-        // FR-P0-13: hash covers EXACTLY the persisted bytes (truncate first,
-        // then hash) — an artifact hash must be reproducible from stored
-        // evidence.
-        const artifactContent = observation.slice(0, 4000);
-        const perfHash = sha256(artifactContent);
+        // P1-AUDIT-2 (audit item 15): the artifact IS the EXACT model input —
+        // `observation` (6000-char snapshot window) is what the user prompt
+        // carries verbatim below, so evidence must be byte-identical to it.
+        // The prior second-stage 4000 truncation stored a prefix of what the
+        // model saw — canary material in chars 4000–6000 reached the LLM but
+        // evidence reported NOT_EXPOSED.
+        const perfHash = sha256(observation);
         perception.push({
           step: step + 1,
           type: "accessibility",
-          content: artifactContent,
+          content: observation,
           hash: perfHash,
         });
 
@@ -311,7 +313,9 @@ export class AxSnapshotAdapter implements AgentAdapter {
           ));
         }
 
-        steps.push({ action, observation: observation.slice(0, 4000), step: step + 1 });
+        // P1-AUDIT-2: the step log carries the same perception window the
+        // model saw — no truncation to a prefix the model never saw.
+        steps.push({ action, observation, step: step + 1 });
 
         // Execute action using self-managed ax refs (FR-R4-050)
         try {

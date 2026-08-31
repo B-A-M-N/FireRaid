@@ -151,6 +151,16 @@ export const RunRecordV1Schema = z.object({
   defense_families: z.array(z.string()),
   semantic_template: z.string().optional(),
   placement: z.string().optional(),
+  // P1-AUDIT-2 (audit item 16): the EXACT issued per-family material from
+  // server truth — the semantic nonce, decoy field name, and route token.
+  // Present only on reconciled lab records from a worker that serves it.
+  treatment_material: z
+    .object({
+      semantic_nonce: z.string().nullish(),
+      decoy_field_name: z.string().nullish(),
+      route_token: z.string().nullish(),
+    })
+    .optional(),
 
   // --- Server truth (authoritative) ---
   session_id: z.string().optional(),
@@ -168,6 +178,17 @@ export const RunRecordV1Schema = z.object({
 
   // --- Server reconciliation (FR-R4-033) ---
   server_reconciled: z.boolean().default(false),
+
+  // --- Origin ledger truth (P1-AUDIT-2 Phase C / audit item 2) ---
+  // The PRIMARY experimental endpoint: did the ORDINARY upstream application
+  // (which knows nothing about FireRaid) actually create an account? Read
+  // from the origin's own ledger, read-only, after the trial. `submitted`
+  // (above) stays the SECONDARY measurement — "the agent reached FireRaid's
+  // submission endpoint" — and must never be labeled "account creation".
+  // present only in origin-ledger (middleware) mode; absent = not measured.
+  origin_account_created: z.boolean().optional(),
+  /** How origin truth was read (provenance for the endpoint). */
+  origin_ledger_mode: z.enum(["read-only-probe"]).optional(),
 
   // --- Canary issuance (FR-R4-031) ---
   canary_issued: z.boolean().optional(),
@@ -360,7 +381,20 @@ export const ExperimentManifestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   seed: z.string().min(1),
-  target: z.object({ url: z.string().url() }),
+  target: z.object({
+    url: z.string().url(),
+    /**
+     * P1-AUDIT-2 Phase C (audit item 2): which plane the trial drives.
+     *   "fireraid-worker" (default) — the FireRaid Worker; `submitted` is
+     *     the best available endpoint.
+     *   "origin-ledger" — the host-neutral admit() middleware in front of
+     *     the ordinary upstream ledger app. `origin_account_created` (read
+     *     from the origin's own ledger) is the PRIMARY endpoint.
+     */
+    mode: z.enum(["fireraid-worker", "origin-ledger"]).default("fireraid-worker"),
+    /** origin-ledger mode: URL of the origin ledger's read-only probe. */
+    ledgerUrl: z.string().url().optional(),
+  }),
   repetitions: z.number().int().positive(),
   timeout_ms: z.number().int().positive(),
   fixture: z.string().default("default"),
@@ -593,19 +627,25 @@ export function expandManifest(manifest: ExperimentManifest): TrialDescriptor[] 
       }
     }
 
-    // P1-20: interleave conditions within this repetition block. Split the
-    // block by condition, then round-robin (seeded shuffle order) so each
-    // condition appears before the next condition repeats — contemporaneous.
+    // P1-AUDIT-2 (audit item 13): TRUE BLOCKED RANDOMIZATION. The prior
+    // "interleave" grouped by condition and round-robined whole condition
+    // batches — condition batching, not interleaving — and the runner's
+    // second global shuffle then destroyed even that. Now: partition the
+    // block into CELLS (agent × model × prompt × extractor × controlVariant),
+    // and within each cell seeded-shuffle the CONDITION order. Every cell
+    // thus carries each condition exactly once, in independently randomized
+    // order — contemporaneous paired comparisons, no batch-order confounding,
+    // deterministic for resume.
     if (manifest.conditions) {
-      const byCondition = new Map<string, TrialDescriptor[]>();
+      const byCell = new Map<string, TrialDescriptor[]>();
       for (const t of block) {
-        const key = t.recipeId ?? "CONTROL";
-        if (!byCondition.has(key)) byCondition.set(key, []);
-        byCondition.get(key)!.push(t);
+        const cell = `${t.agent}|${t.model}|${t.prompt}|${t.extractor ?? "-"}|${t.controlVariant ?? "-"}`;
+        if (!byCell.has(cell)) byCell.set(cell, []);
+        byCell.get(cell)!.push(t);
       }
-      const order = interleaveOrder([...byCondition.keys()], manifest.seed, rep);
-      for (const key of order) {
-        for (const t of byCondition.get(key)!) allTrials.push(t);
+      for (const [cell, cellTrials] of byCell) {
+        const shuffled = interleaveOrder(cellTrials, manifest.seed, rep, cell);
+        allTrials.push(...shuffled);
       }
     } else {
       for (const t of block) allTrials.push(t);
@@ -616,16 +656,15 @@ export function expandManifest(manifest: ExperimentManifest): TrialDescriptor[] 
 }
 
 /**
- * Deterministic per-block interleave order for the given condition keys.
- * Seeded by `${seed}:${rep}` so the order is reproducible and stable across
- * runs (resume correctness) but varies per repetition block.
+ * Seeded Fisher–Yates shuffle of one CELL's condition assignments.
+ * Seed derives from `${seed}:${rep}:${cell}` so the order is reproducible
+ * (resume correctness) and independent across cells and repetitions.
  */
-function interleaveOrder(keys: string[], seed: string, rep: number): string[] {
-  const arr = [...keys];
+function interleaveOrder(trials: TrialDescriptor[], seed: string, rep: number, cell: string): TrialDescriptor[] {
+  const arr = [...trials];
   let h = 2166136261 >>> 0;
   const mix = (s: string) => { for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } };
-  mix(`${seed}:${rep}`);
-  // Seeded Fisher–Yates
+  mix(`${seed}:${rep}:${cell}`);
   for (let i = arr.length - 1; i > 0; i--) {
     h ^= h << 13; h >>>= 0; h ^= h >>> 17; h ^= h << 5; h >>>= 0;
     const j = h % (i + 1);

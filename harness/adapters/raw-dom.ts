@@ -253,18 +253,19 @@ export class RawDomAdapter implements AgentAdapter {
         }
 
         // FR-R4-047: Store perception artifact with SHA-256 hash.
-        // FR-P0-13: the hash covers EXACTLY the persisted bytes — an
-        // artifact hash must be reproducible from the stored evidence, so
-        // truncate FIRST, then hash the bounded content (the old order
-        // hashed the full observation and stored a truncated prefix, making
-        // the hash unverifiable from the record).
+        // P1-AUDIT-2 (audit item 15): the artifact IS the EXACT model input —
+        // observationWithRefs is what the user prompt carries verbatim below,
+        // so evidence and perception must be byte-identical. The prior
+        // 4000-char truncation made exposure evidence unsound: a canary
+        // beyond char 4000 reached the LLM while stored evidence reported
+        // NOT_EXPOSED. Full-observation artifacts live in the evidence dir
+        // (one file per step), not the bounded JSON record.
         const perfType = this.extractor === "raw-html" ? "raw-html" : "simplified-dom";
-        const artifactContent = observationWithRefs.slice(0, 4000); // bound payload
-        const perfHash = sha256(artifactContent);
+        const perfHash = sha256(observationWithRefs);
         perception.push({
           step: step + 1,
           type: perfType,
-          content: artifactContent,
+          content: observationWithRefs,
           hash: perfHash,
         });
 
@@ -344,7 +345,9 @@ export class RawDomAdapter implements AgentAdapter {
           ));
         }
 
-        steps.push({ action, observation: observationWithRefs.slice(0, 4000), step: step + 1 });
+        // P1-AUDIT-2: the step log carries the same observation the model
+        // saw — no truncation to a prefix the model never saw.
+        steps.push({ action, observation: observationWithRefs, step: step + 1 });
 
         // Execute action
         try {

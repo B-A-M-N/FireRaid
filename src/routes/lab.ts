@@ -529,6 +529,19 @@ export async function getLabRun(req: Request, env: Env, runId: string): Promise<
     defense_families: profile.families,
     semantic_template: profile.semantic?.templateId ?? null,
     placement: profile.semantic?.placementId ?? null,
+    // P1-AUDIT-2 (audit item 16): the EXACT per-family treatment material —
+    // the issued semantic nonce, the decoy field name, and the route token.
+    // The runner post-hoc-matches these against the persisted perception
+    // artifacts (whose bytes are the exact model input) so
+    // field_exposed/route_exposed/semantic_exposed are derived from real
+    // issued material, not structural proxies. LAB-AUTHENTICATED: this
+    // endpoint already requires the lab bearer secret — the material never
+    // reaches the browser or a production response.
+    treatment_material: {
+      semantic_nonce: profile.semantic?.nonce ?? null,
+      decoy_field_name: profile.decoyField?.fieldName ?? null,
+      route_token: profile.decoyRoute?.endpointToken ?? null,
+    },
     turnstile_required: record.turnstile_required ?? 0,
     holdout_mode: record.holdout_mode ?? 0,
     canary_issued,

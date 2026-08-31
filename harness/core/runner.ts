@@ -16,6 +16,9 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { execSync, execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { loadHarnessEnv } from "./model.js";
+// P1-AUDIT-2 Phase C: origin-ledger runtime + named ablation conditions.
+import { startOriginLedgerRuntime, trialEmail, type OriginLedgerRuntime } from "./origin-ledger.js";
+import { ABLATION_RECIPES } from "../../src/core/profile.js";
 // Imported lazily-resolved at top level so browserProvenance can use it
 // without a forbidden require(): the import itself must not launch anything.
 import * as playwrightCore from "playwright-core";
@@ -117,8 +120,14 @@ function resolveModelId(model: string, usesModel: boolean): string {
  * FR-P0-8: controlVariant is part of trial identity — without it the
  * normal/keyboard/autofill variants of one human cell collide in resume
  * state and later variants get skipped as "already completed".
+ * P1-AUDIT-2: recipeId is part of trial identity — without it CONTROL
+ * and FULL expansions of the same cell share one key, so resume state
+ * collapses them (a completed CONTROL marks FULL already-complete on a
+ * restarted run, and the lab_runs trial_key column silently reuses the
+ * same identity for different treatments).
  */
 function trialKey(manifestId: string, trial: {
+  recipeId?: string;
   agent: AgentType;
   model: string;
   prompt: string;
@@ -126,7 +135,7 @@ function trialKey(manifestId: string, trial: {
   repetition: number;
   controlVariant?: "normal" | "keyboard" | "autofill";
 }): string {
-  return `${manifestId}:${trial.agent}:${trial.model}:${trial.prompt}:${trial.extractor ?? "-"}:${trial.controlVariant ?? "-"}:${trial.repetition}`;
+  return `${manifestId}:${trial.recipeId ?? "-"}:${trial.agent}:${trial.model}:${trial.prompt}:${trial.extractor ?? "-"}:${trial.controlVariant ?? "-"}:${trial.repetition}`;
 }
 
 /**
@@ -271,6 +280,30 @@ async function createLabRun(
 }
 
 /**
+ * P1-AUDIT-2 (audit item 16): does ANY perception artifact contain the
+ * EXACT issued treatment material? A hit on the semantic nonce, the decoy
+ * field name, or the route token is real exposure — these strings are
+ * session-bound and unpredictable, so seeing one means the artifact bytes
+ * (== the model's input) carried issued material. Exported for tests.
+ */
+export function exactMaterialInArtifacts(
+  artifacts: Array<{ content: string }>,
+  material?: {
+    semantic_nonce?: string | null;
+    decoy_field_name?: string | null;
+    route_token?: string | null;
+  } | null
+): boolean {
+  const exactNeedles = [
+    material?.semantic_nonce,
+    material?.decoy_field_name,
+    material?.route_token,
+  ].filter((s): s is string => typeof s === "string" && s.length > 0);
+  if (exactNeedles.length === 0) return false;
+  return artifacts.some((a) => exactNeedles.some((n) => a.content.includes(n)));
+}
+
+/**
  * Read server truth for a lab run.
  * FR-R4-033: GET with bearer auth. FR-R5-004: the run reaches status
  * "COMPLETE" only after the explicit outcome POST (below) — never via an
@@ -307,6 +340,12 @@ async function fetchServerTruth(
       canary_exposed?: boolean;
       canary_verified_server?: boolean;
       outcome?: string | null;
+      // P1-AUDIT-2 (audit item 16): exact issued per-family material.
+      treatment_material?: {
+        semantic_nonce?: string | null;
+        decoy_field_name?: string | null;
+        route_token?: string | null;
+      } | null;
     };
 
     // Server truth is only authoritative once the outcome has been recorded.
@@ -331,6 +370,11 @@ async function fetchServerTruth(
         // canary_exposed deliberately absent — it is an AGENT-side
         // observation derived from exposure_state at the merge site.
         canary_verified_server: data.canary_verified_server ?? false,
+        // P1-AUDIT-2: exact treatment material — the issued nonce/field/token
+        // the exposure derivation post-hoc-matches against perception
+        // artifacts. Structurally optional: an older worker response without
+        // the field simply yields no exact-material signal.
+        treatment_material: data.treatment_material ?? undefined,
       };
     }
     return null;
@@ -383,9 +427,14 @@ async function executeTrial(
   trial: ReturnType<typeof expandManifest>[number],
   recorder: Recorder,
   manifestHash: string,
+  originRuntime?: OriginLedgerRuntime,
 ): Promise<RunRecordV2> {
   const labSecret = process.env.FIRERAID_LAB_API_SECRET;
-  const labTarget = labSecret ? manifest.target.url : null;
+  // P1-AUDIT-2 Phase C: origin-ledger mode drives the middleware facade, not
+  // the FireRaid Worker — the FireRaid lab-run lifecycle (create/bind/
+  // outcome) does not exist there and its fail-closed creation error would
+  // kill every trial. Ledger truth replaces FireRaid truth as the endpoint.
+  const labTarget = labSecret && !originRuntime ? manifest.target.url : null;
 
   const startedAt = Date.now();
   const adapterCaps = ADAPTER_CAPABILITIES[trial.agent];
@@ -454,7 +503,10 @@ async function executeTrial(
   }
 
   const scenario = {
-    targetUrl: manifest.target.url,
+    // P1-AUDIT-2 Phase C: origin-ledger mode drives the middleware facade
+    // (worker-shaped), so existing adapters run unmodified against the
+    // REAL defense in front of the ordinary upstream.
+    targetUrl: originRuntime ? originRuntime.facadeUrl : manifest.target.url,
     fixture: loadFixture(manifest.fixture),
     promptVariant: trial.prompt,
     model: modelId,
@@ -472,6 +524,23 @@ async function executeTrial(
   };
 
   const adapter = createAdapter(trial.agent, trial.extractor);
+
+  // P1-AUDIT-2 Phase C: assign THIS trial's condition to the middleware
+  // before the adapter runs — the blocked-randomized recipe_id maps to the
+  // canonical ablation recipe (CONTROL = {families:[]}, as on the Worker).
+  // The middleware derives every profile for the trial under it.
+  let ledgerEmail: string | undefined;
+  if (originRuntime) {
+    const recipe = trial.recipeId ? ABLATION_RECIPES[trial.recipeId] : undefined;
+    if (trial.recipeId && !recipe) {
+      throw new Error(`origin-ledger mode: unknown recipe_id ${trial.recipeId}`);
+    }
+    originRuntime.setTrialRecipe(recipe);
+    ledgerEmail = trialEmail(manifest.id, trialKey(manifest.id, trial));
+    // The synthetic fixture identity must be trial-unique so the ledger
+    // lookup is unambiguous — override the email the adapter will submit.
+    scenario.fixture = { ...scenario.fixture, email: ledgerEmail };
+  }
 
   // Run the adapter
   const result = await adapter.run(scenario);
@@ -595,18 +664,16 @@ async function executeTrial(
       const serverTruth = await fetchServerTruth(labTarget, runId, labSecret);
 
       if (serverTruth) {
-        // FR-POST-R6-P4: exact-material exposure — once server truth names
-        // the issued session material (semantic nonce / route token), an
-        // artifact containing THAT exact material is exposure even if the
-        // generic structural scan missed it.
-        const exactMaterialExposed =
-          artifactPresent &&
-          artifacts.some((a) => {
-            if (serverTruth.semantic_template && record.canary_referenced === true) {
-              return a.content.includes("/c/") || a.content.includes("data-fr-marker");
-            }
-            return false;
-          });
+        // P1-AUDIT-2 (audit item 16): EXACT-material exposure. Server truth
+        // now carries the ISSUED material (semantic nonce / decoy field name
+        // / route token); an artifact containing that exact string is real
+        // exposure. The prior check compared generic shapes ("/c/",
+        // "data-fr-marker") gated on semantic_template — it never saw the
+        // issued material, so "exact" was a misnomer.
+        const exactMaterialExposed = exactMaterialInArtifacts(
+          artifacts,
+          serverTruth.treatment_material
+        );
         if (exactMaterialExposed && exposureState !== "EXPOSED") {
           exposureState = "EXPOSED";
           perceptionSurface = agentPerceptionSurface(trial.agent, trial.extractor, true);
@@ -640,6 +707,25 @@ async function executeTrial(
     record.perception_surface = perceptionSurface;
   }
 
+  // P1-AUDIT-2 Phase C (audit item 2): reconcile against the ORIGIN ledger —
+  // the PRIMARY endpoint. Did the ordinary upstream actually create the
+  // account? Read-only probe; probe failure records UNKNOWN (undefined),
+  // never a silent false. In this mode `record.submitted` means only "the
+  // agent reached the middleware's submit endpoint" (secondary measurement).
+  if (originRuntime && ledgerEmail) {
+    const created = await originRuntime.ledgerHasAccount(ledgerEmail);
+    record.origin_account_created = created ?? false;
+    record.origin_ledger_mode = "read-only-probe";
+    if (created === null) {
+      // The primary outcome is UNKNOWABLE — same epistemic class as a
+      // FireRaid reconciliation failure, so same failure semantics.
+      record.error_code = record.error_code ?? "ORIGIN_RECONCILIATION_FAILED";
+      record.server_reconciled = false;
+    } else {
+      record.server_reconciled = true;
+    }
+  }
+
   // FR-R6-057: in authoritative lab mode, an unreconciled run is a BROKEN
   // run — it must never be marked COMPLETE in resume state (resume would
   // skip it forever and the hole would silently disappear from reports).
@@ -663,9 +749,17 @@ async function executeTrial(
     record.transcript_path = paths.transcriptPath;
     record.perception_artifact_dir = paths.artifactDir;
   } catch (err) {
-    // Evidence write failure degrades the record, not the experiment —
-    // the run still records, with paths absent.
+    // P1-AUDIT-2 (audit item 15): evidence write failure INVALIDATES the
+    // evidence-dependent measurements — exposure_state is derived from the
+    // perception artifacts, and without the persisted bytes the claim is
+    // unverifiable (the hash can't be rechecked against any file). The run
+    // still records, but its exposure measurement is demoted to UNMEASURED
+    // and the record carries an explicit error code — never a silent
+    // warn-and-COMPLETE with an unverifiable EXPOSED/NOT_EXPOSED verdict.
     console.warn(`evidence write failed for ${record.run_id}:`, err instanceof Error ? err.message : err);
+    record.exposure_state = "UNMEASURED";
+    record.perception_surface = null;
+    record.error_code = record.error_code ?? "EVIDENCE_WRITE_FAILED";
   }
 
   recorder.record(record);
@@ -694,38 +788,6 @@ function loadFixture(name: string): Record<string, string> {
   }
 
   throw new Error(`Fixture not found: ${name} (tried harness/fixtures/${name}.json)`);
-}
-
-/**
- * Deterministic shuffle using experiment seed (FR-R3-090).
- * Fisher-Yates with seeded PRNG.
- */
-function shuffleWithSeed<T>(array: T[], seed: string): T[] {
-  // Simple seeded hash function
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    const char = seed.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash; // Convert to 32-bit integer
-  }
-
-  // Seeded PRNG (mulberry32)
-  let state = hash >>> 0;
-  function random(): number {
-    state = (state + 0x6D2B79F5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  }
-
-  // Fisher-Yates shuffle
-  const shuffled = [...array];
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-  return shuffled;
 }
 
 /**
@@ -793,8 +855,12 @@ export async function runExperiment(manifestPath: string): Promise<void> {
     process.exit(1);
   }
 
-  // Expand into trials and shuffle deterministically (FR-R3-090)
-  const trials = shuffleWithSeed(expandManifest(manifest), manifest.seed);
+  // Expand into trials. P1-AUDIT-2 (audit item 13): NO global shuffle —
+  // expandManifest now emits true blocked randomization (per-cell condition
+  // order is seeded-shuffled inside each repetition block). A second global
+  // shuffle here would destroy that block structure and re-introduce the
+  // batch-order confounding the blocks exist to prevent.
+  const trials = expandManifest(manifest);
   console.log(`Total trials: ${trials.length}`);
 
   // FR-R4-085: Check for existing resume state with stable per-key tracking
@@ -817,6 +883,19 @@ export async function runExperiment(manifestPath: string): Promise<void> {
   }
 
   const recorder = new Recorder(manifest.id);
+
+  // P1-AUDIT-2 Phase C (audit item 2): origin-ledger mode — start the
+  // middleware + ordinary upstream runtime so trials drive the REAL defense
+  // in front of the REAL origin, and ledger truth becomes the endpoint.
+  let originRuntime: OriginLedgerRuntime | undefined;
+  if (manifest.target.mode === "origin-ledger") {
+    originRuntime = await startOriginLedgerRuntime({
+      secret: process.env.FIRERAID_PROFILE_SECRET ?? "harness-local-secret".padEnd(32, "0"),
+      version: manifest.profile_version,
+      labMode: false,
+    });
+    console.log(`Origin ledger runtime up: facade=${originRuntime.facadeUrl} ledger=${originRuntime.ledgerUrl}`);
+  }
 
   // Execute trials sequentially
   // (per-trial status is tracked in resumeTrials; no separate counter needed)
@@ -856,7 +935,7 @@ export async function runExperiment(manifestPath: string): Promise<void> {
     }
 
     try {
-      const record = await executeTrial(manifest, trial, recorder, manifestHash);
+      const record = await executeTrial(manifest, trial, recorder, manifestHash, originRuntime);
       console.log(
         `  Result: ${record.outcome} in ${record.elapsed_ms}ms (${record.action_count} actions)`
       );
@@ -918,6 +997,9 @@ export async function runExperiment(manifestPath: string): Promise<void> {
   console.log(`Median elapsed: ${metrics.median_elapsed}ms`);
   console.log(`Error rate: ${(metrics.error_rate * 100).toFixed(1)}%`);
   console.log(`Authoritative effectiveness metrics: npm run analyze -- ${manifest.id}`);
+
+  // P1-AUDIT-2 Phase C: tear down the origin-ledger runtime (if any).
+  await originRuntime?.shutdown();
 }
 
 // CLI entry

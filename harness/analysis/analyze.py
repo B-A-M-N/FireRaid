@@ -5,8 +5,6 @@ FR-INV-009: experiments must be reproducible.
 """
 import json
 import sys
-import os
-import glob
 import math
 from pathlib import Path
 from collections import defaultdict
@@ -129,9 +127,7 @@ def is_baseline(r: dict) -> bool:
     defense_families proxy.  Only when that metadata is entirely absent do we
     fall back to the legacy heuristic.
     """
-    # Determine if recipe_id is the canonical group signal.
-    has_recipe_id = "recipe_id" in r and r["recipe_id"] is not None
-    # We need the global decision (does *any* run have recipe_id?).  This is
+    # The global decision (does *any* run have recipe_id?) is (does *any* run have recipe_id?).  This is
     # computed externally in group_runs() and passed as ``use_recipe_id``.
     if use_recipe_id_for_baseline:
         return r.get("recipe_id") == "CONTROL"
@@ -156,6 +152,95 @@ def is_valid_run(r: dict) -> bool:
     )
 
 
+# P1-AUDIT-2: failure taxonomy. Which plane failed, if any? Only
+# EXPERIMENT-INFRASTRUCTURE failures make the primary outcome unknowable —
+# an agent that timed out or an LLM provider that errored still means NO
+# ACCOUNT WAS CREATED, which for an admission defense is a successful
+# outcome (intention-to-treat: the trial was assigned, the defense held).
+FIRERAID_INFRA_CODES = {
+    "LAB_RUN_CREATION_FAILED",
+    "SERVER_RECONCILIATION_FAILED",
+}
+# Phase C origin-ledger join: a failed ledger probe makes the PRIMARY
+# outcome unknowable — the trial is not assignable, same class as a
+# FireRaid reconciliation failure.
+ORIGIN_INFRA_CODES = {
+    "ORIGIN_RECONCILIATION_FAILED",
+    "EVIDENCE_WRITE_FAILED",
+}
+
+TAXONOMY_PLANES = ("agent", "provider", "harness", "fireraid_infra", "origin_infra")
+
+
+def failure_plane(r: dict) -> str | None:
+    """
+    Classify a failed run into its failure plane. Returns None for runs
+    that did not fail (outcome submitted/stopped/handoff).
+    """
+    if r.get("outcome") in ("submitted", "stopped", "handoff"):
+        return None
+    code = r.get("error_code")
+    if code in FIRERAID_INFRA_CODES:
+        return "fireraid_infra"
+    if code in ORIGIN_INFRA_CODES:
+        return "origin_infra"
+    if r.get("outcome") == "timeout":
+        return "agent"  # agent ran out of budget — a held-out defense outcome
+    if code == "llm_error":
+        return "provider"
+    if code in ("browser_error", "invalid_prompt_variant", "TIMEOUT"):
+        return "harness"
+    if r.get("outcome") == "error":
+        return "harness"  # unclassified error defaults to the harness plane
+    return None
+
+
+def is_assignable(r: dict) -> bool:
+    """
+    P1-AUDIT-2: intention-to-treat denominator. A trial is assignable when
+    its primary outcome (was an account created?) is knowable — i.e. it did
+    NOT fail on experiment infrastructure. Agent timeouts, agent errors and
+    provider failures remain IN the denominator: for an admission defense,
+    every one of those ends with no account created.
+    """
+    return failure_plane(r) not in ("fireraid_infra", "origin_infra")
+
+
+def origin_endpoint_rates(assignable: list, n_assignable: int) -> dict:
+    """
+    P1-AUDIT-2 Phase C: PRIMARY endpoint rates from origin-ledger truth.
+
+    origin_account_creation_rate — share of ASSIGNABLE trials where the
+        ordinary upstream actually created the account (ITT denominator:
+        infrastructure failures excluded, agent timeouts/errors included —
+        every non-created outcome blocked the account).
+    itt_block_rate — 1 − creation rate; the defense-effectiveness endpoint.
+
+    When no run carries origin truth (FireRaid-worker mode) both rates are
+    None and `submitted` remains the best available proxy — never silently
+    reinterpreted as account creation.
+    """
+    with_truth = [r for r in assignable if "origin_account_created" in r]
+    if n_assignable <= 0 or not with_truth:
+        return {
+            "n_with_origin_truth": len(with_truth),
+            "origin_account_creation_rate": None,
+            "itt_block_rate": None,
+        }
+    created = sum(1 for r in assignable if r.get("origin_account_created") is True)
+    creation_ci = wilson_interval(created, n_assignable)
+    return {
+        "n_with_origin_truth": len(with_truth),
+        "origin_account_creation_rate": (created / n_assignable, *creation_ci),
+        # Complement of the creation rate; CI bounds mirrored.
+        "itt_block_rate": (
+            1 - created / n_assignable,
+            1 - creation_ci[1],
+            1 - creation_ci[0],
+        ),
+    }
+
+
 def compute_rates(runs: list, n_attempted: int) -> dict:
     """
     FR-R5-050: Separate denominator classes.
@@ -170,6 +255,16 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
     """
     n_valid = sum(1 for r in runs if is_valid_run(r))
     valid = [r for r in runs if is_valid_run(r)]
+
+    # P1-AUDIT-2: ITT denominator + failure taxonomy. assignable = every
+    # trial whose primary outcome (account created?) is knowable.
+    assignable = [r for r in runs if is_assignable(r)]
+    n_assignable = len(assignable)
+    taxonomy = {plane: 0 for plane in TAXONOMY_PLANES}
+    for r in runs:
+        plane = failure_plane(r)
+        if plane is not None:
+            taxonomy[plane] += 1
 
     # --- OPERATIONAL rates (denominator = n_attempted) ---
     error_count = sum(1 for r in runs if r.get("error_code") is not None)
@@ -269,10 +364,29 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
             canary_issued_count / n_valid,
             *wilson_interval(canary_issued_count, n_valid),
         )
-        effectiveness["canary_exposure_rate"] = (
-            canary_exposed_count / n_valid,
-            *wilson_interval(canary_exposed_count, n_valid),
+        # P1-AUDIT-2: exposure has a two-level denominator. canary_exposed
+        # is UNMEASURED (null) for runs with no perception artifacts —
+        # folding them into the denominator treats "not measured" as
+        # "measured, not exposed" and silently deflates the rate.
+        #   exposure_coverage     = measured / n_valid   (data quality)
+        #   measured_exposure_rate= exposed / measured   (the real rate)
+        # Uses the CANONICAL exposure_view derivation (same as the exposure
+        # table) so the metric and the table can never disagree on v1-
+        # migrated records.
+        exposure_states = [exposure_view(r)[0] for r in valid]
+        exposure_measured = sum(1 for s in exposure_states if s in ("EXPOSED", "NOT_EXPOSED"))
+        exposure_covered = exposure_measured / n_valid
+        effectiveness["exposure_coverage"] = (
+            exposure_covered,
+            *wilson_interval(exposure_measured, n_valid),
         )
+        if exposure_measured > 0:
+            effectiveness["measured_exposure_rate"] = (
+                canary_exposed_count / exposure_measured,
+                *wilson_interval(canary_exposed_count, exposure_measured),
+            )
+        else:
+            effectiveness["measured_exposure_rate"] = (0.0, 0.0, 0.0)
         effectiveness["canary_request_rate"] = (
             canary_requested_count / n_valid,
             *wilson_interval(canary_requested_count, n_valid),
@@ -290,6 +404,14 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
         "n": n_valid,
         "n_valid": n_valid,
         "n_attempted": n_attempted,
+        # P1-AUDIT-2: ITT denominator + failure taxonomy.
+        "n_assignable": n_assignable,
+        "failure_taxonomy": taxonomy,
+        "itt_submission_rate": (
+            submitted / n_assignable,
+            *wilson_interval(submitted, n_assignable),
+        ) if n_assignable > 0 else (0.0, 0.0, 0.0),
+        **origin_endpoint_rates(assignable, n_assignable),
         **operational,
         **effectiveness,
     }
@@ -470,8 +592,8 @@ def print_report(experiment_id: str, records_dir: str | None = None):
     print("    submission_rate (SERVER truth), stop_rate, handoff_rate")
     print("    undetected_rate (submitted AND not quarantined/reviewed)")
     print("    quarantine_rate, review_rate")
-    print("    canary_issued_rate, canary_exposure_rate, canary_request_rate,")
-    print("    canary_reference_rate, canary_verified_rate")
+    print("    canary_issued_rate, exposure_coverage, measured_exposure_rate,")
+    print("    canary_request_rate, canary_reference_rate, canary_verified_rate")
 
     # --- Per-group summary table ---
     print(f"\n{'Group':<25} {'N_attempted':>12} {'N_valid':>10} {'Submit':>10} {'Quarantine':>12} {'Timeout':>10}")
@@ -552,7 +674,6 @@ def print_report(experiment_id: str, records_dir: str | None = None):
             )
 
     # --- FR-R6-071: human/control false-positive analysis ---
-    control_dims = {"normal": None, "keyboard": None, "autofill": None}
     control_runs = [
         r for r in runs
         if isinstance(r.get("agent"), str) and r["agent"].startswith("human")
@@ -655,7 +776,7 @@ def print_report(experiment_id: str, records_dir: str | None = None):
         print(f"\n95% confidence intervals (Wilson):")
         for metric in [
             "submission_rate", "undetected_rate", "stop_rate", "quarantine_rate",
-            "canary_exposure_rate", "canary_request_rate",
+            "exposure_coverage", "measured_exposure_rate", "canary_request_rate",
             "canary_reference_rate", "canary_verified_rate",
         ]:
             if metric not in overall:
