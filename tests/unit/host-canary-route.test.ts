@@ -42,7 +42,7 @@ function deps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
     session: new ReferenceSessionAdapter(SECRET),
     render: { inject: (h) => h },
     verification: { verify: async () => true },
-    telemetry: { accept: () => [] },
+    telemetry: { accept: async () => 0, collect: async () => [] },
     enforcement: { allow: async () => true, deny: () => {} },
     canaryStore: new ReferenceCanaryStore(),
     labMode: false,

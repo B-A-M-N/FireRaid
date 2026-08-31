@@ -23,6 +23,7 @@
  */
 
 import type { DefenseProfile } from "../types/profile.js";
+import type { ValidatedEvent } from "../security/request-validation.js";
 
 /** Re-exported so adapters need not reach into core directly. */
 export type { DefenseProfile };
@@ -69,35 +70,68 @@ export interface HostRenderAdapter {
 }
 
 /**
+ * P1-AUDIT-2 (P1-4): the verification INPUT a real provider needs — the
+ * middleware extracts these from the canonical body ONCE, so a provider
+ * adapter never guesses whether its token lives in form.cf_token, an
+ * arbitrary JSON field, or a header. Field semantics mirror the Worker's
+ * Turnstile provider (action/siteverify request URL/remoteip/user-agent).
+ */
+export interface VerificationInput {
+  /** The provider's challenge token (Turnstile `cf-turnstile-response`). */
+  token?: string;
+  /** The widget's action label the token was bound to (when carried). */
+  action?: string;
+  /** Hostname the challenge was solved on (when carried). */
+  hostname?: string;
+  /** Client IP for siteverify's remoteip (CF-Connecting-IP in production). */
+  remoteIp?: string;
+  /** Client User-Agent for provider-side consistency checks. */
+  userAgent?: string;
+  /** The request URL the submission arrived at. */
+  requestUrl: string;
+}
+
+/**
  * Verification adapter — confirm the submission's admission decision is
  * enforceable before forwarding to the upstream. In production this wraps
  * Turnstile; the reference adapter can use a no-op (verification "none").
  */
 export interface HostVerificationAdapter {
   /**
-   * @param body the already-parsed, already-CONSUMED request body (form +
-   *   CSRF + telemetry + any verification payload). The middleware reads the
-   *   JSON body ONCE and hands it here, so a real verifier (e.g. Turnstile
-   *   checking a token from the body) never needs to re-read a consumed
-   *   request stream.
+   * @param input the canonical verification input extracted from the
+   *   already-parsed, already-CONSUMED request body + headers. The
+   *   middleware reads the body ONCE and hands the extracted fields here,
+   *   so a real verifier never re-reads a consumed request stream and never
+   *   speculates about token placement.
    * @returns true if the submission may be forwarded (verification passed or
    *          not required); false if admission must be denied.
    */
-  verify(
-    req: Request,
-    profile: DefenseProfile,
-    body: { csrf?: string; form?: Record<string, string>; eventBatch?: unknown }
-  ): Promise<boolean>;
+  verify(profile: DefenseProfile, input: VerificationInput): Promise<boolean>;
 }
 
 /**
- * Telemetry adapter — accept a coarse interaction batch from the client and
- * return the observations the core correlates. The upstream never sees the
- * raw stream; only the derived verdict matters.
+ * Telemetry adapter — persist + serve the session's interaction stream.
+ *
+ * P1-AUDIT-2 (P0-5): the Worker accumulates events across MANY batches
+ * (/api/events … /api/submit) and scores the whole session at submit. A
+ * host plane that only sees the submit request's final batch measures a
+ * different interaction window and is not evidence about the Worker plane.
+ * The adapter is therefore a STATEFUL observation store:
+ *   - accept()  validates + persists one batch (canonical ValidatedEvent,
+ *     the SAME contract/routes/telemetry.ts validation — no synthetic
+ *     timestamps, no weaker normalizer);
+ *   - collect() returns the session's full validated stream for scoring.
  */
 export interface HostTelemetryAdapter {
-  /** Normalize a submitted telemetry batch into a consumption-safe shape. */
-  accept(batch: unknown): { seq: number; kind: string; target?: string }[];
+  /**
+   * Validate + persist one client batch. Returns the number of accepted
+   * events, or null when the batch is structurally invalid (the middleware
+   * treats that as a deny — an invalid observation stream is never silently
+   * repaired: FR-R6-035 semantics on the host plane too).
+   */
+  accept(sessionId: string, batch: unknown): Promise<number | null>;
+  /** The session's full validated stream, in seq order. */
+  collect(sessionId: string): Promise<ValidatedEvent[]>;
 }
 
 /**

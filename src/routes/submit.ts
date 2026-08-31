@@ -49,6 +49,7 @@ import {
   type ValidatedEvent,
 } from "./telemetry.js";
 import { aggregateSessionTelemetry, loadSessionMetrics, mergeSessionMetrics, type SessionMetricsRead } from "../telemetry/aggregate.js";
+import { validateSignupForm } from "../security/request-validation.js";
 import type { TelemetryMetrics } from "../telemetry/aggregate.js";
 import { D1SubmissionFinalizer } from "../cloudflare/session-store.js";
 import { randomUUID } from "node:crypto";
@@ -60,29 +61,9 @@ interface SubmitBody {
   eventBatch?: unknown;
 }
 
-/** FR-R6-025: bounded form validation (count / key length / value length). */
-const MAX_FORM_FIELDS = 64;
-const MAX_FORM_KEY_BYTES = 64;
-const MAX_FORM_VALUE_BYTES = 4096;
-
-function validateForm(form: unknown): { ok: true; form: Record<string, string> } | { ok: false; reason: string } {
-  if (typeof form !== "object" || form === null || Array.isArray(form)) {
-    return { ok: false, reason: "form must be an object" };
-  }
-  const entries = Object.entries(form as Record<string, unknown>);
-  if (entries.length > MAX_FORM_FIELDS) {
-    return { ok: false, reason: "too many form fields" };
-  }
-  const out: Record<string, string> = {};
-  const enc = new TextEncoder();
-  for (const [key, value] of entries) {
-    if (typeof value !== "string") return { ok: false, reason: `form value for "${key}" is not a string` };
-    if (enc.encode(key).length > MAX_FORM_KEY_BYTES) return { ok: false, reason: "form key too long" };
-    if (enc.encode(value).length > MAX_FORM_VALUE_BYTES) return { ok: false, reason: `form value for "${key}" too long` };
-    out[key] = value;
-  }
-  return { ok: true, form: out };
-}
+// P1-AUDIT-2 (P1-3): the bounded form validation moved to
+// security/request-validation.ts — ONE implementation for the Worker route
+// and the host middleware (the prior two drifted; the host had no caps).
 
 export async function submit(req: Request, env: Env): Promise<Response> {
   // 1. method + content-type
@@ -138,7 +119,7 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   // FR-R6-025: bounded form schema validation.
   let form: Record<string, string>;
   {
-    const checked = validateForm(body.form ?? {});
+    const checked = validateSignupForm(body.form ?? {});
     if (!checked.ok) return error(checked.reason, 400);
     form = checked.form;
   }

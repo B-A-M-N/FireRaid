@@ -19,9 +19,14 @@ import {
   type HostEnforcementAdapter,
 } from "../../src/host-adapter/index.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
+import { validateTelemetryBatch } from "../../src/security/request-validation.js";
 
 const SECRET = "s".repeat(64);
 const VERSION = 1;
+
+/** Session-keyed in-memory telemetry store backing the test adapters'
+ * stateful HostTelemetryAdapter contract (P0-5). */
+const store: Record<string, { seq: number; dt: number; kind: string; target?: string }[]> = {};
 
 /** Build a POST Request carrying a valid signed cookie + keyed CSRF. */
 async function postRequest(sessionId: string, body: Record<string, unknown>) {
@@ -205,12 +210,25 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
     const d = deps({
       enforcement,
       recipe: LAB_FULL,
-      telemetry: { accept: (b: unknown) => (Array.isArray(b) ? b : []) as { seq: number; kind: string }[] },
+      telemetry: {
+        // Canonical validation + in-memory persistence (P0-5 contract).
+        accept: async (sid: string, b: unknown) => {
+          const check = validateTelemetryBatch(b);
+          if (!check.ok) return null;
+          (store[sid] ??= []).push(...check.events);
+          return check.events.length;
+        },
+        collect: async (sid: string) => store[sid] ?? [],
+      },
     });
     // Batch has key + input events but NO pointer events. With capture OFF,
-    // noPointerEvents must stay undefined — never scored.
+    // noPointerEvents must stay undefined — never scored. Events carry REAL
+    // dt values — the canonical validator rejects undefined dt (P0-4's
+    // no-fabricated-timestamps contract cuts both ways).
     const events = [
-      { seq: 1, kind: "key" }, { seq: 2, kind: "input", target: "email" }, { seq: 3, kind: "submit_attempt" },
+      { seq: 1, dt: 0, kind: "key" },
+      { seq: 2, dt: 100, kind: "input", target: "email" },
+      { seq: 3, dt: 200, kind: "submit_attempt" },
     ];
     const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" }, eventBatch: events });
     const res = await admit(req, d, htmlLoader);
@@ -231,10 +249,21 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
     const d = deps({
       enforcement,
       recipe: LAB_FULL,
-      telemetry: { accept: (b: unknown) => (Array.isArray(b) ? b : []) as { seq: number; kind: string }[] },
+      telemetry: {
+        // Canonical validation + in-memory persistence (P0-5 contract).
+        accept: async (sid: string, b: unknown) => {
+          const check = validateTelemetryBatch(b);
+          if (!check.ok) return null;
+          (store[sid] ??= []).push(...check.events);
+          return check.events.length;
+        },
+        collect: async (sid: string) => store[sid] ?? [],
+      },
     });
     const events = [
-      { seq: 1, kind: "key" }, { seq: 2, kind: "input", target: "email" }, { seq: 3, kind: "submit_attempt" },
+      { seq: 1, dt: 0, kind: "key" },
+      { seq: 2, dt: 100, kind: "input", target: "email" },
+      { seq: 3, dt: 200, kind: "submit_attempt" },
     ];
     const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" }, eventBatch: events });
     const res = await admit(req, d, htmlLoader);

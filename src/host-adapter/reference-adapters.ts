@@ -15,6 +15,9 @@ import {
   type SessionEnvelope,
 } from "../core/session-envelope.js";
 import type { ProfileKeyRing } from "../core/session.js";
+import { validateTelemetryBatch, type ValidatedEvent } from "../security/request-validation.js";
+import type { DefenseProfile } from "../types/profile.js";
+import { getPolicyOrThrow, type ScoringPolicy } from "../core/decision.js";
 
 const SESSION_COOKIE = "__Host-fr_sid";
 const SESSION_TTL_S = 30 * 60;
@@ -89,9 +92,9 @@ export class ReferenceSessionAdapter implements HostSessionAdapter {
 
 /**
  * No-op verification adapter — the reference upstream performs its own
- * admission (the ledger is the truth). Production adapters wrap Turnstile.
- * Receives the already-consumed parsed body; returns true (no verification
- * required).
+ * admission (the ledger is the truth). Production adapters wrap Turnstile
+ * over the CANONICAL VerificationInput fields (P1-4): token, action,
+ * hostname, remoteIp, userAgent, requestUrl.
  */
 export class ReferenceVerificationAdapter implements HostVerificationAdapter {
   async verify(): Promise<boolean> {
@@ -99,18 +102,57 @@ export class ReferenceVerificationAdapter implements HostVerificationAdapter {
   }
 }
 
-/** Reference telemetry adapter — pass-through normalization. */
+/**
+ * P1-AUDIT-2 (P1-2): scoring-policy parity. The host decision must honor
+ * the profile's OWN policy (strict-v1 / permissive-v1 are real treatments)
+ * exactly as the Worker submit route does. The prior host middleware called
+ * decide(evidence) with the DEFAULT policy for every profile, so the host
+ * plane could not reproduce Worker decisions under non-default policies.
+ * An unknown persisted policy FAILS CLOSED (null → caller denies) rather
+ * than silently scoring under a different rule.
+ */
+export function resolveScoringPolicy(
+  profile: DefenseProfile
+): ScoringPolicy | null {
+  try {
+    return getPolicyOrThrow(profile.scoringPolicy);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reference telemetry adapter — a STATEFUL in-memory observation store over
+ * the CANONICAL validation (P0-4/P0-5). Every batch goes through
+ * validateTelemetryBatch() — the exact function the Worker's /api/events
+ * and /api/submit run — so the host plane accepts the same events, rejects
+ * the same events, and preserves the same seq/dt/kind/target/meta as the
+ * Worker plane. No synthetic timestamps, no weaker normalizer.
+ *
+ * In-memory per-isolate state, like ReferenceCanaryStore; hosts with real
+ * persistence implement HostTelemetryAdapter over their own store using the
+ * same canonical validation.
+ */
 export class ReferenceTelemetryAdapter implements HostTelemetryAdapter {
-  accept(batch: unknown): { seq: number; kind: string; target?: string }[] {
-    if (!Array.isArray(batch)) return [];
-    const out: { seq: number; kind: string; target?: string }[] = [];
-    for (const e of batch) {
-      if (typeof e !== "object" || e === null) continue;
-      const o = e as Record<string, unknown>;
-      if (typeof o.seq !== "number" || typeof o.kind !== "string") continue;
-      out.push({ seq: o.seq, kind: o.kind, target: typeof o.target === "string" ? o.target : undefined });
-    }
-    return out;
+  /** sessionId → events in arrival (seq) order. */
+  private readonly streams = new Map<string, ValidatedEvent[]>();
+
+  async accept(sessionId: string, batch: unknown): Promise<number | null> {
+    const check = validateTelemetryBatch(batch);
+    if (!check.ok) return null;
+    const stream = this.streams.get(sessionId) ?? [];
+    for (const e of check.events) stream.push(e);
+    this.streams.set(sessionId, stream);
+    return check.events.length;
+  }
+
+  async collect(sessionId: string): Promise<ValidatedEvent[]> {
+    return this.streams.get(sessionId) ?? [];
+  }
+
+  /** Test/diagnostics accessor: the raw persisted stream for a session. */
+  streamsFor(sessionId: string): ValidatedEvent[] {
+    return this.streams.get(sessionId) ?? [];
   }
 }
 

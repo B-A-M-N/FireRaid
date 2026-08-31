@@ -18,6 +18,9 @@ import { deriveProfilePure, hashProfile, type DefenseRecipe } from "../core/prof
 import { correlate, type ObservationSet } from "../core/correlation.js";
 import { decide } from "../core/decision.js";
 import { aggregateTelemetry, type CaptureConfig } from "../telemetry/aggregate.js";
+import { validateSignupForm, type SubmitInbound } from "../security/request-validation.js";
+import { resolveScoringPolicy } from "./reference-adapters.js";
+import type { VerificationInput } from "./interface.js";
 import { constantTimeTokenEqual } from "../core/tokens.js";
 import type { DefenseProfile } from "../types/profile.js";
 import type {
@@ -147,7 +150,7 @@ export async function admit(
     // page has no such script). Both carriers parse into the SAME internal
     // shape; the urlencoded csrf hidden field folds into body.csrf.
     const contentType = (req.headers.get("content-type") ?? "").split(";")[0].trim();
-    let body: { csrf?: string; form?: Record<string, string>; eventBatch?: unknown };
+    let body: SubmitInbound;
     if (contentType === "application/x-www-form-urlencoded") {
       let text: string;
       try {
@@ -166,7 +169,16 @@ export async function admit(
         return { kind: "deny", disposition: "BAD_JSON" };
       }
     }
-    const form = (body.form ?? {}) as Record<string, string>;
+    // P1-AUDIT-2 (P1-3): the SAME bounded form validation the Worker
+    // submit route runs (field count / key bytes / value bytes). The prior
+    // host path cast body.form unchecked — a much weaker contract on the
+    // plane that claims production equivalence.
+    const formCheck = validateSignupForm(body.form ?? {});
+    if (!formCheck.ok) {
+      deps.enforcement.deny(sessionId, "INVALID_FORM");
+      return { kind: "deny", disposition: "INVALID_FORM" };
+    }
+    const form = formCheck.form;
 
     // P1-AUDIT-2: verify the KEYED CSRF token — the prior token was an unkeyed
     // SHA-256 of the PUBLIC sid (forgeable from the visible cookie) and was
@@ -184,10 +196,28 @@ export async function admit(
         mode: labMode ? "lab" : "production",
       }, deps.recipe);
 
-      // Verification gate (Turnstile in production; no-op in reference). The
-      // already-consumed parsed body is handed to the verifier so it never has
-      // to re-read the request stream. P1-AUDIT-2 consumed-body fix.
-      const allowed = await deps.verification.verify(req, profile, body);
+      // Verification gate (Turnstile in production; no-op in reference).
+      // P1-AUDIT-2 (P1-4): the middleware extracts the CANONICAL
+      // VerificationInput from the already-consumed body + headers ONCE —
+      // a provider adapter never guesses where the token lives or re-reads
+      // a consumed request stream.
+      const verificationInput: VerificationInput = {
+        token:
+          body.turnstileToken ??
+          (typeof (body as Record<string, unknown>).cf_turnstile_response === "string"
+            ? ((body as Record<string, string>).cf_turnstile_response)
+            : form["cf-turnstile-response"]),
+        action: typeof (body as Record<string, unknown>).turnstileAction === "string"
+          ? (body as Record<string, string>).turnstileAction
+          : undefined,
+        hostname: typeof (body as Record<string, unknown>).turnstileHostname === "string"
+          ? (body as Record<string, string>).turnstileHostname
+          : undefined,
+        remoteIp: req.headers.get("cf-connecting-ip") ?? undefined,
+        userAgent: req.headers.get("user-agent") ?? undefined,
+        requestUrl: req.url,
+      };
+      const allowed = await deps.verification.verify(profile, verificationInput);
       if (!allowed) return { kind: "deny", disposition: "VERIFICATION_FAILED" };
 
       // Build server-verifiable observations from the submitted form.
@@ -201,36 +231,39 @@ export async function admit(
           }
         }
       }
-      // Telemetry → interaction observations. P1-AUDIT-2: the prior hand-
-      // rolled `hasPointer` check derived ONE metric from raw events and
-      // IGNORED the capture mask — a profile with capture OFF was scored
-      // noPointerEvents=true (a false positive by construction). The
-      // canonical aggregateTelemetry() now produces the SAME metric set the
-      // canonical submit route maps: capture-aware noPointerEvents /
-      // missingInteractionSequence, directFill, and veryShortCompletion.
-      // The HostTelemetryAdapter still normalizes first (drop malformed
-      // events); accepted events are cast to the aggregator's shape.
-      const events = deps.telemetry.accept(body.eventBatch);
-      if (profile.interaction?.scoringEnabled && events.length > 0) {
-        const capture: CaptureConfig = {
-          capturePointer: profile.telemetry.capturePointer,
-          captureKey: profile.telemetry.captureKey,
-        };
-        const metrics = aggregateTelemetry(
-          events.map((e, i) => ({
-            seq: e.seq,
-            dt: (i + 1) * 10,
-            kind: e.kind as "focus" | "blur" | "pointer" | "key" | "input" | "change" | "submit_attempt",
-            target: e.target,
-          })),
-          capture
-        );
-        observations.directFill = metrics.directFill;
-        if (metrics.completionMs > 0 && metrics.completionMs < 3000) {
-          observations.veryShortCompletion = true;
+      // Telemetry → interaction observations.
+      // P1-AUDIT-2 (P0-5): the batch is PERSISTED via the observation store
+      // before scoring, so a session that flushed batches through earlier
+      // requests scores its WHOLE stream — the Worker behavior — instead of
+      // only whatever rode along on this submit. The store validates with
+      // the CANONICAL validateTelemetryBatch (P0-4: same events accepted,
+      // same rejected, same seq/dt/kind/target/meta — no fabricated
+      // timestamps). A structurally invalid batch is a DENY, never a
+      // silent repair (FR-R6-035 semantics on the host plane).
+      const accepted = await deps.telemetry.accept(sessionId, body.eventBatch ?? []);
+      if (accepted === null) {
+        deps.enforcement.deny(sessionId, "INVALID_TELEMETRY");
+        return { kind: "deny", disposition: "INVALID_TELEMETRY" };
+      }
+      if (profile.interaction?.scoringEnabled) {
+        // Score the WHOLE persisted stream, not just the final batch.
+        const events = await deps.telemetry.collect(sessionId);
+        if (events.length > 0) {
+          const capture: CaptureConfig = {
+            capturePointer: profile.telemetry.capturePointer,
+            captureKey: profile.telemetry.captureKey,
+          };
+          // P1-AUDIT-2: the canonical aggregator over CANONICAL events —
+          // real client dt values, capture-aware metrics, the same mapping
+          // submit.ts applies (veryShortCompletion threshold included).
+          const metrics = aggregateTelemetry(events, capture);
+          observations.directFill = metrics.directFill;
+          if (metrics.completionMs > 0 && metrics.completionMs < 3000) {
+            observations.veryShortCompletion = true;
+          }
+          if (metrics.noPointerEvents === true) observations.noPointerEvents = true;
+          if (metrics.missingInteractionSequence === true) observations.missingInteractionSequence = true;
         }
-        if (metrics.noPointerEvents === true) observations.noPointerEvents = true;
-        if (metrics.missingInteractionSequence === true) observations.missingInteractionSequence = true;
       }
 
       // P1-AUDIT-2 Phase D (audit item 6): read back VERIFIED canary hits —
@@ -243,7 +276,15 @@ export async function admit(
       }
 
       const evidence = await correlate(profile, observations);
-      const decision = decide(evidence);
+      // P1-AUDIT-2 (P1-2): the profile's OWN scoring policy decides —
+      // strict-v1 / permissive-v1 are real treatments on the host plane
+      // too. Unknown policy fails closed (deny, never default-score).
+      const policy = resolveScoringPolicy(profile);
+      if (!policy) {
+        deps.enforcement.deny(sessionId, "UNKNOWN_SCORING_POLICY");
+        return { kind: "deny", disposition: "UNKNOWN_SCORING_POLICY" };
+      }
+      const decision = decide(evidence, policy);
 
       // P1-AUDIT-2: forward ONLY on an explicit ACCEPT. The prior code
       // forwarded on everything but QUARANTINE, so REVIEW (unresolved),
