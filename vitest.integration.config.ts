@@ -16,7 +16,16 @@ export default defineConfig({
     // worker (LAB_MODE=false); it runs via `npm run test:envelope` with
     // --wrangler-env production and would fail against the lab-mode worker
     // here (production cookie shapes don't exist in lab mode).
-    exclude: ["tests/integration/session-envelope-flow.test.ts"],
+    // P1-AUDIT-2 (gate hygiene): the live-model smoke spends 3+ min
+    // round-tripping the free-tier LLM inside the default integration gate
+    // — a latency flake every run and a network dependency in a
+    // deterministic gate. It has its own explicit script (`test:llm-smoke`)
+    // that runs the same worker; the fail-closed (un credentialed) contract
+    // for these adapters stays in the always-on llm-attacker-contracts spec.
+    exclude: [
+      "tests/integration/session-envelope-flow.test.ts",
+      "tests/integration/phase-f-llm-attacker-smoke.test.ts",
+    ],
     pool: "forks",
     poolOptions: {
       forks: { singleFork: true },

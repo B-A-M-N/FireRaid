@@ -14,7 +14,6 @@
  * Run: node scripts/ledger-upstream.mjs [port]
  */
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
 
 const PORT = Number(process.argv[2] ?? 5051);
 

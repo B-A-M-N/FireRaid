@@ -17,6 +17,7 @@ import { readAdminHtml } from "./core/static.js";
 import { looksLikeTestSiteKey, looksLikeTestSecret } from "./turnstile/verify.js";
 import { isLabMode, validateProfileVersionConfig } from "./env.js";
 import { validateProfileKeyRing } from "./core/session.js";
+import { runRetentionSweep } from "./cloudflare/retention.js";
 
 /**
  * Validate configuration at startup.
@@ -88,6 +89,16 @@ export default {
    * days. Manual /api/admin/cleanup remains available as a fallback.
    */
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // P1-AUDIT-2 (ops): the fetch handler validated config on first request,
+    // but the cron path ran UNVALIDATED — a misconfigured deployment's cron
+    // silently swept with whatever env it had. Validate here too; a config
+    // error skips the sweep (deleting rows under an unvalidated key/secret
+    // config is worse than deferring cleanup by one cron tick).
+    const configProblem = validateConfig(env);
+    if (configProblem) {
+      console.error("fireraid cron skipped — config error:", configProblem);
+      return;
+    }
     // FR-R7-025: defer the work so the scheduled invocation returns even
     // on cold-start latency; failures show up in the worker logs.
     ctx.waitUntil((async () => {
@@ -185,80 +196,3 @@ export default {
   },
 };
 
-/**
- * FR-R7-025: shared retention sweep used by both the admin cleanup
- * endpoint and the scheduled handler. Returns per-table change counts.
- */
-async function runRetentionSweep(
-  db: D1Database,
-  cutoff: number
-): Promise<{
-  telemetryBatches: number;
-  canaryHits: number;
-  verificationAttempts: number;
-  submissionEvidence: number;
-  submissions: number;
-  abandonedSessions: number;
-  finalizedSessions: number;
-  sessionMetrics: number;
-  expiredLabRuns: number;
-}> {
-  const results = {
-    telemetryBatches: 0,
-    canaryHits: 0,
-    verificationAttempts: 0,
-    submissionEvidence: 0,
-    submissions: 0,
-    abandonedSessions: 0,
-    finalizedSessions: 0,
-    sessionMetrics: 0,
-    expiredLabRuns: 0,
-  };
-  const r1 = await db.prepare(`DELETE FROM event_batches WHERE created_at < ?`).bind(cutoff).run();
-  results.telemetryBatches = r1.meta?.changes ?? 0;
-  const r2 = await db.prepare(`DELETE FROM canary_hits WHERE created_at < ?`).bind(cutoff).run();
-  results.canaryHits = r2.meta?.changes ?? 0;
-  const r3 = await db.prepare(`DELETE FROM verification_attempts WHERE created_at < ?`).bind(cutoff).run();
-  results.verificationAttempts = r3.meta?.changes ?? 0;
-  const r4 = await db
-    .prepare(
-      `DELETE FROM submission_evidence WHERE submission_id IN (
-         SELECT id FROM submissions WHERE created_at < ?
-       )`
-    )
-    .bind(cutoff)
-    .run();
-  results.submissionEvidence = r4.meta?.changes ?? 0;
-  const r5 = await db.prepare(`DELETE FROM submissions WHERE created_at < ?`).bind(cutoff).run();
-  results.submissions = r5.meta?.changes ?? 0;
-  const r6 = await db
-    .prepare(
-      `DELETE FROM sessions WHERE created_at < ? AND submitted = 0 AND id NOT IN (
-         SELECT session_id FROM submissions
-       )`
-    )
-    .bind(cutoff)
-    .run();
-  results.abandonedSessions = r6.meta?.changes ?? 0;
-  const r7 = await db.prepare(`DELETE FROM sessions WHERE created_at < ? AND submitted = 1`).bind(cutoff).run();
-  results.finalizedSessions = r7.meta?.changes ?? 0;
-  // FR-R7-022: drop compact metrics rows for sessions whose parent session
-  // row has been pruned — orphaned rows would otherwise accumulate.
-  const r8 = await db
-    .prepare(
-      `DELETE FROM session_metrics WHERE session_id NOT IN (SELECT id FROM sessions)`
-    )
-    .run();
-  results.sessionMetrics = r8.meta?.changes ?? 0;
-  // Lab runs that expired before BOUND: drop them outright, they have no
-  // session and never will. Terminal-state rows are kept until their
-  // created_at + retention cutoff to remain auditable.
-  const r9 = await db
-    .prepare(
-      `DELETE FROM lab_runs WHERE status = 'PENDING' AND expires_at IS NOT NULL AND expires_at < ?`
-    )
-    .bind(cutoff)
-    .run();
-  results.expiredLabRuns = r9.meta?.changes ?? 0;
-  return results;
-}

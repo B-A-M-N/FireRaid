@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.integration.config.ts",
+    "test:llm-smoke": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.llm-smoke.config.ts",
     "test:envelope": "node scripts/test-worker.mjs --suite test-envelope --port 8799 --wrangler-env production -- vitest run --config vitest.envelope.config.ts",
     "test:budget": "node scripts/budget-harness.mjs",
     "test:ledger-proof": "node --import tsx scripts/ledger-proof.mjs",

@@ -48,7 +48,7 @@ import {
   ingestTelemetryBatch,
   type ValidatedEvent,
 } from "./telemetry.js";
-import { aggregateSessionTelemetry, loadSessionMetrics, mergeSessionMetrics } from "../telemetry/aggregate.js";
+import { aggregateSessionTelemetry, loadSessionMetrics, mergeSessionMetrics, type SessionMetricsRead } from "../telemetry/aggregate.js";
 import type { TelemetryMetrics } from "../telemetry/aggregate.js";
 import { D1SubmissionFinalizer } from "../cloudflare/session-store.js";
 import { randomUUID } from "node:crypto";
@@ -393,9 +393,24 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   // machine proven equivalent to full aggregation by the parity test) in ONE
   // D1 row read; lab mode uses the raw aggregator for research fidelity.
   if (profile.interaction?.scoringEnabled) {
-    let metrics: TelemetryMetrics | null = !isLabMode(env)
+    // P1-AUDIT-2 (P0-7): the read is an INTEGRITY result. "complete" carries
+    // behavioral evidence; "incomplete" means the server KNOWS the compact
+    // window is truncated (raw rows pruned/missing) and MUST NOT convert
+    // known-incomplete data into behavioral evidence — interaction
+    // observations stay unset, which under scoring can only ever make the
+    // decision LESS incriminating (fail-open for the user, never evidence).
+    // Lab mode bypasses this entirely: the raw aggregator is the
+    // research-authoritative path and raw rows are always retained there.
+    let read: SessionMetricsRead | null = !isLabMode(env)
       ? await loadSessionMetrics(env.DB, sessionId).catch(() => null)
       : null;
+    if (read && read.status === "incomplete") {
+      console.warn(
+        `interaction metrics incomplete (through ${read.actualThrough}, expected ${read.expectedThrough}) — scoring without interaction evidence`
+      );
+      read = null;
+    }
+    let metrics: TelemetryMetrics | null = read?.metrics ?? null;
     if (!metrics) {
       try {
         metrics = await aggregateSessionTelemetry(env.DB, sessionId, {

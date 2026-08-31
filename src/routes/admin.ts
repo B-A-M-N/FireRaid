@@ -12,6 +12,7 @@ import { json, error, withSecurityHeaders } from "../security/headers.js";
 import { requireAdmin, createAdminToken, adminCookieHeader, verifyAdminSecret } from "../security/admin-auth.js";
 import type { Env } from "../env.js";
 import { reconstructFromSessionId } from "../core/reconstruct.js";
+import { runRetentionSweep } from "../cloudflare/retention.js";
 
 // POST /api/admin/login — exchange ADMIN_SECRET for a session cookie
 // FIX: Constant-time secret comparison to prevent timing attacks
@@ -354,73 +355,31 @@ export async function adminCleanup(req: Request, env: Env): Promise<Response> {
   const retentionDays = Math.max(1, Math.min(Number(url.searchParams.get("days")) || DEFAULT_RETENTION_DAYS, 365));
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
 
-  // Delete old telemetry batches
-  const telemetryResult = await env.DB
-    .prepare(`DELETE FROM event_batches WHERE created_at < ?`)
-    .bind(cutoff)
-    .run();
-
-  // Delete old canary hits
-  const canaryResult = await env.DB
-    .prepare(`DELETE FROM canary_hits WHERE created_at < ?`)
-    .bind(cutoff)
-    .run();
-
-  // Delete old verification attempts
-  const verificationResult = await env.DB
-    .prepare(`DELETE FROM verification_attempts WHERE created_at < ?`)
-    .bind(cutoff)
-    .run();
-
-  // Delete old submissions and their evidence
-  // FR-R4-074: single set-based statement instead of per-submission deletes.
-  const evidenceResult = await env.DB
-    .prepare(
-      `DELETE FROM submission_evidence WHERE submission_id IN (
-         SELECT id FROM submissions WHERE created_at < ?
-       )`
-    )
-    .bind(cutoff)
-    .run();
-
-  const submissionsResult = await env.DB
-    .prepare(`DELETE FROM submissions WHERE created_at < ?`)
-    .bind(cutoff)
-    .run();
-
-  // FR-R4-072: abandoned (never-submitted) sessions are usually the largest
-  // volume in a public lab — expire them too. Their child rows (telemetry,
-  // canary hits, verification attempts) were already removed above by the
-  // same cutoff.
-  const abandonedSessionsResult = await env.DB
-    .prepare(
-      `DELETE FROM sessions WHERE created_at < ? AND submitted = 0 AND id NOT IN (
-         SELECT session_id FROM submissions
-       )`
-    )
-    .bind(cutoff)
-    .run();
-
-  const sessionsResult = await env.DB
-    .prepare(`DELETE FROM sessions WHERE created_at < ? AND submitted = 1`)
-    .bind(cutoff)
-    .run();
+  // P1-AUDIT-2 (ops): delegate to the SHARED sweep module (cloudflare/
+  // retention.ts) — the cron path runs it batched; the admin one-shot keeps
+  // its unbounded (complete) semantics. The previous duplicate statement
+  // list here had already drifted from the cron sweep (no session_metrics
+  // orphan cleanup, no lab-run expiry).
+  const sweep = await runRetentionSweep(env.DB, cutoff, { unbounded: true });
 
   return json({
     ok: true,
     retentionDays,
     cutoff,
     deleted: {
-      telemetryBatches: telemetryResult.meta.changes,
-      canaryHits: canaryResult.meta.changes,
-      verificationAttempts: verificationResult.meta.changes,
-      evidenceRows: evidenceResult.meta.changes,
-      submissions: submissionsResult.meta.changes,
-      abandonedSessions: abandonedSessionsResult.meta.changes,
-      sessions: sessionsResult.meta.changes,
+      telemetryBatches: sweep.telemetryBatches,
+      canaryHits: sweep.canaryHits,
+      verificationAttempts: sweep.verificationAttempts,
+      evidenceRows: sweep.submissionEvidence,
+      submissions: sweep.submissions,
+      abandonedSessions: sweep.abandonedSessions,
+      sessions: sweep.finalizedSessions,
+      orphanedSessionMetrics: sweep.sessionMetrics,
+      expiredLabRuns: sweep.expiredLabRuns,
     },
   });
 }
+
 
 /**
  * Escape a value for CSV output (RFC 4180).

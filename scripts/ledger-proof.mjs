@@ -34,7 +34,9 @@ async function startUpstream() {
     try {
       const r = await fetch(`http://localhost:${UPSTREAM_PORT}/signup`);
       if (r.ok) return proc;
-    } catch {}
+    } catch {
+      // not up yet — poll again
+    }
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error("upstream did not start");

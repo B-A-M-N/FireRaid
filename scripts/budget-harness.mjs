@@ -52,9 +52,16 @@ const BUDGETS = {
   // Observed post-fix: normal-signup 5 reads/4 writes (was 14/10),
   // keyboard-heavy 16/11 (was 24/18), long-telemetry 37/25 (was 52/40).
   // Budgets sit at observed + headroom for capture-mask variation.
-  "normal-signup": { workerRequests: 6, d1Reads: 8, d1Writes: 6 },
-  "keyboard-heavy-signup": { workerRequests: 10, d1Reads: 20, d1Writes: 14 },
-  "autofill-signup": { workerRequests: 6, d1Reads: 8, d1Writes: 6 },
+  // P1-AUDIT-2 (P0-6/P0-7) re-baseline: the CAS fold sources its suffix
+  // from the authoritative raw log (not the request body) and the submit
+  // read now reconciles against the session watermark before scoring —
+  // +~1 read per fold/submit each. That is the audit-mandated cost of
+  // correctness (the prior forward-only fold could permanently lose
+  // events under concurrency and serve known-stale metrics); observed:
+  // keyboard-heavy 26/11, long-telemetry 61/25, pagehide 6/3.
+  "normal-signup": { workerRequests: 6, d1Reads: 10, d1Writes: 6 },
+  "keyboard-heavy-signup": { workerRequests: 10, d1Reads: 32, d1Writes: 14 },
+  "autofill-signup": { workerRequests: 6, d1Reads: 10, d1Writes: 6 },
   "failed-verification-retry": { workerRequests: 8, d1Reads: 8, d1Writes: 8 },
   // Includes up to 20 signup probes searching for a route-bearing profile
   // (bounded retry added when the scenario's silent no-op was fixed) — the
@@ -65,9 +72,9 @@ const BUDGETS = {
   // load) + ~2 writes/flush (ingest batch + state save) — post-fast-path
   // fix. Folding the state load/save into the ingest batch is future work;
   // the budget holds the line until then.
-  "long-telemetry-session": { workerRequests: 18, d1Reads: 44, d1Writes: 30 },
+  "long-telemetry-session": { workerRequests: 18, d1Reads: 70, d1Writes: 30 },
   "agent-stop": { workerRequests: 4, d1Reads: 5, d1Writes: 4 },
-  "pagehide-flush": { workerRequests: 4, d1Reads: 5, d1Writes: 4 },
+  "pagehide-flush": { workerRequests: 4, d1Reads: 8, d1Writes: 4 },
 };
 
 // ── Worker lifecycle ───────────────────────────────────────────────────────

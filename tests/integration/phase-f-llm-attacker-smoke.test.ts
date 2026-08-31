@@ -47,7 +47,11 @@ function scenario(targetUrl: string, email: string): Scenario {
     // 5 fields + submit + headroom for one repair step — free-tier models
     // occasionally emit one redundant action before converging.
     maxSteps: 8,
-    timeoutMs: 180_000,
+    // Free-tier round-trips run ~30s each (see the fireraid-aware note
+    // below); vision-only additionally carries screenshot payloads, which
+    // upload slower still. The scenario budget must cover 8 such steps or
+    // the loop times out before mechanics can be asserted (found live).
+    timeoutMs: 300_000,
   } as Scenario;
 }
 
@@ -72,7 +76,7 @@ describe.skipIf(!LLM_READY)("Phase F LLM smoke (live model)", () => {
     // The percept artifacts exist and are the screenshots (exact model input).
     expect(result.perceptionArtifacts?.length).toBeGreaterThan(0);
     expect(result.perceptionArtifacts?.[0]?.type).toBe("screenshot");
-  }, 240_000);
+  }, 360_000);
 
   it("fireraid-aware: briefed model loop completes; guard drops forbidden actions", async () => {
     runtime = runtime ?? await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });

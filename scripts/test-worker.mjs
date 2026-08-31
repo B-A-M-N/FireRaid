@@ -39,7 +39,6 @@ const MIGRATIONS_DIR = join(ROOT, "migrations");
 const WRANGLER_STATE = join(ROOT, ".wrangler");
 /** Local installs ship this bin; it keeps wrangler (and workerd) in our tree. */
 const WRANGLER_BIN = join(ROOT, "node_modules", "wrangler", "bin", "wrangler.js");
-const D1_BINDING = "fireraid";
 /** FR-P1-19: per-env D1 database NAME (wrangler resolves by name first).
  * test → "fireraid"; production → "fireraid-production" (wrangler.jsonc). */
 function d1DatabaseName(wranglerEnv) {
@@ -339,7 +338,6 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
   log(`group reaper (${label}): pid=${reaper.pid} watches supervisor=${supervisorPid} group=${groupPid}`);
   return reaper;
 }
-const wranglerReaper = spawnGroupReaper(process.pid, child.pid, "wrangler");
 
 // Keep a tail of wrangler output for diagnostics, and watch for the line that
 // names which .dev.vars file it actually loaded.

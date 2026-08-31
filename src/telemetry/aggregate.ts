@@ -256,11 +256,10 @@ export async function mergeSessionMetrics(
   events: ValidatedEvent[],
   capture: CaptureConfig
 ): Promise<void> {
-  if (events.length === 0) return;
-  const { loadMetricsState, advance, saveMetricsState } = await import("./state.js");
-  const state = (await loadMetricsState(db, sessionId)) ?? emptyState(capture);
-  advance(state, events);
-  await saveMetricsState(db, sessionId, state);
+  // P1-AUDIT-2 (P0-6): the fold owner owns the CAS loop; this wrapper keeps
+  // the route-facing signature.
+  const { foldNewEvents } = await import("./state.js");
+  await foldNewEvents(db, sessionId, events, capture);
 }
 
 /**
@@ -280,17 +279,15 @@ export async function foldSessionMetrics(
   events: ValidatedEvent[],
   initialCapture: CaptureConfig
 ): Promise<CaptureConfig> {
-  const { loadMetricsState, advance, saveMetricsState } = await import("./state.js");
+  // P1-AUDIT-2 (P0-6): same CAS owner. The mask is resolved from the stored
+  // state when a row exists (no reconstruction needed) — read AFTER the fold
+  // so the answer reflects whichever writer won the race.
+  const { foldNewEvents, loadMetricsState } = await import("./state.js");
+  await foldNewEvents(db, sessionId, events, initialCapture);
   const state = await loadMetricsState(db, sessionId);
   if (state) {
-    // Stored mask is authoritative — no reconstruction needed.
-    advance(state, events);
-    await saveMetricsState(db, sessionId, state);
     return { capturePointer: state.capturePointer, captureKey: state.captureKey };
   }
-  const fresh = emptyState(initialCapture);
-  advance(fresh, events);
-  await saveMetricsState(db, sessionId, fresh);
   return initialCapture;
 }
 
@@ -301,32 +298,64 @@ export async function foldSessionMetrics(
  * production sessions whose first batch is only now arriving).
  *
  * P1-AUDIT-2: before returning, the state is RECONCILED against the session's
- * authoritative watermark (sessions.last_event_seq). Previously the metrics
- * fold was best-effort — a failed fold (or a partially-ingested batch) could
- * leave session_metrics.last_event_seq BEHIND the accepted event stream, and
- * this read would return stale metrics that under-counted interactions. We now
- * replay any raw event_batches whose seq is beyond the metrics watermark so
- * scoring always sees the complete session. If the raw rows were pruned
- * (production short-retention), we fall back to full aggregation of whatever
- * remains rather than silently scoring a truncated window.
+ * authoritative watermark (sessions.last_event_seq) via catchUpSessionMetrics
+ * (the CAS owner). The result is an INTEGRITY result, not a bare metric:
+ *  - { status: "complete", metrics }  — the compact row provably covers the
+ *    whole accepted stream; safe to use as behavioral evidence.
+ *  - { status: "incomplete", ... }    — the metrics watermark is BEHIND the
+ *    session watermark and the missing raw rows are GONE (pruned or never
+ *    stored). The server KNOWS the window is truncated; the caller must NOT
+ *    convert known-incomplete data into behavioral evidence (P0-7 — the
+ *    prior behavior returned the stale metrics, approving partial windows).
+ *  - { status: "absent" }             — no state row and no raw rows at all
+ *    (a session that never interacted): complete-by-vacuity, metrics null.
  */
+export interface SessionMetricsRead {
+  status: "complete" | "incomplete" | "absent";
+  metrics: TelemetryMetrics | null;
+  expectedThrough?: number;
+  actualThrough?: number;
+}
+
 export async function loadSessionMetrics(
   db: D1Database,
   sessionId: string
-): Promise<TelemetryMetrics | null> {
-  const { loadMetricsState, toMetrics, saveMetricsState } = await import("./state.js");
-  let state = await loadMetricsState(db, sessionId);
+): Promise<SessionMetricsRead> {
+  const { loadMetricsState, toMetrics, catchUpSessionMetrics } = await import("./state.js");
 
-  // Reconcile: fold any persisted-but-unfolded batches above the metrics
-  // watermark so the compact state never silently lags the accepted stream.
+  // Reconcile FIRST (CAS fold of any persisted-but-unfolded raw suffix), so
+  // the compact row never silently lags the accepted stream.
+  await catchUpSessionMetrics(db, sessionId);
+
+  const state = await loadMetricsState(db, sessionId);
   const sessionWm = await readSessionWatermark(db, sessionId);
-  if (state && sessionWm !== null && state.lastSeq < sessionWm) {
-    state = await foldAfterWatermark(db, sessionId, state);
-    await saveMetricsState(db, sessionId, state);
+
+  if (!state) {
+    // No compact row: either no events at all (complete-by-vacuity) or the
+    // raw rows exist but no fold ever ran. Catch-up would have created the
+    // row from raw rows, so absence here means genuinely nothing to fold —
+    // EXCEPT lab mode, where catch-up is not called and raw aggregation is
+    // the caller's path (this function is production-only in practice).
+    if (sessionWm !== null && sessionWm >= 0) {
+      // The session DID accept events but has no compact row and no way to
+      // rebuild it here — treat as incomplete, not silent-zero.
+      return { status: "incomplete", metrics: null, expectedThrough: sessionWm, actualThrough: -1 };
+    }
+    return { status: "absent", metrics: null };
   }
 
-  if (state) return toMetrics(state);
-  return null;
+  if (sessionWm !== null && state.lastSeq < sessionWm) {
+    // Catch-up ran and could not close the gap: the missing raw rows are
+    // unrecoverable. Known-incomplete — the caller must not score it.
+    return {
+      status: "incomplete",
+      metrics: toMetrics(state),
+      expectedThrough: sessionWm,
+      actualThrough: state.lastSeq,
+    };
+  }
+
+  return { status: "complete", metrics: toMetrics(state) };
 }
 
 /** sessions.last_event_seq (COALESCE NULL → -1), or null when no row. */
@@ -341,40 +370,3 @@ async function readSessionWatermark(
   return row?.wm ?? null;
 }
 
-/**
- * Fold every raw event_batches row whose first_seq exceeds the metrics
- * watermark into the state. Returns the caught-up state (same reference).
- * Batches are read in seq order (ORDER BY first_seq), and any row that
- * overlaps the already-folded prefix is re-parsed and folded again — the
- * state machine is idempotent for already-seen seqs only if it is monotonic,
- * which it is (advance only mutates on each event; re-folding a seq the
- * state already folded can double-count). To avoid double-counting overlaps,
- * we filter to batches whose first_seq > state.lastSeq.
- */
-async function foldAfterWatermark(
-  db: D1Database,
-  sessionId: string,
-  state: import("./state.js").SessionMetricsState
-): Promise<import("./state.js").SessionMetricsState> {
-  const { advance } = await import("./state.js");
-  const rows = await db
-    .prepare(
-      `SELECT first_seq, payload_json FROM event_batches
-        WHERE session_id = ? AND first_seq > ?
-        ORDER BY first_seq`
-    )
-    .bind(sessionId, state.lastSeq)
-    .all<{ first_seq: number; payload_json: string }>();
-
-  for (const row of rows.results) {
-    try {
-      const events = JSON.parse(row.payload_json) as import("../routes/telemetry.js").ValidatedEvent[];
-      // Only fold events strictly beyond the current watermark.
-      const fresh = events.filter((e) => e.seq > state.lastSeq);
-      advance(state, fresh);
-    } catch {
-      // Skip a malformed batch; continue replaying the rest.
-    }
-  }
-  return state;
-}

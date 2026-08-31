@@ -234,8 +234,10 @@ describe("session-metrics state persistence (FR-P0-1)", () => {
                 return row;
               },
               run() {
-                db.prepare(sql).run(...(args as never[]));
-                return { meta: { changes: 1 } };
+                // REAL changes count — the CAS save verdicts read meta.changes,
+                // so a hardcoded 1 would make every conflict look "applied".
+                const res = db.prepare(sql).run(...(args as never[]));
+                return { meta: { changes: Number(res.changes) } };
               },
             };
           },
@@ -275,7 +277,7 @@ describe("session-metrics state persistence (FR-P0-1)", () => {
       { seq: 6, dt: 50, kind: "input", target: "ghost" },
     ] as ValidatedEvent[]);
 
-    await saveMetricsState(wrappers as unknown as D1Database, "s1", state);
+    await saveMetricsState(wrappers as unknown as D1Database, "s1", state, null);
     const loaded = await loadMetricsState(wrappers as unknown as D1Database, "s1");
     expect(loaded).not.toBeNull();
     expect(loaded!.focusedTargets).toEqual(["b"]);
@@ -320,7 +322,7 @@ describe("session-metrics state persistence (FR-P0-1)", () => {
     void reference;
   });
 
-  it("UPSERT on conflict replaces state (no MAX/sum accumulation)", async () => {
+  it("CAS save on a stale base reports conflict and does NOT write (P0-6)", async () => {
     const { loadMetricsState, saveMetricsState } = await import("../../src/telemetry/state.js");
     const db = makeDb();
     const wrappers = makeWrappers(db);
@@ -328,13 +330,23 @@ describe("session-metrics state persistence (FR-P0-1)", () => {
 
     const state = emptyState(capture);
     advance(state, [{ seq: 1, dt: 0, kind: "pointer", target: "x" } as ValidatedEvent]);
-    await saveMetricsState(wrappers as unknown as D1Database, "s1", state);
+    expect(await saveMetricsState(wrappers as unknown as D1Database, "s1", state, null)).toBe("applied");
 
-    // Fold the SAME event again (simulating a stale overwrite): the row must
-    // hold exactly one pointer_count, not 2 — save is a full replacement.
-    await saveMetricsState(wrappers as unknown as D1Database, "s1", state);
+    // Another writer loads the row (base = 1), folds seq 2, and saves.
+    const theirs = await loadMetricsState(wrappers as unknown as D1Database, "s1");
+    const theirsBase = theirs!.lastSeq; // captured BEFORE advancing (this IS the base)
+    advance(theirs!, [{ seq: 2, dt: 5, kind: "key", target: "x" } as ValidatedEvent]);
+    expect(await saveMetricsState(wrappers as unknown as D1Database, "s1", theirs!, theirsBase)).toBe("applied");
+    expect(theirs!.pointerCount).toBe(1);
+    expect(theirs!.keyCount).toBe(1);
+
+    // Our write is based on the OLD base (lastSeq 1): the CAS must refuse —
+    // a stale full-snapshot write would bury writer B's key event.
+    const stale = emptyState(capture);
+    advance(stale, [{ seq: 1, dt: 0, kind: "pointer", target: "x" }, { seq: 3, dt: 9, kind: "key", target: "y" } as ValidatedEvent]);
+    expect(await saveMetricsState(wrappers as unknown as D1Database, "s1", stale, 1)).toBe("conflict");
     const loaded = await loadMetricsState(wrappers as unknown as D1Database, "s1");
-    expect(loaded!.pointerCount).toBe(1);
+    expect(loaded!.lastSeq).toBe(2); // theirs survives; stale write dropped
   });
 });
 
@@ -440,22 +452,24 @@ describe("metrics watermark reconciliation (P1-AUDIT-2)", () => {
     const capture = { capturePointer: true, captureKey: true };
     const partial = emptyState(capture);
     advance(partial, [{ seq: 1, dt: 0, kind: "page_ready" }, { seq: 2, dt: 100, kind: "pointer", target: "form" }] as ValidatedEvent[]);
-    await saveMetricsState(w as unknown as D1Database, "s1", partial);
+    await saveMetricsState(w as unknown as D1Database, "s1", partial, null);
 
-    // Record is behind (lastSeq 2). loadSessionMetrics must replay [3..4].
+    // Record is behind (lastSeq 2). loadSessionMetrics must replay [3..4]
+    // and report the read COMPLETE (the compact row now covers the stream).
     const caught = await loadSessionMetrics(w, "s1");
-    expect(caught).not.toBeNull();
-    expect(caught!.focusTransitions).toBe(1);   // seq 3 folded in
-    expect(caught!.pointerCount).toBe(1);         // seq 2, not double-counted
+    expect(caught.status).toBe("complete");
+    expect(caught.metrics).not.toBeNull();
+    expect(caught.metrics!.focusTransitions).toBe(1);   // seq 3 folded in
+    expect(caught.metrics!.pointerCount).toBe(1);       // seq 2, not double-counted
     // seq 3 focused "name"; seq 4 input "name" → the input HAS focus, so
     // directFill is false. (The pre-existing fold only saw seqs 1–2.)
-    expect(caught!.directFill).toBe(false);
+    expect(caught.metrics!.directFill).toBe(false);
     // The state row itself is now caught up.
     const persisted = await loadMetricsState(w as unknown as D1Database, "s1");
     expect(persisted!.lastSeq).toBe(4);
   });
 
-  it("behind metrics row with NO recoverable batches (pruned) still returns a metric", async () => {
+  it("behind metrics row with NO recoverable batches (pruned) reports incomplete (P0-7)", async () => {
     const { loadSessionMetrics } = await import("../../src/telemetry/aggregate.js");
     const { loadMetricsState, saveMetricsState } = await import("../../src/telemetry/state.js");
     const db = makeFullDb();
@@ -469,16 +483,43 @@ describe("metrics watermark reconciliation (P1-AUDIT-2)", () => {
     // Metrics row only folded through seq 2.
     const partial = emptyState(capture);
     advance(partial, [{ seq: 1, dt: 0, kind: "page_ready" }, { seq: 2, dt: 100, kind: "pointer", target: "form" }] as ValidatedEvent[]);
-    await saveMetricsState(w, "s2", partial);
+    await saveMetricsState(w as unknown as D1Database, "s2", partial, null);
 
-    // No raw rows to replay → reconciliation can't catch up; must still return
-    // the available (stale) state so submit keeps interaction evidence rather
-    // than dropping to null (which would lose it entirely).
+    // No raw rows to replay → the server KNOWS the compact window is
+    // truncated. P0-7: that must surface as an INCOMPLETE integrity result
+    // — never silently converted into behavioral evidence.
     const m = await loadSessionMetrics(w, "s2");
-    expect(m).not.toBeNull();
-    expect(m!.pointerCount).toBe(1); // seq 1-2 woven in
-    // State row unchanged (nothing recoverable to fold).
+    expect(m.status).toBe("incomplete");
+    expect(m.expectedThrough).toBe(4);
+    expect(m.actualThrough).toBe(2);
+    // The state row itself is unchanged (nothing recoverable to fold).
     const still = await loadMetricsState(w, "s2");
     expect(still!.lastSeq).toBe(2);
+  });
+
+  it("complete stream reports complete; empty session reports absent (P0-7)", async () => {
+    const { loadSessionMetrics } = await import("../../src/telemetry/aggregate.js");
+    const { saveMetricsState } = await import("../../src/telemetry/state.js");
+    const db = makeFullDb();
+    const w = makeWrappers(db);
+    const capture = { capturePointer: true, captureKey: true };
+
+    // A session whose compact row is caught up → complete.
+    db.prepare(`INSERT INTO sessions (id, last_event_seq) VALUES ('s3', 1)`).run();
+    db.prepare(
+      `INSERT INTO event_batches (session_id, first_seq, last_seq, payload_json) VALUES ('s3', 1, 1, ?)`
+    ).run(JSON.stringify([{ seq: 1, dt: 0, kind: "pointer", target: "f" }]));
+    const st = emptyState(capture);
+    advance(st, [{ seq: 1, dt: 0, kind: "pointer", target: "f" } as ValidatedEvent]);
+    await saveMetricsState(w as unknown as D1Database, "s3", st, null);
+    const okRead = await loadSessionMetrics(w, "s3");
+    expect(okRead.status).toBe("complete");
+    expect(okRead.metrics!.pointerCount).toBe(1);
+
+    // A session with no events at all → absent (complete-by-vacuity).
+    db.prepare(`INSERT INTO sessions (id, last_event_seq) VALUES ('s4', NULL)`).run();
+    const absent = await loadSessionMetrics(w, "s4");
+    expect(absent.status).toBe("absent");
+    expect(absent.metrics).toBeNull();
   });
 });
