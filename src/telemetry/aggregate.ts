@@ -299,13 +299,82 @@ export async function foldSessionMetrics(
  * persisted incremental state (projects it via toMetrics); falls back to a
  * full raw aggregation when the state row is absent (lab sessions, or
  * production sessions whose first batch is only now arriving).
+ *
+ * P1-AUDIT-2: before returning, the state is RECONCILED against the session's
+ * authoritative watermark (sessions.last_event_seq). Previously the metrics
+ * fold was best-effort — a failed fold (or a partially-ingested batch) could
+ * leave session_metrics.last_event_seq BEHIND the accepted event stream, and
+ * this read would return stale metrics that under-counted interactions. We now
+ * replay any raw event_batches whose seq is beyond the metrics watermark so
+ * scoring always sees the complete session. If the raw rows were pruned
+ * (production short-retention), we fall back to full aggregation of whatever
+ * remains rather than silently scoring a truncated window.
  */
 export async function loadSessionMetrics(
   db: D1Database,
   sessionId: string
 ): Promise<TelemetryMetrics | null> {
-  const { loadMetricsState, toMetrics } = await import("./state.js");
-  const state = await loadMetricsState(db, sessionId);
+  const { loadMetricsState, toMetrics, saveMetricsState } = await import("./state.js");
+  let state = await loadMetricsState(db, sessionId);
+
+  // Reconcile: fold any persisted-but-unfolded batches above the metrics
+  // watermark so the compact state never silently lags the accepted stream.
+  const sessionWm = await readSessionWatermark(db, sessionId);
+  if (state && sessionWm !== null && state.lastSeq < sessionWm) {
+    state = await foldAfterWatermark(db, sessionId, state);
+    await saveMetricsState(db, sessionId, state);
+  }
+
   if (state) return toMetrics(state);
   return null;
+}
+
+/** sessions.last_event_seq (COALESCE NULL → -1), or null when no row. */
+async function readSessionWatermark(
+  db: D1Database,
+  sessionId: string
+): Promise<number | null> {
+  const row = await db
+    .prepare(`SELECT COALESCE(last_event_seq, -1) AS wm FROM sessions WHERE id = ?`)
+    .bind(sessionId)
+    .first<{ wm: number }>();
+  return row?.wm ?? null;
+}
+
+/**
+ * Fold every raw event_batches row whose first_seq exceeds the metrics
+ * watermark into the state. Returns the caught-up state (same reference).
+ * Batches are read in seq order (ORDER BY first_seq), and any row that
+ * overlaps the already-folded prefix is re-parsed and folded again — the
+ * state machine is idempotent for already-seen seqs only if it is monotonic,
+ * which it is (advance only mutates on each event; re-folding a seq the
+ * state already folded can double-count). To avoid double-counting overlaps,
+ * we filter to batches whose first_seq > state.lastSeq.
+ */
+async function foldAfterWatermark(
+  db: D1Database,
+  sessionId: string,
+  state: import("./state.js").SessionMetricsState
+): Promise<import("./state.js").SessionMetricsState> {
+  const { advance } = await import("./state.js");
+  const rows = await db
+    .prepare(
+      `SELECT first_seq, payload_json FROM event_batches
+        WHERE session_id = ? AND first_seq > ?
+        ORDER BY first_seq`
+    )
+    .bind(sessionId, state.lastSeq)
+    .all<{ first_seq: number; payload_json: string }>();
+
+  for (const row of rows.results) {
+    try {
+      const events = JSON.parse(row.payload_json) as import("../routes/telemetry.js").ValidatedEvent[];
+      // Only fold events strictly beyond the current watermark.
+      const fresh = events.filter((e) => e.seq > state.lastSeq);
+      advance(state, fresh);
+    } catch {
+      // Skip a malformed batch; continue replaying the rest.
+    }
+  }
+  return state;
 }

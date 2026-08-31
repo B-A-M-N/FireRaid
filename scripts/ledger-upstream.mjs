@@ -86,6 +86,17 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: true, email }));
       return;
     }
+    // P1-AUDIT-2: READ-ONLY ledger probe. The proof previously asserted
+    // ledger truth by POSTing the same email again (a 409 probe) — which
+    // CREATES the account when admission was correctly denied, making the
+    // "denied but ledger has the account" failure mode untestable. GET
+    // reports existence without mutating the ledger.
+    if (req.method === "GET" && req.url.startsWith("/api/ledger?")) {
+      const email = new URL(req.url, `http://localhost:${PORT}`).searchParams.get("email") ?? "";
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, exists: LEDGER.has(email.trim().toLowerCase()) }));
+      return;
+    }
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: false, error: "not found" }));
   } catch (err) {

@@ -18,6 +18,7 @@ import {
 } from "../cloudflare/session-envelope.js";;
 import { reconstructIssuedProfile } from "../core/reconstruct.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
+import { readLabAssignment } from "../core/lab-assignment.js";
 
 /** Hash a token for storage (SHA-256 hex). */
 async function hashToken(token: string): Promise<string> {
@@ -42,6 +43,37 @@ export function constantTimeTokenEqual(token: string, expected: string): boolean
   }
   diff |= token.length ^ expected.length;
   return diff === 0;
+}
+
+/**
+ * P1-AUDIT-2: record a verified canary hit, FAILING CLOSED on persistence
+ * errors. Returns true when the hit was recorded (or was an idempotent
+ * replay), false when a real storage error occurred — the caller must then
+ * fail the request (500) rather than report attacker success. INSERT OR
+ * IGNORE keeps genuine replays idempotent (unique violation is swallowed);
+ * only a REAL storage failure surfaces as an error here.
+ */
+export async function persistVerifiedHit(
+  db: D1Database,
+  sessionId: string,
+  token: string,
+  expected: string,
+  nowMs: number
+): Promise<boolean> {
+  const expectedHash = await hashToken(expected);
+  const observedHash = await hashToken(token);
+  try {
+    await db.prepare(
+      `INSERT OR IGNORE INTO canary_hits (session_id, created_at, family, evidence_class, expected_hash, observed_hash, verified)
+       VALUES (?, ?, 'decoy-route', 'A', ?, ?, 1)`
+    )
+      .bind(sessionId, nowMs, expectedHash, observedHash)
+      .run();
+    return true;
+  } catch (err) {
+    console.error("canary hit persistence failed (failing closed):", err);
+    return false;
+  }
 }
 
 export async function canary(req: Request, env: Env): Promise<Response> {
@@ -77,23 +109,28 @@ export async function canary(req: Request, env: Env): Promise<Response> {
   // FR-P0-17: verification condition — hashed into the issued variant id.
   let turnstileRequired: boolean | undefined;
   if (isLabMode(env)) {
-    try {
-      const row = await env.DB.prepare(
-        `SELECT recipe_json, holdout_mode, turnstile_required FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
-      )
-        .bind(sessionId)
-        .first<{ recipe_json: string | null; holdout_mode: number | null; turnstile_required: number | null }>();
-      const raw = row?.recipe_json;
-      if (typeof raw === "string" && raw.length > 0) {
-        recipe = JSON.parse(raw) as DefenseRecipe;
-      }
-      // FR-POST-R6-P5: holdout flag is part of the treatment identity.
-      if (row && row.holdout_mode !== null) holdoutMode = row.holdout_mode === 1;
-      // FR-P0-17: verification condition likewise.
-      if (row && row.turnstile_required !== null) turnstileRequired = row.turnstile_required === 1;
-    } catch {
-      recipe = undefined; // unbound session — random lab/production profile
+    // P1-AUDIT-2: FAIL CLOSED on bound-assignment read/parse errors (shared
+    // helper readLabAssignment, mirrors submit.ts). A bound session's token
+    // derivation must never fall back to a random profile on a D1 read
+    // failure — that would yield a decoyRoute token DIFFERENT from the one
+    // rendered, breaking every legitimate REQUESTED→VERIFIED hit and
+    // corrupting the causal signal.
+    const read = await readLabAssignment(env.DB, sessionId);
+    if (!read.ok) {
+      console.error(
+        "canary lab-assignment read failed (failing closed):",
+        `${read.code}: ${read.detail}`
+      );
+      return error(
+        read.code === "assignment_corrupt" ? "session assignment corrupt" : "session assignment unreadable",
+        500
+      );
     }
+    if (read.assignment?.recipe != null) recipe = read.assignment.recipe;
+    // FR-POST-R6-P5: holdout flag is part of the treatment identity.
+    holdoutMode = read.assignment?.holdoutMode;
+    // FR-P0-17: verification condition likewise.
+    turnstileRequired = read.assignment?.turnstileRequired;
   }
   // FR-R7-018: pass the already-loaded session's key id straight into the
   // canonical reconstructor — no second session SELECT.
@@ -118,22 +155,14 @@ export async function canary(req: Request, env: Env): Promise<Response> {
     return error("invalid token", 403);
   }
 
-  // FIX: Store hashed tokens, not raw (FR-013)
-  const expectedHash = await hashToken(expected);
-  const observedHash = await hashToken(token);
-
-  // Record verified causal hit (best-effort).
-  // FR-R6-051: INSERT OR IGNORE against idx_canary_unique_verified — replayed
-  // hits are idempotent, and real storage errors are logged, not swallowed.
-  try {
-    await env.DB.prepare(
-      `INSERT OR IGNORE INTO canary_hits (session_id, created_at, family, evidence_class, expected_hash, observed_hash, verified)
-       VALUES (?, ?, 'decoy-route', 'A', ?, ?, 1)`
-    )
-      .bind(sessionId, now(), expectedHash, observedHash)
-      .run();
-  } catch (err) {
-    console.error("canary hit persistence failed:", err);
+  // Record verified causal hit — FAIL CLOSED (P1-AUDIT-2). A verified canary
+  // hit is the experiment's core observable: losing it while returning 204
+  // (attacker success) silently corrupts the causal signal and the ledger-
+  // proof join. persistVerifiedHit returns false only on a REAL storage
+  // failure (replays are idempotent via INSERT OR IGNORE), which must fail
+  // the request, never be swallowed.
+  if (!(await persistVerifiedHit(env.DB, sessionId, token, expected, now()))) {
+    return error("canary persistence failed", 500);
   }
 
   return noContent();

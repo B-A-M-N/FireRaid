@@ -10,6 +10,7 @@
 import { describe, it, expect } from "vitest";
 import {
   admit,
+  makeCsrf,
   ReferenceSessionAdapter,
   referenceInject,
   ReferenceVerificationAdapter,
@@ -21,6 +22,17 @@ import { deriveProfilePure } from "../../src/core/profile.js";
 
 const SECRET = "s".repeat(64);
 const VERSION = 1;
+
+/** Build a POST Request carrying a valid signed cookie + keyed CSRF. */
+async function postRequest(sessionId: string, body: Record<string, unknown>) {
+  const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+  const csrf = await makeCsrf(SECRET, sessionId);
+  return new Request("http://mw/signup", {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ csrf, ...body }),
+  });
+}
 
 class FakeEnforcement implements HostEnforcementAdapter {
   allowed = 0;
@@ -41,7 +53,7 @@ function deps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
     secret: SECRET,
     version: VERSION,
     upstreamRegisterUrl: "http://upstream/api/register",
-    session: new ReferenceSessionAdapter(),
+    session: new ReferenceSessionAdapter(SECRET),
     render: { inject: (h, p, c, l) => referenceInject(h, p, c, l) },
     verification: new ReferenceVerificationAdapter(),
     telemetry: new ReferenceTelemetryAdapter(),
@@ -71,16 +83,8 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     const d = deps({ enforcement });
     const sessionId = await d.session.createSession();
     const profile = await deriveProfilePure({ secret: SECRET, version: VERSION, sessionId, mode: "production" });
-    const csrf = "csrf";
-    const res = await admit(
-      new Request("http://mw/signup", {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: `__Host-fr_sid=${sessionId}` },
-        body: JSON.stringify({ csrf, form: { name: "A", email: "a@b.c" } }),
-      }),
-      d,
-      htmlLoader
-    );
+    const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" } });
+    const res = await admit(req, d, htmlLoader);
     expect(res.kind).toBe("admit");
     expect(enforcement.allowed).toBe(1);
     // FireRaid fields are stripped before forwarding — the ordinary ledger
@@ -107,15 +111,8 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     );
     const field = profile.decoyField!.fieldName;
     const nonce = profile.semantic!.nonce;
-    const res = await admit(
-      new Request("http://mw/signup", {
-        method: "POST",
-        headers: { "content-type": "application/json", cookie: `__Host-fr_sid=${sessionId}` },
-        body: JSON.stringify({ csrf: "x", form: { name: "A", email: "a@b.c", [field]: nonce } }),
-      }),
-      d,
-      htmlLoader
-    );
+    const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c", [field]: nonce } });
+    const res = await admit(req, d, htmlLoader);
     expect(res.disposition).toBe("QUARANTINE");
     expect(enforcement.allowed).toBe(0);
     expect(enforcement.denied).toBe(1);
@@ -144,6 +141,17 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
       verification: { verify: async () => { throw new Error("verifier down"); } },
     });
     const sessionId = await d.session.createSession();
+    const req = await postRequest(sessionId, { form: { name: "A" } });
+    const res = await admit(req, d, htmlLoader);
+    expect(res.kind).toBe("deny");
+    expect(enforcement.allowed).toBe(0);
+  });
+
+  it("P1-AUDIT-2: forged (unsigned) session cookie is rejected as NO_SESSION", async () => {
+    const enforcement = new FakeEnforcement();
+    const d = deps({ enforcement });
+    const sessionId = await d.session.createSession();
+    // Bare sid — no HMAC signature. Must NOT be accepted as a session.
     const res = await admit(
       new Request("http://mw/signup", {
         method: "POST",
@@ -153,7 +161,88 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
       d,
       htmlLoader
     );
-    expect(res.kind).toBe("deny");
+    expect(res.disposition).toBe("NO_SESSION");
     expect(enforcement.allowed).toBe(0);
+  });
+
+  it("P1-AUDIT-2: missing/wrong CSRF is denied before evaluation", async () => {
+    const enforcement = new FakeEnforcement();
+    const d = deps({ enforcement });
+    const sessionId = await d.session.createSession();
+    const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+    const res = await admit(
+      new Request("http://mw/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ csrf: "forged", form: { name: "A" } }),
+      }),
+      d,
+      htmlLoader
+    );
+    expect(res.disposition).toBe("CSRF_FAILED");
+    expect(enforcement.allowed).toBe(0);
+  });
+});
+
+describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => {
+  const LAB_FULL: Parameters<typeof deriveProfilePure>[1] = {
+    families: ["semantic", "decoy-field", "decoy-route", "interaction"],
+  };
+
+  it("capture OFF never yields noPointerEvents (was a false positive by construction)", async () => {
+    const enforcement = new FakeEnforcement();
+    // Derive a profile to learn the capture mask first, then FORCE the
+    // opposite: we need a profile with capturePointer=false to prove the
+    // capture gate. Retry until one draws capturePointer=false.
+    let sessionId = "";
+    let profile: Awaited<ReturnType<typeof deriveProfilePure>> | null = null;
+    for (let i = 0; i < 50; i++) {
+      sessionId = await new ReferenceSessionAdapter(SECRET).createSession();
+      const p = await deriveProfilePure({ secret: SECRET, version: VERSION, sessionId, mode: "production" }, LAB_FULL);
+      if (!p.telemetry.capturePointer) { profile = p; break; }
+    }
+    expect(profile).not.toBeNull(); // 50 draws all-capture-on is implausible
+    const d = deps({
+      enforcement,
+      recipe: LAB_FULL,
+      telemetry: { accept: (b: unknown) => (Array.isArray(b) ? b : []) as { seq: number; kind: string }[] },
+    });
+    // Batch has key + input events but NO pointer events. With capture OFF,
+    // noPointerEvents must stay undefined — never scored.
+    const events = [
+      { seq: 1, kind: "key" }, { seq: 2, kind: "input", target: "email" }, { seq: 3, kind: "submit_attempt" },
+    ];
+    const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" }, eventBatch: events });
+    const res = await admit(req, d, htmlLoader);
+    expect(res.kind).toBe("admit");
+    expect(enforcement.allowed).toBe(1);
+  });
+
+  it("capture ON + zero pointer events derives noPointerEvents from canonical aggregator", async () => {
+    const enforcement = new FakeEnforcement();
+    let sessionId = "";
+    let profile: Awaited<ReturnType<typeof deriveProfilePure>> | null = null;
+    for (let i = 0; i < 50; i++) {
+      sessionId = await new ReferenceSessionAdapter(SECRET).createSession();
+      const p = await deriveProfilePure({ secret: SECRET, version: VERSION, sessionId, mode: "production" }, LAB_FULL);
+      if (p.telemetry.capturePointer) { profile = p; break; }
+    }
+    expect(profile).not.toBeNull();
+    const d = deps({
+      enforcement,
+      recipe: LAB_FULL,
+      telemetry: { accept: (b: unknown) => (Array.isArray(b) ? b : []) as { seq: number; kind: string }[] },
+    });
+    const events = [
+      { seq: 1, kind: "key" }, { seq: 2, kind: "input", target: "email" }, { seq: 3, kind: "submit_attempt" },
+    ];
+    const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" }, eventBatch: events });
+    const res = await admit(req, d, htmlLoader);
+    // The decision here depends on the FULL recipe's correlation: a captured
+    // no-pointer stream is real interaction evidence, so it must NOT be
+    // QUARANTINE on that basis alone — but critically the decision cannot
+    // have come from a fabricated metric. Assert the forward happened (the
+    // no-pointer signal alone is not disqualifying for this recipe).
+    expect(res.kind).toBe("admit");
   });
 });

@@ -16,6 +16,16 @@
 .fr-canary { border-left: 3px solid #b45309; background: #fffbeb; padding: 0.6rem 0.9rem;
   margin: 0.75rem 0; font-size: 0.9rem; color: #92400e; border-radius: 4px; }
 .fr-canary code { background: #fef3c7; padding: 0.1rem 0.3rem; border-radius: 3px; }
+/* P1-AUDIT-2: visually-hidden utility for INERT artifacts. Lab decoys use
+   .fr-decoy (below); PRODUCTION decoys must not carry the greppable "fr-decoy"
+   name, so they get this neutral offscreen class instead. It must override the
+   generic full-width input rule (.fr-form-fields input) so a production decoy
+   never renders as a visible textbox. aria-hidden + tabindex=-1 already remove
+   it from the AX tree and tab order; this hides it from the EYE. */
+.fr-visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important;
+  padding: 0 !important; margin: -1px !important; overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important; clip-path: inset(50%) !important;
+  white-space: nowrap !important; border: 0 !important; }
 .fr-decoy { position: absolute !important; width: 1px !important; height: 1px !important;
   padding: 0 !important; margin: -1px !important; overflow: hidden !important;
   clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }

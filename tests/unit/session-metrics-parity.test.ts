@@ -228,12 +228,9 @@ describe("session-metrics state persistence (FR-P0-1)", () => {
           bind(...args: unknown[]) {
             return {
               first() {
-                // Only SELECT used: pull row for session_id (last bind param).
-                const sid = args[args.length - 1];
                 const row = db
                   .prepare(sql)
                   .get(...(args as never[])) as Record<string, unknown> | undefined;
-                void sid;
                 return row;
               },
               run() {
@@ -243,6 +240,11 @@ describe("session-metrics state persistence (FR-P0-1)", () => {
             };
           },
         };
+      },
+      // db.batch(statements): each statement is an already-bound
+      // { run() } from prepare().bind(...); execute in order.
+      batch(statements: { run(): unknown }[]) {
+        return statements.map((s) => s.run());
       },
     };
   }
@@ -333,5 +335,150 @@ describe("session-metrics state persistence (FR-P0-1)", () => {
     await saveMetricsState(wrappers as unknown as D1Database, "s1", state);
     const loaded = await loadMetricsState(wrappers as unknown as D1Database, "s1");
     expect(loaded!.pointerCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1-AUDIT-2 — watermark reconciliation on metrics read.
+// The metrics fold is best-effort (it may fail without failing the batch
+// ingest), so session_metrics.last_event_seq can lag sessions.last_event_seq.
+// loadSessionMetrics() must reconcile — replay the persisted-but-unfolded raw
+// batches — rather than return stale metrics that under-count interactions.
+// ---------------------------------------------------------------------------
+describe("metrics watermark reconciliation (P1-AUDIT-2)", () => {
+  function makeFullDb() {
+    const db = new DatabaseSync(":memory:");
+    db.exec(`
+      CREATE TABLE session_metrics (
+        session_id TEXT PRIMARY KEY,
+        focused_targets_json TEXT NOT NULL DEFAULT '[]',
+        pointer_count INTEGER NOT NULL DEFAULT 0,
+        focus_transitions INTEGER NOT NULL DEFAULT 0,
+        key_count INTEGER NOT NULL DEFAULT 0,
+        input_without_focus INTEGER NOT NULL DEFAULT 0,
+        first_event_dt INTEGER,
+        first_meaningful_dt INTEGER,
+        submit_dt INTEGER,
+        last_event_dt INTEGER,
+        capture_pointer INTEGER NOT NULL DEFAULT 0,
+        capture_key INTEGER NOT NULL DEFAULT 0,
+        last_event_seq INTEGER NOT NULL DEFAULT -1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        last_event_seq INTEGER
+      );
+      CREATE TABLE event_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        first_seq INTEGER NOT NULL,
+        last_seq INTEGER NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+    `);
+    return db;
+  }
+
+  /** Self-contained D1 wrapper for this block (sessions/event_batches reads). */
+  function makeWrappers(db: DatabaseSync) {
+    return {
+      prepare(sql: string) {
+        return {
+          bind(...args: unknown[]) {
+            return {
+              first() {
+                const row = db
+                  .prepare(sql)
+                  .get(...(args as never[])) as Record<string, unknown> | undefined;
+                return row;
+              },
+              all() {
+                const rows = db
+                  .prepare(sql)
+                  .all(...(args as never[])) as unknown[];
+                return { results: rows };
+              },
+              run() {
+                db.prepare(sql).run(...(args as never[]));
+                return { meta: { changes: 1 } };
+              },
+            };
+          },
+        };
+      },
+      batch(statements: { run(): unknown }[]) {
+        return statements.map((s) => s.run());
+      },
+    } as unknown as D1Database;
+  }
+
+  it("metrics row behind the session watermark is caught up on read", async () => {
+    const { loadSessionMetrics } = await import("../../src/telemetry/aggregate.js");
+    const { loadMetricsState, saveMetricsState } = await import("../../src/telemetry/state.js");
+    const db = makeFullDb();
+    const w = makeWrappers(db);
+
+    // Session accepted through seq 4.
+    db.prepare(`INSERT INTO sessions (id, last_event_seq) VALUES ('s1', 4)`).run();
+    // Raw batches: [1..2] and [3..4].
+    db.prepare(
+      `INSERT INTO event_batches (session_id, first_seq, last_seq, payload_json) VALUES ('s1', 1, 2, ?)`
+    ).run(JSON.stringify([
+      { seq: 1, dt: 0, kind: "page_ready" },
+      { seq: 2, dt: 100, kind: "pointer", target: "form" },
+    ]));
+    db.prepare(
+      `INSERT INTO event_batches (session_id, first_seq, last_seq, payload_json) VALUES ('s1', 3, 4, ?)`
+    ).run(JSON.stringify([
+      { seq: 3, dt: 200, kind: "focus", target: "name" },
+      { seq: 4, dt: 300, kind: "input", target: "name" },
+    ]));
+
+    // Metrics row was folded ONLY through seq 2 (the fold for [3..4] failed).
+    const capture = { capturePointer: true, captureKey: true };
+    const partial = emptyState(capture);
+    advance(partial, [{ seq: 1, dt: 0, kind: "page_ready" }, { seq: 2, dt: 100, kind: "pointer", target: "form" }] as ValidatedEvent[]);
+    await saveMetricsState(w as unknown as D1Database, "s1", partial);
+
+    // Record is behind (lastSeq 2). loadSessionMetrics must replay [3..4].
+    const caught = await loadSessionMetrics(w, "s1");
+    expect(caught).not.toBeNull();
+    expect(caught!.focusTransitions).toBe(1);   // seq 3 folded in
+    expect(caught!.pointerCount).toBe(1);         // seq 2, not double-counted
+    // seq 3 focused "name"; seq 4 input "name" → the input HAS focus, so
+    // directFill is false. (The pre-existing fold only saw seqs 1–2.)
+    expect(caught!.directFill).toBe(false);
+    // The state row itself is now caught up.
+    const persisted = await loadMetricsState(w as unknown as D1Database, "s1");
+    expect(persisted!.lastSeq).toBe(4);
+  });
+
+  it("behind metrics row with NO recoverable batches (pruned) still returns a metric", async () => {
+    const { loadSessionMetrics } = await import("../../src/telemetry/aggregate.js");
+    const { loadMetricsState, saveMetricsState } = await import("../../src/telemetry/state.js");
+    const db = makeFullDb();
+    const w = makeWrappers(db);
+    const capture = { capturePointer: true, captureKey: true };
+
+    // Session accepted through 4, but raw batches were already pruned.
+    db.prepare(`INSERT INTO sessions (id, last_event_seq) VALUES ('s2', 4)`).run();
+    // (no event_batches rows — they were pruned by retention)
+
+    // Metrics row only folded through seq 2.
+    const partial = emptyState(capture);
+    advance(partial, [{ seq: 1, dt: 0, kind: "page_ready" }, { seq: 2, dt: 100, kind: "pointer", target: "form" }] as ValidatedEvent[]);
+    await saveMetricsState(w, "s2", partial);
+
+    // No raw rows to replay → reconciliation can't catch up; must still return
+    // the available (stale) state so submit keeps interaction evidence rather
+    // than dropping to null (which would lose it entirely).
+    const m = await loadSessionMetrics(w, "s2");
+    expect(m).not.toBeNull();
+    expect(m!.pointerCount).toBe(1); // seq 1-2 woven in
+    // State row unchanged (nothing recoverable to fold).
+    const still = await loadMetricsState(w, "s2");
+    expect(still!.lastSeq).toBe(2);
   });
 });

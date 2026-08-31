@@ -58,7 +58,9 @@ async function main() {
     ReferenceEnforcementAdapter,
   } = await import("../src/host-adapter/index.ts");
 
-  const session = new ReferenceSessionAdapter();
+  // Secret signs the session cookie + CSRF token (P1-AUDIT-2). Must match the
+  // deps.secret below so the GET-issued cookie/token verify on POST.
+  const session = new ReferenceSessionAdapter(SECRET);
   const verification = new ReferenceVerificationAdapter();
   const telemetry = new ReferenceTelemetryAdapter();
   const enforcement = new ReferenceEnforcementAdapter();
@@ -125,12 +127,16 @@ async function main() {
   const regJson = await regResp.json();
 
   // ── Assert the ledger truth ─────────────────────────────────────────────
-  const ledgerResp = await fetch(`http://localhost:${UPSTREAM_PORT}/api/register`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ form: { email: "agent@example.invalid", name: "probe" } }),
-  });
-  const ledgerSaysExists = ledgerResp.status === 409; // 409 = already registered
+  // P1-AUDIT-2: read-only probe. The prior assertion POSTed the same email
+  // to /api/register to force a 409 — but that MUTATES the ledger: if the
+  // middleware had correctly DENIED, the probe itself created the account,
+  // and the "denied but ledger has account" failure mode could never fire.
+  // GET /api/ledger?email=… reports existence without side effects.
+  const ledgerResp = await fetch(
+    `http://localhost:${UPSTREAM_PORT}/api/ledger?email=${encodeURIComponent("agent@example.invalid")}`
+  );
+  const ledgerJson = await ledgerResp.json();
+  const ledgerSaysExists = ledgerJson.exists === true;
 
   let pass = true;
   const lines = [];

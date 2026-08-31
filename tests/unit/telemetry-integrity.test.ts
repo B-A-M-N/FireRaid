@@ -12,6 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { validateTelemetryBatch } from "../../src/routes/telemetry.js";
 import { aggregateTelemetry } from "../../src/telemetry/aggregate.js";
+import { deriveProfilePure } from "../../src/core/profile.js";
 import type { ValidatedEvent } from "../../src/routes/telemetry.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -471,5 +472,67 @@ describe("ingestTelemetryBatch — watermark semantics (FR-R5-018 + FR-P0-2/3)",
       // Re-reads the authoritative watermark for the ACK.
       expect(outcome.acceptedThrough).toBe(1);
     }
+  });
+});
+
+// P1-AUDIT-2 — capture-mask reconstruction is KEYED on the session id.
+// The route previously passed id:"" to reconstructIssuedProfile with a comment
+// claiming the session id was "unused by derivation". It is NOT unused:
+// deriveSeed() derives an HMAC seed over the session id, and that seed drives
+// the capturePointer/captureKey RNG draws. Passing "" therefore resolved the
+// capture mask of a DIFFERENT (deterministically-empty) session — so the first
+// metrics fold persisted the WRONG session's capture configuration. These
+// tests pin the invariant that the capture mask is session-specific.
+describe("capture-mask session-id keying (P1-AUDIT-2)", () => {
+  const SECRET = "test-secret-capture-mask";
+  // A generously-sized secret for the ring is exercised via deriveProfilePure's
+  // seed; the KEY point is that two distinct session ids under the SAME secret
+  // and version produce the stream draws that decide capture settings.
+  const INTERACTION_RECIPE: Parameters<typeof deriveProfilePure>[1] = {
+    families: ["interaction"],
+    labOnly: true,
+  };
+
+  it("the capture mask differs across session ids (same secret/version)", async () => {
+    const a = await deriveProfilePure(
+      { secret: SECRET, version: 1, sessionId: "session-A-capture", mode: "lab" },
+      INTERACTION_RECIPE
+    );
+    const b = await deriveProfilePure(
+      { secret: SECRET, version: 1, sessionId: "session-B-capture", mode: "lab" },
+      INTERACTION_RECIPE
+    );
+    const maskA = [a.telemetry.capturePointer, a.telemetry.captureKey];
+    const maskB = [b.telemetry.capturePointer, b.telemetry.captureKey];
+    // Corollary of the fix: the seed (and thus the mask) is a function of the
+    // session id. We cannot require specific values (they are random draws),
+    // but we DO assert that dropping the session id to "" — the pre-fix
+    // behavior — is observably wrong: reconstructing the EMPTY id must be
+    // distinguished from reconstructing ANY real session id when the two
+    // disagree, and at least one real session must disagree with "".
+    const empty = await deriveProfilePure(
+      { secret: SECRET, version: 1, sessionId: "", mode: "lab" },
+      INTERACTION_RECIPE
+    );
+    const maskEmpty = [empty.telemetry.capturePointer, empty.telemetry.captureKey];
+    const differsFromEmpty =
+      maskA[0] !== maskEmpty[0] || maskA[1] !== maskEmpty[1] ||
+      maskB[0] !== maskEmpty[0] || maskB[1] !== maskEmpty[1];
+    // The whole reason the bug mattered: the mask is NOT "unused", so at least
+    // one real session must differ from the empty-id mask under this recipe.
+    expect(differsFromEmpty).toBe(true);
+  });
+
+  it("capture flags are derived deterministically per session id (idempotent)", async () => {
+    const once = await deriveProfilePure(
+      { secret: SECRET, version: 1, sessionId: "session-deterministic", mode: "lab" },
+      INTERACTION_RECIPE
+    );
+    const twice = await deriveProfilePure(
+      { secret: SECRET, version: 1, sessionId: "session-deterministic", mode: "lab" },
+      INTERACTION_RECIPE
+    );
+    expect(once.telemetry.capturePointer).toBe(twice.telemetry.capturePointer);
+    expect(once.telemetry.captureKey).toBe(twice.telemetry.captureKey);
   });
 });

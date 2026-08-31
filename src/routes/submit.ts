@@ -36,6 +36,7 @@ import { loadSession } from "../cloudflare/session.js";;
 import { getPolicy } from "../core/decision.js";
 import { reconstructIssuedProfile } from "../core/reconstruct.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
+import { readLabAssignment } from "../core/lab-assignment.js";
 import { checkCsrf } from "../security/csrf.js";
 import { defaultVerificationProvider } from "../turnstile/verify.js";
 import { correlate, type ObservationSet } from "../core/correlation.js";
@@ -249,35 +250,37 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   // FR-R7-019: lab_runs query only in lab mode.
   let profile;
   {
-    let recipeJson: string | undefined;
+    let recipe: DefenseRecipe | undefined;
     let holdoutMode: boolean | undefined;
     // FR-P0-17: the run's verification condition — same treatment-identity
     // rule as holdout_mode (part of the hashed variant id).
     let turnstileRequired: boolean | undefined;
     if (isLabMode(env)) {
-      try {
-        const row = await env.DB.prepare(
-          `SELECT recipe_json, holdout_mode, turnstile_required FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
-        )
-          .bind(sessionId)
-          .first<{ recipe_json: string | null; holdout_mode: number | null; turnstile_required: number | null }>();
-        const raw = row?.recipe_json;
-        if (typeof raw === "string" && raw.length > 0) recipeJson = raw;
-        // FR-POST-R6-P5: holdout flag is part of the treatment identity.
-        if (row && row.holdout_mode !== null) holdoutMode = row.holdout_mode === 1;
-        // FR-P0-17: verification condition likewise.
-        if (row && row.turnstile_required !== null) turnstileRequired = row.turnstile_required === 1;
-      } catch {
-        recipeJson = undefined; // unbound session — random lab/production profile
+      // P1-AUDIT-2: FAIL CLOSED on bound-assignment read errors (shared helper
+      // readLabAssignment, also used by canary.ts). The prior code caught a D1
+      // error and treated it as "unbound", silently reconstructing a RANDOM
+      // profile for a session that was actually bound to a specific lab
+      // condition — corrupting the experiment (an assigned FULL run could be
+      // scored as random). readLabAssignment distinguishes:
+      //   - query SUCCEEDS, no lab_runs row  → genuinely unbound → random (legit)
+      //   - query THROWS / recipe_json corrupt → infrastructure failure → 500
+      // A bound session's immutable treatment is never replaceable by a guess.
+      const read = await readLabAssignment(env.DB, sessionId);
+      if (!read.ok) {
+        console.error(
+          "submit lab-assignment read failed (failing closed):",
+          `${read.code}: ${read.detail}`
+        );
+        return error(
+          read.code === "assignment_corrupt" ? "session assignment corrupt" : "session assignment unreadable",
+          500
+        );
       }
-    }
-    let recipe: DefenseRecipe | undefined;
-    if (recipeJson !== undefined) {
-      try {
-        recipe = JSON.parse(recipeJson) as DefenseRecipe;
-      } catch {
-        recipe = undefined;
-      }
+      if (read.assignment?.recipe != null) recipe = read.assignment.recipe;
+      // FR-POST-R6-P5: holdout flag is part of the treatment identity.
+      holdoutMode = read.assignment?.holdoutMode;
+      // FR-P0-17: verification condition likewise.
+      turnstileRequired = read.assignment?.turnstileRequired;
     }
     const reconstructed = await reconstructIssuedProfile(env, {
       id: sessionId,

@@ -17,6 +17,7 @@
 import { deriveProfilePure, hashProfile, type DefenseRecipe } from "../core/profile.js";
 import { correlate, type ObservationSet } from "../core/correlation.js";
 import { decide } from "../core/decision.js";
+import { aggregateTelemetry, type CaptureConfig } from "../telemetry/aggregate.js";
 import type { DefenseProfile } from "../types/profile.js";
 import type {
   HostSessionAdapter,
@@ -98,10 +99,10 @@ export async function admit(
         sessionId,
         mode: labMode ? "lab" : "production",
       }, deps.recipe);
-      const csrfToken = await makeCsrf(sessionId);
+      const csrfToken = await makeCsrf(deps.secret, sessionId);
       const html = await htmlLoader();
       const page = deps.render.inject(html, profile, csrfToken, labMode);
-      return { kind: "get", html: page, setCookie: deps.session.sessionCookie(sessionId) };
+      return { kind: "get", html: page, setCookie: await deps.session.sessionCookie(sessionId) };
     } catch {
       return { kind: "error" };
     }
@@ -109,7 +110,7 @@ export async function admit(
 
   // ── POST: evaluate, strip, forward only when admission allows ────────────
   if (req.method === "POST") {
-    const sessionId = deps.session.readSessionId(req);
+    const sessionId = await deps.session.readSessionId(req);
     if (!sessionId) return { kind: "deny", disposition: "NO_SESSION" };
 
     let body: { csrf?: string; form?: Record<string, string>; eventBatch?: unknown };
@@ -120,6 +121,14 @@ export async function admit(
     }
     const form = (body.form ?? {}) as Record<string, string>;
 
+    // P1-AUDIT-2: verify the KEYED CSRF token — the prior token was an unkeyed
+    // SHA-256 of the PUBLIC sid (forgeable from the visible cookie) and was
+    // never even checked on POST. Now the token is an HMAC over the session,
+    // and POST rejects a missing/mismatched token before any evaluation.
+    if (!body.csrf || !(await verifyCsrf(deps.secret, sessionId, body.csrf))) {
+      return { kind: "deny", disposition: "CSRF_FAILED" };
+    }
+
     try {
       const profile = await deriveProfilePure({
         secret: deps.secret,
@@ -128,8 +137,10 @@ export async function admit(
         mode: labMode ? "lab" : "production",
       }, deps.recipe);
 
-      // Verification gate (Turnstile in production; no-op in reference).
-      const allowed = await deps.verification.verify(req, profile);
+      // Verification gate (Turnstile in production; no-op in reference). The
+      // already-consumed parsed body is handed to the verifier so it never has
+      // to re-read the request stream. P1-AUDIT-2 consumed-body fix.
+      const allowed = await deps.verification.verify(req, profile, body);
       if (!allowed) return { kind: "deny", disposition: "VERIFICATION_FAILED" };
 
       // Build server-verifiable observations from the submitted form.
@@ -143,19 +154,49 @@ export async function admit(
           }
         }
       }
-      // Telemetry → interaction observations (best-effort normalization).
+      // Telemetry → interaction observations. P1-AUDIT-2: the prior hand-
+      // rolled `hasPointer` check derived ONE metric from raw events and
+      // IGNORED the capture mask — a profile with capture OFF was scored
+      // noPointerEvents=true (a false positive by construction). The
+      // canonical aggregateTelemetry() now produces the SAME metric set the
+      // canonical submit route maps: capture-aware noPointerEvents /
+      // missingInteractionSequence, directFill, and veryShortCompletion.
+      // The HostTelemetryAdapter still normalizes first (drop malformed
+      // events); accepted events are cast to the aggregator's shape.
       const events = deps.telemetry.accept(body.eventBatch);
       if (profile.interaction?.scoringEnabled && events.length > 0) {
-        const hasPointer = events.some((e) => e.kind === "pointer");
-        if (!hasPointer) observations.noPointerEvents = true;
+        const capture: CaptureConfig = {
+          capturePointer: profile.telemetry.capturePointer,
+          captureKey: profile.telemetry.captureKey,
+        };
+        const metrics = aggregateTelemetry(
+          events.map((e, i) => ({
+            seq: e.seq,
+            dt: (i + 1) * 10,
+            kind: e.kind as "focus" | "blur" | "pointer" | "key" | "input" | "change" | "submit_attempt",
+            target: e.target,
+          })),
+          capture
+        );
+        observations.directFill = metrics.directFill;
+        if (metrics.completionMs > 0 && metrics.completionMs < 3000) {
+          observations.veryShortCompletion = true;
+        }
+        if (metrics.noPointerEvents === true) observations.noPointerEvents = true;
+        if (metrics.missingInteractionSequence === true) observations.missingInteractionSequence = true;
       }
 
       const evidence = await correlate(profile, observations);
       const decision = decide(evidence);
 
-      if (decision.disposition === "QUARANTINE") {
-        deps.enforcement.deny(sessionId, "QUARANTINE");
-        return { kind: "deny", disposition: "QUARANTINE" };
+      // P1-AUDIT-2: forward ONLY on an explicit ACCEPT. The prior code
+      // forwarded on everything but QUARANTINE, so REVIEW (unresolved),
+      // REJECT_TURNSTILE and INVALID_SESSION all reached the origin — the
+      // exact outcomes admission is supposed to block. REVIEW is a deny here
+      // (fail-closed); only ACCEPT is unambiguous admission.
+      if (decision.disposition !== "ACCEPT") {
+        deps.enforcement.deny(sessionId, decision.disposition);
+        return { kind: "deny", disposition: decision.disposition };
       }
 
       // Admission allowed: strip FireRaid fields and forward to upstream.
@@ -180,11 +221,41 @@ export async function admit(
   return { kind: "deny", disposition: "METHOD_NOT_ALLOWED" };
 }
 
-/** Simple CSRF-style token for the reference adapter (host may supply its own). */
-async function makeCsrf(sessionId: string): Promise<string> {
-  const data = new TextEncoder().encode(`csrf:${sessionId}`);
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
+/**
+ * P1-AUDIT-2: KEYED CSRF token. The prior `makeCsrf(sessionId)` was an unkeyed
+ * SHA-256 of the PUBLIC sid — anyone who saw the cookie could forge the token.
+ * Now it's HMAC-SHA-256 keyed with the deployment secret, so the token is
+ * unforgeable without the secret and is bound to the session.
+ */
+export async function makeCsrf(secret: string, sessionId: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`csrf:${sessionId}`));
+  return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Verify a keyed CSRF token against a session (constant-time compare). */
+export async function verifyCsrf(
+  secret: string,
+  sessionId: string,
+  token: string
+): Promise<boolean> {
+  const expected = await makeCsrf(secret, sessionId);
+  // Constant-time compare with length folded in (no early return — mirrors
+  // constantTimeTokenEqual; an early length-check would leak token length).
+  const len = Math.max(expected.length, token.length);
+  let diff = expected.length ^ token.length;
+  for (let i = 0; i < len; i++) {
+    const x = i < expected.length ? expected.charCodeAt(i) : 0;
+    const y = i < token.length ? token.charCodeAt(i) : 0;
+    diff |= x ^ y;
+  }
+  return diff === 0;
 }
 
 // hashProfile re-exported for hosts that persist the profile hash.

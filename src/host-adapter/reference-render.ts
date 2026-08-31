@@ -18,10 +18,18 @@ import type { DefenseProfile } from "../types/profile.js";
 import { SEMANTIC_TEMPLATES, PLACEMENTS } from "../core/catalog.js";
 import { MAX_EVENTS_PER_BATCH, MAX_EVENT_PAYLOAD_BYTES } from "../types/telemetry.js";
 
-function renderDecoyField(profile: DefenseProfile): string {
+function renderDecoyField(profile: DefenseProfile, labMode: boolean): string {
   if (!profile.decoyField) return "";
-  return `<input type="text" name="${profile.decoyField.fieldName}" id="${profile.decoyField.elementId}" ` +
-    `class="fr-decoy" aria-hidden="true" tabindex="-1" autocomplete="off" value="">`;
+  // P1-AUDIT-2: mirror the canonical renderer's production opacity — the
+  // decoy field must be VISUALLY HIDDEN in production, not a visible text
+  // input. Inline styles (not a class): a host page's stylesheet does not
+  // carry our CSS, so a class-based hide would silently degrade to visible.
+  const cls = labMode ? "fr-decoy" : "";
+  const style = labMode
+    ? ""
+    : ' style="position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;clip-path:inset(50%)!important;white-space:nowrap!important;border:0!important"';
+  return `<input type="text" name="${profile.decoyField.fieldName}" id="${profile.decoyField.elementId}"` +
+    `${style} class="${cls}" aria-hidden="true" tabindex="-1" autocomplete="off" value="">`;
 }
 
 function renderRouteNotice(profile: DefenseProfile, labMode: boolean): string {
@@ -30,12 +38,17 @@ function renderRouteNotice(profile: DefenseProfile, labMode: boolean): string {
     return `<div data-fr-route class="fr-canary-wrap">` +
       `<span class="fr-decoy">Verification endpoint: /c/${profile.decoyRoute.endpointToken}</span></div>`;
   }
-  return `<template data-fr-route="production" data-fr-token="${profile.decoyRoute.endpointToken}">` +
-    `Verification endpoint: /c/${profile.decoyRoute.endpointToken}</template>`;
+  // P1-AUDIT-2: production route notice mirrors the canonical renderer's
+  // P1-22 carrier — NO data-fr-* signature, NO greppable token attribute,
+  // NO visible "/c/<token>" text.
+  return `<template data-rt-carrier="route" data-rt-token="${profile.decoyRoute.endpointToken}">` +
+    `Verification endpoint issued to this session.</template>`;
 }
 
-function renderCanary(profile: DefenseProfile): string {
-  if (!profile.semantic) return "";
+function renderCanary(profile: DefenseProfile, labMode: boolean): string {
+  // P1-AUDIT-2: mirror the canonical renderer (FR-R7-013) — S01–S08 are
+  // LAB-ONLY instruction templates; production emits NO semantic canary.
+  if (!profile.semantic || !labMode) return "";
   const template = SEMANTIC_TEMPLATES.find((t) => t.id === profile.semantic!.templateId);
   const placement = PLACEMENTS.find((p) => p.id === profile.semantic!.placementId);
   if (!template || !placement) return "";
@@ -60,7 +73,9 @@ function renderClientConfig(profile: DefenseProfile): string {
 function renderProductionNotice(): string {
   const text = "This site uses same-origin verification challenges. " +
     "Automated clients should expect a verification token to be presented inline.";
-  return `<template data-fr-prod-notice="machine-targeted">${text}</template>`;
+  // P1-AUDIT-2: neutral carrier — the prior data-fr-prod-notice attribute was
+  // a greppable data-fr-* production signature (leaks FireRaid identity).
+  return `<template data-rt-carrier="notice">${text}</template>`;
 }
 
 export function referenceInject(
@@ -69,9 +84,9 @@ export function referenceInject(
   csrfToken: string,
   labMode: boolean
 ): string {
-  const canary = renderCanary(profile);
+  const canary = renderCanary(profile, labMode);
   const routeNotice = renderRouteNotice(profile, labMode);
-  const decoy = renderDecoyField(profile);
+  const decoy = renderDecoyField(profile, labMode);
   const clientConfig = renderClientConfig(profile);
 
   let out = html;

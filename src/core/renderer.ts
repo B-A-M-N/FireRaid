@@ -112,12 +112,18 @@ export function renderDecoyField(
   if (!profile.decoyField) return "";
   // FR-R6-029: only the decoy-field family renders an input.
   // P1-22: in production the input carries NO "fr-decoy" class and NO "fr_"
-  //   greppable marker in its attributes; it is a plain hidden input. The
-  //   field NAME itself (profile.decoyField.fieldName) is profile-bound and
+  //   greppable marker in its attributes. P1-AUDIT-2: production MUST NOT be a
+  //   visible mystery textbox — the previous output dropped the hiding class
+  //   (opacity) and rendered a bare type="text" input that showed on screen.
+  //   We now carry a NEUTRAL, non-FireRaid-identifying offscreen utility class
+  //   (opacity kept) and rely on the standard visually-hidden technique in
+  //   public/signup.css — which also overrides the generic full-width text input
+  //   rule (.fr-form-fields input) that would otherwise stretch the decoy.
+  //   The field NAME itself (profile.decoyField.fieldName) is profile-bound and
   //   is the P1-23 fork — left as-is so submit.ts still binds it.
-  const cls = opts.labMode ? "fr-decoy" : "";
+  const cls = opts.labMode ? "fr-decoy" : "fr-visually-hidden";
   return `<input type="text" name="${profile.decoyField.fieldName}" id="${profile.decoyField.elementId}" ` +
-    `${cls ? `class="${cls}" ` : ""}aria-hidden="true" tabindex="-1" autocomplete="off" value="">`;
+    `class="${cls}" aria-hidden="true" tabindex="-1" autocomplete="off" value="">`;
 }
 
 export function renderCsrfField(csrfToken: string): string {

@@ -3,7 +3,31 @@
  * Regression suite for FR-R4-003 (comparator bug) and FR-R4-004 (dedup).
  */
 import { describe, it, expect } from "vitest";
-import { constantTimeTokenEqual } from "../../src/routes/canary.js";
+import { persistVerifiedHit, constantTimeTokenEqual } from "../../src/routes/canary.js";
+
+/** Minimal D1 whose run() throws when `fail` is set (real storage failure). */
+function d1HitStore(fail: boolean): D1Database {
+  return {
+    prepare() {
+      return {
+        bind() {
+          return {
+            run: async () => {
+              if (fail) throw new Error("storage backend unreachable");
+              return { meta: { changes: 1 } };
+            },
+            first: async () => null,
+          };
+        },
+        run: async () => {
+          if (fail) throw new Error("storage backend unreachable");
+          return { meta: { changes: 1 } };
+        },
+      };
+    },
+    batch: async () => [],
+  } as unknown as D1Database;
+}
 
 describe("canary: constantTimeTokenEqual", () => {
   it("correct token matches", () => {
@@ -53,5 +77,17 @@ describe("canary: constantTimeTokenEqual", () => {
     const src = constantTimeTokenEqual.toString();
     const readCount = (src.match(/expected\.charCodeAt\(/g) || []).length;
     expect(readCount).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("persistVerifiedHit: fail-closed persistence (P1-AUDIT-2)", () => {
+  it("healthy write → true (hit recorded)", async () => {
+    const ok = await persistVerifiedHit(d1HitStore(false), "s1", "tok", "exp", 123);
+    expect(ok).toBe(true);
+  });
+
+  it("storage run() throws → false (caller must fail the request)", async () => {
+    const ok = await persistVerifiedHit(d1HitStore(true), "s1", "tok", "exp", 123);
+    expect(ok).toBe(false);
   });
 });

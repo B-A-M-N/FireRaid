@@ -34,10 +34,17 @@ export type { DefenseProfile };
 export interface HostSessionAdapter {
   /** Create a new opaque session id (host may persist whatever it needs). */
   createSession(): Promise<string>;
-  /** Build the Set-Cookie header value(s) for a fresh session. */
-  sessionCookie(sessionId: string): string;
-  /** Parse the incoming session id from a Request (null = no session). */
-  readSessionId(req: Request): string | null;
+  /**
+   * Build the Set-Cookie header value(s) for a fresh session.
+   * Async so a host may sign the session id (integrity-protected cookie —
+   * see the reference adapter).
+   */
+  sessionCookie(sessionId: string): Promise<string>;
+  /**
+   * Parse + verify the incoming session id from a Request. Return null for a
+   * missing OR TAMPERED session — admission must be denied, never forwarded.
+   */
+  readSessionId(req: Request): Promise<string | null>;
 }
 
 /**
@@ -68,10 +75,19 @@ export interface HostRenderAdapter {
  */
 export interface HostVerificationAdapter {
   /**
+   * @param body the already-parsed, already-CONSUMED request body (form +
+   *   CSRF + telemetry + any verification payload). The middleware reads the
+   *   JSON body ONCE and hands it here, so a real verifier (e.g. Turnstile
+   *   checking a token from the body) never needs to re-read a consumed
+   *   request stream.
    * @returns true if the submission may be forwarded (verification passed or
    *          not required); false if admission must be denied.
    */
-  verify(req: Request, profile: DefenseProfile): Promise<boolean>;
+  verify(
+    req: Request,
+    profile: DefenseProfile,
+    body: { csrf?: string; form?: Record<string, string>; eventBatch?: unknown }
+  ): Promise<boolean>;
 }
 
 /**

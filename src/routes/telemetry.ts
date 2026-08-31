@@ -385,19 +385,24 @@ export async function events(req: Request, env: Env): Promise<Response> {
  */
 async function lazyCaptureMask(
   env: Env,
-  session: { profileVersion: number; profileKeyId: string | null; labModeHoldout?: boolean }
+  session: { id: string; profileVersion: number; profileKeyId: string | null; labModeHoldout?: boolean }
 ): Promise<{ capturePointer: boolean; captureKey: boolean }> {
   return resolveCaptureMask(env, session);
 }
 
 async function resolveCaptureMask(
   env: Env,
-  session: { profileVersion: number; profileKeyId: string | null; labModeHoldout?: boolean }
+  session: { id: string; profileVersion: number; profileKeyId: string | null; labModeHoldout?: boolean }
 ): Promise<{ capturePointer: boolean; captureKey: boolean }> {
   try {
     const { reconstructIssuedProfile } = await import("../core/reconstruct.js");
+    // P1-AUDIT-2: the session ID is REQUIRED by reconstruction — deriveSeed
+    // keys the profile seed (and thus the capture mask) on HMAC(secret,
+    // version, sessionId). Passing "" derived a DIFFERENT session's profile,
+    // so the first metrics fold persisted the WRONG capture flags. Use the
+    // real session id so reconstruction returns the actual issued profile.
     const reconstructed = await reconstructIssuedProfile(env, {
-      id: "", // unused by derivation; derivation keys on profileVersion/keyId
+      id: session.id,
       profileVersion: session.profileVersion,
       profileKeyId: session.profileKeyId,
     });
