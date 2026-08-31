@@ -13,7 +13,7 @@
  * FR-R4-086: fail closed on missing non-default fixture.
  */
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { execSync, execFileSync } from "node:child_process";
+import { execSync, execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { loadHarnessEnv } from "./model.js";
 // P1-AUDIT-2 Phase C: origin-ledger runtime + named ablation conditions.
@@ -211,9 +211,23 @@ function browserProvenance(): { browser_name?: string; browser_version?: string 
     : {};
 }
 
-/** Which adapters launch a browser through THIS harness's Playwright install. */
+/** Which adapters launch a browser through THIS harness's Playwright install.
+ * P1-22: this MUST stay in lockstep with the adapters that actually call
+ * chromium.launch() — every listed agent's run record carries
+ * browser_name/browser_version measured from this install; every unlisted
+ * one silently lacks provenance. browser-use runs its own engine (not this
+ * Playwright) and raw-http uses fetch, so both are correctly absent. */
 function usesPlaywrightBrowser(agent: AgentType): boolean {
-  return agent === "human" || agent === "raw-dom" || agent === "ax-snapshot";
+  return (
+    agent === "human" ||
+    agent === "raw-dom" ||
+    agent === "ax-snapshot" ||
+    agent === "dom-automation" ||
+    agent === "fill-everything" ||
+    agent === "humanized-pw" ||
+    agent === "vision-only" ||
+    agent === "fireraid-aware"
+  );
 }
 
 /**
@@ -929,6 +943,54 @@ export async function runExperiment(manifestPath: string): Promise<void> {
   // Execute trials sequentially
   // (per-trial status is tracked in resumeTrials; no separate counter needed)
   const resumeTrials: ResumeState["trials"] = [];
+
+  // P1-AUDIT-2 (P1-23): browser-use runtime preflight — ONCE per experiment,
+  // BEFORE any trial spends wall-clock or money. Without it the first
+  // browser-use trial pays the full adapter timeout discovering that python3
+  // or the browser-use package is missing (BROWSER_USE_SPAWN_FAILED /
+  // BROWSER_USE_NO_RESULT with a pip hint buried in stderr), and a pilot can
+  // burn its whole budget on unrunnable cells. The preflight mirrors the
+  // worker's OWN import strategy (deferred browser_use import with the
+  // <0.3 top-level ChatOpenAI fallback), so it fails only when the worker
+  // would also fail. It checks ONLY this adapter — python deps for other
+  // adapters don't exist by design (all others are pure TS).
+  if (manifest.agents.includes("browser-use")) {
+    const preflight = (() => {
+      // 1. python3 itself
+      const py = spawnSync("python3", ["-c", "import sys; sys.stdout.write('ok')"], {
+        encoding: "utf-8",
+        timeout: 15_000,
+      });
+      if (py.error || py.status !== 0 || py.stdout?.trim() !== "ok") {
+        return "python3 not runnable (install python3)";
+      }
+      // 2. browser_use importable — same double-import the worker attempts.
+      const probe =
+        "try:\n" +
+        "    from browser_use import Agent, BrowserSession\n" +
+        "    from browser_use.llm import ChatOpenAI\n" +
+        "except ImportError:\n" +
+        "    try:\n" +
+        "        from browser_use import Agent, BrowserSession, ChatOpenAI\n" +
+        "    except ImportError:\n" +
+        "        raise SystemExit(1)\n" +
+        "sys.stdout.write('ok')\n";
+      const dep = spawnSync("python3", ["-c", "import sys\n" + probe], {
+        encoding: "utf-8",
+        timeout: 30_000,
+      });
+      if (dep.error || dep.status !== 0 || dep.stdout?.trim() !== "ok") {
+        return "browser-use python package not importable (pip install browser-use openai; playwright install chromium)";
+      }
+      return null;
+    })();
+    if (preflight) {
+      console.error(`PREFLIGHT FAIL (browser-use): ${preflight}`);
+      console.error("Remove browser-use from manifest.agents or fix the runtime, then re-run.");
+      process.exit(1);
+    }
+    console.log("Preflight OK: browser-use python runtime present");
+  }
 
   for (let i = 0; i < trials.length; i++) {
     const trial = trials[i];

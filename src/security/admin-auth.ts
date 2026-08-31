@@ -11,19 +11,8 @@ import type { Env } from "../env.js";
 export const ADMIN_SESSION_TTL = 60 * 60 * 1000; // 1 hour
 const ADMIN_COOKIE = "__Host-fr_admin";
 
-/** Constant-time string comparison. Length difference is folded into the
- * accumulator so timing does not leak token length or match position. */
-function constantTimeEqual(a: string, b: string): boolean {
-  const len = Math.max(a.length, b.length);
-  let diff = 0;
-  for (let i = 0; i < len; i++) {
-    const x = i < a.length ? a.charCodeAt(i) : 0;
-    const y = i < b.length ? b.charCodeAt(i) : 0;
-    diff |= x ^ y;
-  }
-  diff |= a.length ^ b.length;
-  return diff === 0;
-}
+// P1-AUDIT-2 (P1-7): the single shared constant-time primitive.
+import { constantTimeTokenEqual as constantTimeEqual } from "../core/tokens.js";
 
 function getAdminSecret(env: Env): string | null {
   const secret = env.ADMIN_SECRET;

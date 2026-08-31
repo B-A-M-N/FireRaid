@@ -33,50 +33,10 @@ export interface SessionStore {
   touch(sessionId: string): Promise<void>;
 }
 
-export interface SubmissionStore {
-  create(record: {
-    sessionId: string;
-    createdAt: number;
-    turnstileOk: boolean;
-    causalHits: number;
-    strongHits: number;
-    weakHits: number;
-    riskScore: number;
-    disposition: string;
-    policy: string;
-    reasons: string[];
-  }): Promise<number>;
-
-  getBySession(sessionId: string): Promise<{
-    id: number;
-    disposition: string;
-    score: number;
-    policy: string;
-    reasons: string[];
-  } | null>;
-}
-
-export interface EvidenceStore {
-  create(record: {
-    submissionId: number;
-    evidenceClass: string;
-    source: string;
-    weight: number;
-    verified: boolean;
-    metadata: Record<string, unknown>;
-  }): Promise<void>;
-
-  getBySubmission(submissionId: number): Promise<
-    Array<{
-      evidenceClass: string;
-      source: string;
-      weight: number;
-      verified: boolean;
-      metadata: Record<string, unknown>;
-    }>
-  >;
-}
-
+// P1-AUDIT-2 (P1-27): SubmissionStore / EvidenceStore interfaces REMOVED with
+// their only (dead) implementation — submission + evidence writes live solely
+// in SubmissionFinalizer below; reads are direct SQL on the admin/ingest
+// paths.
 /**
  * FR-R5-031: Transaction-level submission finalizer.
  * Single env.DB.batch call that:

@@ -145,6 +145,11 @@ def is_valid_run(r: dict) -> bool:
     """
     FR-R5-050: A run is ``valid`` for EFFECTIVENESS denominators when the server
     has reconciled it and the outcome is one of the terminal-success states.
+
+    P1-AUDIT-2 (P1-28): this predicate and the submission/canary truths below
+    are the CANONICAL definitions — src/analytics/run-metrics.ts mirrors them
+    for admin experiment pages (its tests pin the contract). Changing a
+    definition requires changing both, in the same commit.
     """
     return (
         r.get("server_reconciled") is True
@@ -191,7 +196,10 @@ def failure_plane(r: dict) -> str | None:
         return "origin_infra"
     if r.get("outcome") == "timeout":
         return "agent"  # agent ran out of budget — a held-out defense outcome
-    if code == "llm_error":
+    # Provider plane: every LLM-side failure mode the adapters emit. The
+    # prior single-code check sent llm_not_configured and model_timeout to
+    # the harness plane, misattributing config/spend problems as code bugs.
+    if code in ("llm_error", "llm_not_configured", "model_timeout", "LLM_EMPTY_REPLY"):
         return "provider"
     if code in ("browser_error", "invalid_prompt_variant", "TIMEOUT"):
         return "harness"
@@ -277,6 +285,13 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
         plane = failure_plane(r)
         if plane is not None:
             taxonomy[plane] += 1
+
+    # P1-AUDIT-2: SERVER-truth submission count over the ITT denominator.
+    # Computed BEFORE the return dict (not from the effectiveness block's
+    # `submitted`, which is only assigned when n_valid > 0) so an
+    # all-invalid group with assignable trials yields a defined rate
+    # instead of a NameError.
+    itt_submitted = sum(1 for r in assignable if r.get("submitted") is True)
 
     # --- OPERATIONAL rates (denominator = n_attempted) ---
     error_count = sum(1 for r in runs if r.get("error_code") is not None)
@@ -420,8 +435,8 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
         "n_assignable": n_assignable,
         "failure_taxonomy": taxonomy,
         "itt_submission_rate": (
-            submitted / n_assignable,
-            *wilson_interval(submitted, n_assignable),
+            itt_submitted / n_assignable,
+            *wilson_interval(itt_submitted, n_assignable),
         ) if n_assignable > 0 else (0.0, 0.0, 0.0),
         **origin_endpoint_rates(assignable, n_assignable),
         **operational,

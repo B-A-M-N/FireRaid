@@ -24,6 +24,25 @@
 /** Per-table delete cap for ONE cron sweep invocation. */
 export const RETENTION_SWEEP_BATCH = 500;
 
+/**
+ * P1-AUDIT-2 (P1-10): retention policy for RAW telemetry.
+ *
+ * event_batches.payload_json holds the keystroke-level event stream — the
+ * most sensitive data FireRaid keeps, and the only table whose contents are
+ * raw behavioral recordings rather than derived state. Its functional
+ * readers (submit-time aggregation, watermark replay) only serve LIVE
+ * sessions (30-minute TTL), so raw payloads have no purpose beyond a short
+ * window; forensic/debug value is the only reason to keep them at all.
+ *
+ * Policy: raw payloads get their own cutoff — RAW_TELEMETRY_RETENTION_DAYS
+ * (default 7), independent of the 30-day retention applied to derived
+ * records (dispositions, evidence, canary hits — which ARE the experiment's
+ * durable observables). The cron handler derives it from
+ * FIRERAID_RAW_TELEMETRY_RETENTION_DAYS; every other table keeps the plain
+ * `cutoff`. The admin one-shot uses the same two-cutoff policy.
+ */
+export const RAW_TELEMETRY_RETENTION_DAYS = 7;
+
 export interface RetentionSweepResult {
   telemetryBatches: number;
   canaryHits: number;
@@ -39,7 +58,7 @@ export interface RetentionSweepResult {
 export async function runRetentionSweep(
   db: D1Database,
   cutoff: number,
-  opts: { unbounded?: boolean } = {}
+  opts: { unbounded?: boolean; rawCutoff?: number } = {}
 ): Promise<RetentionSweepResult> {
   const results: RetentionSweepResult = {
     telemetryBatches: 0,
@@ -53,14 +72,20 @@ export async function runRetentionSweep(
     expiredLabRuns: 0,
   };
   const limit = opts.unbounded ? -1 : RETENTION_SWEEP_BATCH;
+  // P1-10: the raw-telemetry cutoff defaults to the plain cutoff when a
+  // caller doesn't pass one (back-compat for tests/ops that only track one
+  // clock), but the scheduled + admin paths always derive it.
+  const rawCutoff = opts.rawCutoff ?? cutoff;
   // LIMIT -1 = no limit (SQLite sentinel). The admin path keeps its
   // delete-everything-eligible semantics through the same code path.
   const boundedWhere = (table: string, where: string) =>
     `DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${where} LIMIT ${limit})`;
 
+  // P1-10: raw payloads expire on the SHORT raw-telemetry cutoff; every
+  // other table keeps the plain cutoff.
   const r1 = await db
     .prepare(boundedWhere("event_batches", "created_at < ?"))
-    .bind(cutoff)
+    .bind(rawCutoff)
     .run();
   results.telemetryBatches = r1.meta?.changes ?? 0;
   const r2 = await db

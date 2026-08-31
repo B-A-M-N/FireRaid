@@ -292,19 +292,29 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   }
 
   // 9. inspect canary evidence (causal hits recorded during this session)
-  // FR-R7-020: skip the canary_hits COUNT when the profile has no
-  // decoyRoute — the answer is necessarily zero and the query is wasted
-  // work on every defended submission.
+  // FR-R7-020: skipped entirely when the profile has no decoyRoute.
+  // P1-9: the verified-hit boolean is compacted onto the session row at hit
+  // time (canary.ts persistVerifiedHit, same batch as the hit insert) and
+  // arrives here via the session SELECT submit already performed — no
+  // per-submission canary_hits COUNT round-trip. Legacy rows (flag NULL)
+  // fall back to the COUNT exactly once, on sessions that predate
+  // migration 0014.
   if (profile.decoyRoute) {
-    const canaryRow = await env.DB
-      .prepare(
-        `SELECT COUNT(*) AS hits FROM canary_hits WHERE session_id = ? AND verified = 1`
-      )
-      .bind(sessionId)
-      .first<{ hits: number }>();
-    if (canaryRow && canaryRow.hits > 0) {
-      observations.canaryEndpointHit = true;
+    let hit: boolean;
+    if (session.causalRouteHit === 1) {
+      hit = true;
+    } else if (session.causalRouteHit === 0) {
+      hit = false;
+    } else {
+      const canaryRow = await env.DB
+        .prepare(
+          `SELECT EXISTS(SELECT 1 FROM canary_hits WHERE session_id = ? AND verified = 1) AS hit`
+        )
+        .bind(sessionId)
+        .first<{ hit: number }>();
+      hit = canaryRow?.hit === 1;
     }
+    if (hit) observations.canaryEndpointHit = true;
   }
 
   // FIX: 10. Process eventBatch from submit (FR-R2-008, FR-R2-009)

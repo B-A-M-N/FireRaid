@@ -6,8 +6,12 @@
  * worker and counts the real resource cost of every request:
  *
  *   - Worker requests: root spans (fetch handler invocations)
- *   - D1 reads:        `d1_first` child spans
- *   - D1 writes:       `d1_run` + `d1_batch` child spans
+ *   - D1 read stmts:   `d1_first` child spans (statement CALLS, not rows)
+ *   - D1 write stmts:  `d1_run` + `d1_batch` child spans (statement CALLS)
+ *   - D1 rows r/w:     rows_read/rows_written decoded from span attributes
+ *                      (P1-16 — statement count and row movement are
+ *                      DIFFERENT costs; a budget on one is not a budget on
+ *                      the other). Undecodable attributes report "n/a".
  *   - p50/p95 latency: duration_ms over the scenario's root spans
  *
  * Wrangler's local observability store (queried via
@@ -28,7 +32,9 @@
  */
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const PORT = 8797;
@@ -116,22 +122,89 @@ async function stopWorker() {
 
 // ── Observability queries ─────────────────────────────────────────────────
 
-async function querySpans(sql) {
-  const resp = await fetch(OBSERVABILITY_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sql }),
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!resp.ok) throw new Error(`observability query failed: HTTP ${resp.status}`);
-  const body = await resp.json();
-  if (!body.success) throw new Error(`observability query error: ${JSON.stringify(body.errors)}`);
-  const { columns, rows } = body.result;
-  return rows.map((row) => Object.fromEntries(columns.map((c, i) => [c, row[i]])));
+/**
+ * P1-16: span rows are read DIRECTLY from wrangler's local trace-store
+ * SQLite (the newest .wrangler/<suite>/v3/observability trace store), not via
+ * the /cdn-cgi/local/explorer query API — that API strips the `attributes`
+ * column to `{}` on the wire, and attributes is exactly where the per-query
+ * rows_read/rows_written live. Same worker-scoped discovery the API path
+ * used, minus the lossy hop.
+ */
+function traceStorePath() {
+  const obsRoot = join(ROOT, ".wrangler");
+  let newest = null;
+  for (const entry of readdirSync(obsRoot)) {
+    if (!entry.startsWith("budget-")) continue;
+    const store = join(obsRoot, entry, "v3", "observability", "miniflare-wobs-trace-store");
+    let mtime = 0;
+    try {
+      mtime = readdirSync(store)
+        .filter((f) => f.endsWith(".sqlite"))
+        .reduce((acc, f) => Math.max(acc, statSync(join(store, f)).mtimeMs), 0);
+    } catch {
+      continue; // suite dir without a trace store
+    }
+    if (mtime > 0 && (newest === null || mtime > newest.mtime)) {
+      newest = { path: join(store, readdirSync(store).find((f) => f.endsWith(".sqlite"))), mtime };
+    }
+  }
+  if (!newest) throw new Error("no wrangler trace store found under .wrangler/budget-*/");
+  return newest.path;
+}
+
+function querySpans(_sql, startMs, endMs) {
+  // NOT readOnly: the live worker's recent spans sit in the store's -wal
+  // file, and a read-only connection can skip WAL replay (or fail on it) —
+  // which made a first cut of this harness read all-zero windows. Opening
+  // read-write lets SQLite recover the WAL normally. Reads only; nothing
+  // here writes to the trace store.
+  const db = new DatabaseSync(traceStorePath());
+  try {
+    return db
+      .prepare(
+        `SELECT span_id, parent_id, name, start_ms, duration_ms, error, attributes
+         FROM spans WHERE start_ms >= ? AND start_ms <= ?`
+      )
+      .all(Math.floor(startMs), Math.ceil(endMs));
+  } finally {
+    db.close();
+  }
 }
 
 const D1_READ_SPAN = "d1_first";
 const D1_WRITE_SPANS = new Set(["d1_run", "d1_batch"]);
+
+/**
+ * P1-AUDIT-2 (P1-16): decode the rows_read / rows_written / size_after that
+ * wrangler records INSIDE each d1 span's attributes blob. The span COUNT is
+ * statement calls, not rows — a `SELECT COUNT(*)` and a 10k-row scan are
+ * both one `d1_first` span. The blob is wrangler's TLV encoding: each field
+ * is a length-prefixed key followed by a typed value where numeric values
+ * are the decimal digits that follow the type byte. Rather than pin the
+ * full TLV grammar, scan the decoded bytes for the known key and read the
+ * digit run that follows it (digits end at the next field's non-digit
+ * bytes). Undecodable → null; the report then says "n/a" instead of a
+ * fabricated number.
+ */
+function d1AttrValue(attrBytes, key) {
+  try {
+    const text = Buffer.from(attrBytes).toString("latin1");
+    const m = text.match(new RegExp(`${key}.{0,2}?(\\d+)`));
+    return m ? Number(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** attributes arrives from node:sqlite as a Uint8Array (BLOB); keep the
+ * base64-text and Array fallbacks for wire-format drift. */
+function attrBytes(attr) {
+  if (attr == null) return null;
+  if (attr instanceof Uint8Array) return attr;
+  if (typeof attr === "string") return Uint8Array.from(Buffer.from(attr, "base64"));
+  if (Array.isArray(attr)) return Uint8Array.from(attr);
+  return null;
+}
 
 /**
  * Root spans in a time window with per-request D1 op counts.
@@ -139,8 +212,9 @@ const D1_WRITE_SPANS = new Set(["d1_run", "d1_batch"]);
  */
 async function requestWindow(startMs, endMs) {
   const spans = await querySpans(
-    `SELECT span_id, parent_id, name, start_ms, duration_ms, error
-     FROM spans WHERE start_ms >= ${Math.floor(startMs)} AND start_ms <= ${Math.ceil(endMs)}`
+    /* sql retained for shape parity with the old HTTP API path */ undefined,
+    startMs,
+    endMs
   );
   // True request roots carry parent_id IS NULL in wrangler's store.
   // (Parent-absent-from-window is NOT the same thing: a child span whose
@@ -148,7 +222,16 @@ async function requestWindow(startMs, endMs) {
   // inflate request counts.)
   const d1ReadsByParent = new Map();
   const d1WritesByParent = new Map();
+  const rowsReadByParent = new Map();
+  const rowsWrittenByParent = new Map();
   for (const s of spans) {
+    if (s.name === D1_READ_SPAN || D1_WRITE_SPANS.has(s.name)) {
+      const bytes = attrBytes(s.attributes);
+      const rr = bytes ? d1AttrValue(bytes, "rows_read") : null;
+      const rw = bytes ? d1AttrValue(bytes, "rows_written") : null;
+      if (rr !== null) rowsReadByParent.set(s.parent_id, (rowsReadByParent.get(s.parent_id) ?? 0) + rr);
+      if (rw !== null) rowsWrittenByParent.set(s.parent_id, (rowsWrittenByParent.get(s.parent_id) ?? 0) + rw);
+    }
     if (s.name === D1_READ_SPAN) {
       d1ReadsByParent.set(s.parent_id, (d1ReadsByParent.get(s.parent_id) ?? 0) + 1);
     } else if (D1_WRITE_SPANS.has(s.name)) {
@@ -163,6 +246,10 @@ async function requestWindow(startMs, endMs) {
     durationMs: r.duration_ms,
     d1Reads: d1ReadsByParent.get(r.span_id) ?? 0,
     d1Writes: d1WritesByParent.get(r.span_id) ?? 0,
+    // P1-16: ACTUAL row movement where decodable (null = not decodable —
+    // reported as "n/a", never folded into a fake number).
+    rowsRead: rowsReadByParent.get(r.span_id) ?? null,
+    rowsWritten: rowsWrittenByParent.get(r.span_id) ?? null,
     error: r.error,
   }));
 }
@@ -377,6 +464,12 @@ async function main() {
       const workerRequests = requests.length;
       const d1Reads = requests.reduce((n, r) => n + r.d1Reads, 0);
       const d1Writes = requests.reduce((n, r) => n + r.d1Writes, 0);
+      // P1-16: row movement is a separate measurement from statement calls.
+      // Any non-decodable span makes the row total null (n/a), so a decode
+      // gap can never masquerade as "0 rows".
+      const anyUndecoded = requests.some((r) => (r.d1Reads > 0 || r.d1Writes > 0) && r.rowsRead === null && r.rowsWritten === null);
+      const rowsRead = anyUndecoded ? null : requests.reduce((n, r) => n + (r.rowsRead ?? 0), 0);
+      const rowsWritten = anyUndecoded ? null : requests.reduce((n, r) => n + (r.rowsWritten ?? 0), 0);
       const durations = requests.map((r) => r.durationMs).sort((a, b) => a - b);
       const p50 = percentile(durations, 50);
       const p95 = percentile(durations, 95);
@@ -387,7 +480,9 @@ async function main() {
       if (d1Writes > budget.d1Writes) breaches.push(`d1Writes ${d1Writes} > ${budget.d1Writes}`);
 
       report[name] = {
+        // P1-16: these are D1 STATEMENT CALLS (spans), not rows.
         workerRequests, d1Reads, d1Writes,
+        rowsRead, rowsWritten,
         p50Ms: p50, p95Ms: p95,
         budget,
         breaches,
@@ -397,7 +492,8 @@ async function main() {
         failed = true;
         console.log(`FAIL — ${breaches.join("; ")}`);
       } else {
-        console.log(`PASS — ${workerRequests} req, ${d1Reads} reads, ${d1Writes} writes, p95 ${p95}ms`);
+        const rows = rowsRead === null ? "n/a" : `${rowsRead}r/${rowsWritten}w`;
+        console.log(`PASS — ${workerRequests} req, ${d1Reads} stmts, ${d1Writes} stmts, rows ${rows}, p95 ${p95}ms`);
       }
     }
   } finally {
@@ -411,7 +507,8 @@ async function main() {
 
   console.log("\n=== Budget harness summary ===");
   for (const [name, r] of Object.entries(report)) {
-    console.log(`${r.status.padEnd(12)} ${name.padEnd(28)} ${r.workerRequests ?? "?"} req / ${r.d1Reads ?? "?"} reads / ${r.d1Writes ?? "?"} writes / p95 ${r.p95Ms ?? "?"}ms`);
+    const rows = r.rowsRead === null || r.rowsRead === undefined ? "n/a" : `${r.rowsRead}/${r.rowsWritten}`;
+    console.log(`${r.status.padEnd(12)} ${name.padEnd(28)} ${r.workerRequests ?? "?"} req / ${r.d1Reads ?? "?"} read-stmts / ${r.d1Writes ?? "?"} write-stmts / rows ${rows} / p95 ${r.p95Ms ?? "?"}ms`);
   }
 
   process.exit(failed ? 1 : 0);

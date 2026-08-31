@@ -151,6 +151,48 @@ describe("bounded retention sweep (P1-AUDIT-2 ops)", () => {
     const left = db.prepare(`SELECT COUNT(*) AS n FROM sessions`).get() as { n: number };
     expect(left.n).toBe(200);
   });
+
+  it("P1-10: raw payloads expire on the RAW cutoff, derived records on the plain cutoff", async () => {
+    // One OLD raw batch (older than rawCutoff but younger than cutoff) and
+    // one FRESH submission (younger than cutoff, older than rawCutoff is
+    // impossible — rawCutoff < cutoff — so: between the two clocks). A
+    // plain single-cutoff sweep at rawCutoff would delete both; the
+    // two-cutoff policy deletes only the raw payload.
+    seedBatches(1);
+    db.prepare(
+      `INSERT INTO submissions (session_id, created_at, turnstile_ok, causal_hits, strong_hits, weak_hits, risk_score, disposition)
+       VALUES ('seed-sess', 1, 0, 0, 0, 0, 0, 'REVIEW')`
+    ).run();
+
+    const NOW = 100_000;
+    const cutoff = NOW - 30 * 24 * 60 * 60 * 1000;      // derived window (30d)
+    const rawCutoff = NOW - 7 * 24 * 60 * 60 * 1000;    // raw window (7d)
+    // seeded rows use created_at = 1. Move the raw batch INTO the raw
+    // window (older than rawCutoff) and the submission INTO the derived
+    // window but NOT the raw window (between the two cutoffs) — it must
+    // survive because its clock is the derived one.
+    db.prepare(`UPDATE event_batches SET created_at = ? WHERE created_at = 1`).run(rawCutoff - 1000);
+    db.prepare(`UPDATE submissions SET created_at = ? WHERE created_at = 1`).run(cutoff + 1000);
+
+    const d1 = makeD1(db);
+    const res = await runRetentionSweep(d1, cutoff, { unbounded: true, rawCutoff });
+
+    expect(res.telemetryBatches).toBe(1); // raw payload deleted on the short clock
+    const leftBatches = db.prepare(`SELECT COUNT(*) AS n FROM event_batches`).get() as { n: number };
+    expect(leftBatches.n).toBe(0);
+    const leftSubs = db.prepare(`SELECT COUNT(*) AS n FROM submissions`).get() as { n: number };
+    // The disposition (a durable experiment observable) SURVIVES — it is
+    // younger than the derived cutoff even though the raw payload died.
+    expect(leftSubs.n).toBe(1);
+  });
+
+  it("P1-10: with no rawCutoff passed, raw payloads follow the plain cutoff (back-compat)", async () => {
+    seedBatches(2);
+    const d1 = makeD1(db);
+    await runRetentionSweep(d1, 1000, { unbounded: true });
+    const left = db.prepare(`SELECT COUNT(*) AS n FROM event_batches`).get() as { n: number };
+    expect(left.n).toBe(0);
+  });
 });
 
 describe("scheduled handler validates config (P1-AUDIT-2 ops)", () => {

@@ -32,6 +32,12 @@ export interface Env {
 
   /** FR-R7-025: scheduled retention sweep retention window (days). */
   FIRERAID_RETENTION_DAYS?: string;
+  /**
+   * P1-10: raw telemetry (event_batches payloads) retention window (days).
+   * Defaults to RAW_TELEMETRY_RETENTION_DAYS (7); clamped to at most
+   * FIRERAID_RETENTION_DAYS — raw payloads never outlive derived records.
+   */
+  FIRERAID_RAW_TELEMETRY_RETENTION_DAYS?: string;
   /** FR-R7-021: persist ALL production verification attempts (audit opt-in). */
   FIRERAID_AUDIT_VERIFICATION_ATTEMPTS?: string;
 }

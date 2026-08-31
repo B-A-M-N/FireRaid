@@ -84,15 +84,8 @@ async function sign(secret: string, message: string): Promise<string> {
   return b64urlEncode(new Uint8Array(sig));
 }
 
-/** Constant-time string equality over the longer of the two lengths. */
-function timingSafeEqual(a: string, b: string): boolean {
-  const len = Math.max(a.length, b.length);
-  let diff = a.length === b.length ? 0 : 1;
-  for (let i = 0; i < len; i++) {
-    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-  }
-  return diff === 0;
-}
+// P1-AUDIT-2 (P1-7): the single shared constant-time primitive.
+import { constantTimeTokenEqual as timingSafeEqual } from "./tokens.js";
 
 // ─── Issue ────────────────────────────────────────────────────────────────
 

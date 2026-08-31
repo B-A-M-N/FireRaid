@@ -61,15 +61,61 @@ export async function readLabAssignment(
     // Genuinely unbound — let the caller use the random (derived) profile.
     return { ok: true, assignment: null };
   }
+  // P1-12: ONE parser for both readers — signup's bind read and the two
+  // post-bind route reads can never disagree on parse/fail-closed rules.
+  return parseAssignmentRow(row);
+}
 
+/**
+ * P1-12: the BIND-TIME twin of readLabAssignment — same contract, keyed on
+ * the lab RUN id (the session is not bound yet at signup). Before this
+ * existed, signup.ts carried its own SELECT + JSON.parse + try/catch that
+ * could drift from this module's fail-closed semantics (exactly the
+ * divergence the audit flagged between the two POST routes). One module
+ * now owns both reads; the row shape is identical so the parse logic is
+ * literally shared below.
+ */
+export async function readLabAssignmentByRunId(
+  db: D1Database,
+  runId: string
+): Promise<LabAssignmentRead> {
+  let row: { recipe_json: string | null; holdout_mode: number | null; turnstile_required: number | null } | null;
+  try {
+    row = await db
+      .prepare(
+        `SELECT recipe_json, holdout_mode, turnstile_required FROM lab_runs WHERE id = ?`
+      )
+      .bind(runId)
+      .first<{ recipe_json: string | null; holdout_mode: number | null; turnstile_required: number | null }>();
+  } catch (err) {
+    return {
+      ok: false,
+      code: "assignment_unreadable",
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+  if (!row) {
+    return {
+      ok: false,
+      code: "assignment_unreadable",
+      detail: "lab run row vanished between bind-start and recipe read",
+    };
+  }
+  return parseAssignmentRow(row);
+}
+
+/** Shared row → assignment parser for both readers (one parse = one drift). */
+function parseAssignmentRow(row: {
+  recipe_json: string | null;
+  holdout_mode: number | null;
+  turnstile_required: number | null;
+}): LabAssignmentRead {
   const assignment: LabAssignment = {};
   const raw = row.recipe_json;
   if (raw != null && raw.length > 0) {
     try {
       assignment.recipe = JSON.parse(raw) as DefenseRecipe;
     } catch {
-      // A bound run whose recipe cannot be parsed is corruption, not evidence
-      // of an unbound session. Fail closed.
       return {
         ok: false,
         code: "assignment_corrupt",

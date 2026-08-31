@@ -25,7 +25,14 @@ function d1HitStore(fail: boolean): D1Database {
         },
       };
     },
-    batch: async () => [],
+    // P1-9: persistVerifiedHit now persists the hit + the compact session
+    // flag through ONE batch — the fail contract applies to the batch.
+    batch: async (statements: { run(): Promise<unknown> }[]) => {
+      if (fail) throw new Error("storage backend unreachable");
+      const out: unknown[] = [];
+      for (const s of statements) out.push(await s.run());
+      return out;
+    },
   } as unknown as D1Database;
 }
 

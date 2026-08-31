@@ -202,7 +202,7 @@ from the final green run). The audit's key milestone — the ledger experiment
 | P1-20 | Randomized interleaved conditions | **DONE** | `harness/core/run-schema.ts` `conditions[]` + seeded per-block interleave (contemporaneous CONTROL/defended). `harness/experiments/exp-interleaved*.json`. 4 unit tests. |
 | P1-26 | Correct endpoints + statistics | **DONE** | `harness/analysis/analyze.py`: primary endpoint = account-creation rate; `risk_reduction()` = ARR + RRR with propagated Wilson CIs; `false_positive_upper_bound()` replaces "zero false positives" with a one-sided upper bound. `analyze.py <exp> --endpoints` report. Verified against pilot (RRR path works on a combined CONTROL+FULL dataset). |
 | P1-21 | Realistic attacker architectures | **PARTIAL** | Taxonomy + `ADAPTER_CAPABILITIES` registry + fail-closed `validateManifest` (unimplemented architectures rejected, never silently skipped). Landed + wired: `dom-automation` (visible-inputs), `fill-everything` (omnivorous incl. decoys — non-LLM; deterministic loop, P1-AUDIT-2 Phase F), `humanized-pw` (humanized timing — non-LLM, Phase F). Still `implemented:false` (model-backed; blocked on LLM spend per R7-027): `vision-only`, `fireraid-aware`. Unit tests + Phase F joined ledger proofs. |
-| P1-22 | Opaque production carriers | **DONE** | `src/core/renderer.ts` strips `data-fr-*`, `fr-decoy` class, and visible `/c/<token>` text from **production**; lab keeps explicit markers (researchers can grep). 4 guard tests. |
+| P1-22 | Opaque production carriers | **DONE (narrowed claim)** | `src/core/renderer.ts` strips `data-fr-*`, `fr-decoy` class, and visible `/c/<token>` text from **production**; lab keeps explicit markers (researchers can grep). The claim is deliberately scoped to FIXED presentation signatures — the profile-bound `fr_` field name and `/c/` route prefix are session-specific and remain (P1-23 residual). 4 guard tests. |
 | P1-23 | Production semantic mechanism | **DECIDED (narrowed)** | Production thesis narrowed to decoy-field + decoy-route + interaction. S01–S08 semantic instruction templates remain LAB-ONLY (FR-R7-013); production renders no semantic-instruction surface. S09 stays a measurement probe, not a defense. Residual `fr_` field-name + `/c/` route prefix are profile/server-bound bindings (submit.ts/canary.ts), documented as accepted residual, not a to-do. 2 enforce tests. |
 | #8 | Full gate + status doc | **DONE** | All gates green (see below). This document updated to not overstate proven claims. |
 | #9 | Commit hygiene | open at time of writing — working tree held clean of survey artifacts; awaiting commit. |
@@ -225,9 +225,10 @@ from the final green run). The audit's key milestone — the ledger experiment
 
 - **PROVEN this round:** the host-neutral middleware seam correctly gates an
   ordinary upstream and the origin ledger is the ground truth; production
-  rendering carries no FireRaid-identifying signature and no semantic-instruction
-  surface; the endpoints/statistics analyzer no longer claims "zero false
-  positives".
+  rendering carries no FIXED greppable presentation signature and no
+  semantic-instruction surface (the profile-bound `fr_` field name and the
+  `/c/` route prefix remain as accepted residuals — see P1-23); the
+  endpoints/statistics analyzer no longer claims "zero false positives".
 - **PROVEN in the P1-AUDIT-2 phases (b960fad…46e7b45):** Phase A self-audit
   corrections (visible production decoy hidden, capture-mask session binding,
   fail-closed lab-assignment reads, fail-closed canary persistence); Phase B

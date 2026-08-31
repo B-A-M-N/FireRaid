@@ -8,8 +8,6 @@
  */
 import type {
   SessionStore,
-  SubmissionStore,
-  EvidenceStore,
   SubmissionFinalizer,
 } from "../core/storage.js";
 
@@ -45,10 +43,12 @@ export class D1SessionStore implements SessionStore {
     submitted: number | undefined;
     finalScore: number | null;
     finalDisposition: string | null;
+    /** P1-9: verified canary-route hit compacted onto the session row. */
+    causalRouteHit: number | null;
   } | null> {
     const row = await this.db
       .prepare(
-        `SELECT id, created_at, profile_version, profile_key_id, submitted, final_score, final_disposition FROM sessions WHERE id = ?`
+        `SELECT id, created_at, profile_version, profile_key_id, submitted, final_score, final_disposition, causal_route_hit FROM sessions WHERE id = ?`
       )
       .bind(sessionId)
       .first<{
@@ -59,6 +59,7 @@ export class D1SessionStore implements SessionStore {
         submitted: number;
         final_score: number | null;
         final_disposition: string | null;
+        causal_route_hit: number | null;
       }>();
     if (!row) return null;
     return {
@@ -69,6 +70,7 @@ export class D1SessionStore implements SessionStore {
       submitted: row.submitted,
       finalScore: row.final_score,
       finalDisposition: row.final_disposition,
+      causalRouteHit: row.causal_route_hit,
     };
   }
 
@@ -79,126 +81,28 @@ export class D1SessionStore implements SessionStore {
       .run();
   }
 
+  /**
+   * P1-9: compact causal-hit state. Set ONCE when a verified decoy-route
+   * hit lands (never cleared). Submit reads the flag from the session row
+   * it loads anyway instead of paying a per-submit canary_hits COUNT.
+   */
+  async markCausalRouteHit(sessionId: string): Promise<void> {
+    await this.db
+      .prepare(`UPDATE sessions SET causal_route_hit = 1 WHERE id = ?`)
+      .bind(sessionId)
+      .run();
+  }
+
   async touch(sessionId: string): Promise<void> {
     await this.db.prepare(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`).bind(Date.now(), sessionId).run();
   }
 }
 
-export class D1SubmissionStore implements SubmissionStore {
-  constructor(private db: D1Database) {}
-
-  async create(record: {
-    sessionId: string;
-    createdAt: number;
-    turnstileOk: boolean;
-    causalHits: number;
-    strongHits: number;
-    weakHits: number;
-    riskScore: number;
-    disposition: string;
-    policy: string;
-    reasons: string[];
-  }): Promise<number> {
-    const result = await this.db
-      .prepare(
-        `INSERT INTO submissions (session_id, created_at, turnstile_ok, causal_hits, strong_hits, weak_hits, risk_score, disposition, policy, reasons_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .bind(
-        record.sessionId,
-        record.createdAt,
-        record.turnstileOk ? 1 : 0,
-        record.causalHits,
-        record.strongHits,
-        record.weakHits,
-        record.riskScore,
-        record.disposition,
-        record.policy,
-        JSON.stringify(record.reasons)
-      )
-      .run();
-    return result.meta.last_row_id as number;
-  }
-
-  async getBySession(sessionId: string): Promise<{
-    id: number;
-    disposition: string;
-    score: number;
-    policy: string;
-    reasons: string[];
-  } | null> {
-    const row = await this.db
-      .prepare(`SELECT id, disposition, risk_score, policy, reasons_json FROM submissions WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`)
-      .bind(sessionId)
-      .first<{
-        id: number;
-        disposition: string;
-        risk_score: number;
-        policy: string;
-        reasons_json: string;
-      }>();
-    if (!row) return null;
-    return {
-      id: row.id,
-      disposition: row.disposition,
-      score: row.risk_score,
-      policy: row.policy,
-      reasons: JSON.parse(row.reasons_json || "[]"),
-    };
-  }
-}
-
-export class D1EvidenceStore implements EvidenceStore {
-  constructor(private db: D1Database) {}
-
-  async create(record: {
-    submissionId: number;
-    evidenceClass: string;
-    source: string;
-    weight: number;
-    verified: boolean;
-    metadata: Record<string, unknown>;
-  }): Promise<void> {
-    await this.db
-      .prepare(
-        `INSERT INTO submission_evidence (submission_id, evidence_class, source, weight, verified, metadata_json)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      )
-      .bind(record.submissionId, record.evidenceClass, record.source, record.weight, record.verified ? 1 : 0, JSON.stringify(record.metadata))
-      .run();
-  }
-
-  async getBySubmission(submissionId: number): Promise<
-    Array<{
-      evidenceClass: string;
-      source: string;
-      weight: number;
-      verified: boolean;
-      metadata: Record<string, unknown>;
-    }>
-  > {
-    const rows = await this.db
-      .prepare(
-        `SELECT evidence_class, source, weight, verified, metadata_json FROM submission_evidence WHERE submission_id = ? ORDER BY id`
-      )
-      .bind(submissionId)
-      .all<{
-        evidence_class: string;
-        source: string;
-        weight: number;
-        verified: number;
-        metadata_json: string;
-      }>();
-    return rows.results.map((r) => ({
-      evidenceClass: r.evidence_class,
-      source: r.source,
-      weight: r.weight,
-      verified: r.verified === 1,
-      metadata: JSON.parse(r.metadata_json || "{}"),
-    }));
-  }
-}
-
+// P1-AUDIT-2 (P1-27): the dead D1SubmissionStore / D1EvidenceStore classes
+// are REMOVED — zero callers, drifted from the finalizer semantics/provider
+// fields, and exactly how storage semantics diverge later. Submission +
+// evidence persistence lives ONLY in D1SubmissionFinalizer below (and the
+// admin/ingest read paths).
 /**
  * FR-R5-031: Transaction-level submission finalizer.
  *
@@ -253,10 +157,16 @@ export class D1SubmissionFinalizer implements SubmissionFinalizer {
       )
       .bind(sessionClaim.score, sessionClaim.disposition, sessionClaim.sessionId);
 
-    // Statement 2: insert submission with public_id
+    // P1-AUDIT-2 (P1-26): the loser of the session claim must never die on
+    // the UNIQUE(session_id) index — with a plain INSERT, the second batch
+    // of a concurrent pair throws a constraint error instead of reaching
+    // the claimed===false projection. OR IGNORE + the subselect-based
+    // evidence inserts make the whole batch idempotent: the loser's row is
+    // not written, its public_id matches nothing, and ZERO evidence rows
+    // attach to the winner's submission.
     const insertStmt = this.db
       .prepare(
-        `INSERT INTO submissions (public_id, session_id, created_at, turnstile_ok, causal_hits, strong_hits, weak_hits, risk_score, disposition, policy, verification_provider, reasons_json)
+        `INSERT OR IGNORE INTO submissions (public_id, session_id, created_at, turnstile_ok, causal_hits, strong_hits, weak_hits, risk_score, disposition, policy, verification_provider, reasons_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
@@ -274,20 +184,33 @@ export class D1SubmissionFinalizer implements SubmissionFinalizer {
         JSON.stringify(submission.reasons)
       );
 
-    // Statements 3: per-evidence inserts
-    const evidenceStmts = evidence.map((e) =>
-      this.db.prepare(
-        `INSERT INTO submission_evidence (submission_id, evidence_class, source, weight, verified, metadata_json)
-         VALUES ((SELECT id FROM submissions WHERE public_id = ? LIMIT 1), ?, ?, ?, ?, ?)`
-      ).bind(
-        submission.publicId,
-        e.evidenceClass,
-        e.source,
-        e.weight,
-        e.verified ? 1 : 0,
-        JSON.stringify(e.metadata)
-      )
-    );
+    // Statements 3: per-evidence inserts — the AUDIT-PRESCRIBED form
+    // (INSERT ... SELECT ... WHERE public_id = ?): a raced loser's
+    // public_id matches no row, the SELECT yields ZERO rows, and the
+    // insert writes nothing (a VALUES((SELECT …)) subselect would instead
+    // produce one row with a NULL submission_id and die on NOT NULL).
+    // The (submission, class, source, weight:verified) fingerprint +
+    // ON CONFLICT DO NOTHING makes an EXACT replay of the batch idempotent
+    // too (migration 0013) — the same evidence lands exactly once however
+    // often the finalize replays.
+    const evidenceStmts = evidence.map((e) => {
+      const fingerprint = `${e.weight}:${e.verified}`;
+      return this.db
+        .prepare(
+          `INSERT INTO submission_evidence (submission_id, evidence_class, source, weight, verified, weight_verified, metadata_json)
+           SELECT id, ?, ?, ?, ?, ?, ? FROM submissions WHERE public_id = ?
+           ON CONFLICT (submission_id, evidence_class, source, weight_verified) DO NOTHING`
+        )
+        .bind(
+          e.evidenceClass,
+          e.source,
+          e.weight,
+          e.verified ? 1 : 0,
+          fingerprint,
+          JSON.stringify(e.metadata),
+          submission.publicId
+        );
+    });
 
     const stmts = [claimStmt, insertStmt, ...evidenceStmts];
     const results = await this.db.batch(stmts);

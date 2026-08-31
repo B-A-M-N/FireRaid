@@ -17,6 +17,11 @@
  *   2. NULL id rows → fall back to current key (legacy rule)
  */
 import { SESSION_COOKIE, SESSION_TTL_MS } from "../types/profile.js";
+import { constantTimeTokenEqual, constantTimeEqualStr } from "./tokens.js";
+
+// P1-AUDIT-2 (P1-7): re-exported so existing bearer-auth/bind-token importers
+// keep working against the single shared implementation.
+export { constantTimeEqualStr };
 
 const enc = new TextEncoder();
 
@@ -112,28 +117,15 @@ export async function verifyCsrfToken(
   token: string
 ): Promise<boolean> {
   const expected = await deriveCsrfToken(secret, sessionId, purpose);
-  // Constant-time comparison (no early return on length mismatch)
-  const len = Math.max(token.length, expected.length);
-  let diff = 0;
-  for (let i = 0; i < len; i++) {
-    const a = i < token.length ? token.charCodeAt(i) : 0;
-    const b = i < expected.length ? expected.charCodeAt(i) : 0;
-    diff |= a ^ b;
-  }
-  diff |= (token.length ^ expected.length);
-  return diff === 0;
+  // P1-AUDIT-2 (P1-7): the ONE shared constant-time primitive.
+  return constantTimeTokenEqual(token, expected);
 }
 
 /**
  * Constant-time string comparison. Returns true if equal.
  * Exported for reuse by bearer-auth and bind-token checks.
  */
-export function constantTimeEqualStr(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
+
 
 /** Get the session ID from a request's cookie header. */
 export function getSessionId(request: Request): string | null {

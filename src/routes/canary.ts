@@ -55,12 +55,20 @@ export async function persistVerifiedHit(
   const expectedHash = await hashToken(expected);
   const observedHash = await hashToken(token);
   try {
-    await db.prepare(
-      `INSERT OR IGNORE INTO canary_hits (session_id, created_at, family, evidence_class, expected_hash, observed_hash, verified)
-       VALUES (?, ?, 'decoy-route', 'A', ?, ?, 1)`
-    )
-      .bind(sessionId, nowMs, expectedHash, observedHash)
-      .run();
+    // P1-9: the hit insert AND the compact session flag land in ONE batch —
+    // the flag can never disagree with the hit log, and submit reads the
+    // flag from the session row it loads anyway instead of COUNT-ing
+    // canary_hits per submission.
+    await db.batch([
+      db.prepare(
+        `INSERT INTO canary_hits (session_id, created_at, family, evidence_class, expected_hash, observed_hash, verified)
+         VALUES (?, ?, 'decoy-route', 'A', ?, ?, 1)
+         ON CONFLICT (session_id, family, expected_hash) DO NOTHING`
+      ).bind(sessionId, nowMs, expectedHash, observedHash),
+      db.prepare(
+        `UPDATE sessions SET causal_route_hit = 1 WHERE id = ?`
+      ).bind(sessionId),
+    ]);
     return true;
   } catch (err) {
     console.error("canary hit persistence failed (failing closed):", err);
@@ -151,8 +159,8 @@ export async function canary(req: Request, env: Env): Promise<Response> {
   // hit is the experiment's core observable: losing it while returning 204
   // (attacker success) silently corrupts the causal signal and the ledger-
   // proof join. persistVerifiedHit returns false only on a REAL storage
-  // failure (replays are idempotent via INSERT OR IGNORE), which must fail
-  // the request, never be swallowed.
+  // failure (replays are idempotent via targeted ON CONFLICT DO NOTHING),
+  // which must fail the request, never be swallowed.
   if (!(await persistVerifiedHit(env.DB, sessionId, token, expected, now()))) {
     return error("canary persistence failed", 500);
   }

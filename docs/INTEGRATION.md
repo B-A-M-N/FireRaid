@@ -80,11 +80,14 @@ The Cloudflare Worker (`src/` outside `src/core/`) is the first adapter. It adds
 
 ## Generic Renderer Contract
 
-`src/core/renderer-interface.ts` defines the host-agnostic `Renderer`
-interface (`DefenseArtifacts` → injected page). It is currently
-aspirational — the Cloudflare adapter uses `renderSignupPage` directly
-(FR-R6-093). New host adapters may target `Renderer`, but no runtime
-dispatches through it yet.
+The canonical artifact layer is `buildArtifactSet(profile, { labMode })`
+(src/core/artifacts.ts): ONE policy decision of WHAT to emit, consumed by
+presentation mappers — the Worker renderer (`renderSignupPage`) and the
+host renderer (`referenceInject`) — which choose HTML strings, never
+policy. An earlier `renderer-interface.ts` intermediate was deleted
+(P1-AUDIT-2 P2: it was never dispatched through and carried a stub
+`canary: null`; a fake "canonical" layer invites exactly the drift the
+real one prevents).
 
 ## FI Integration
 

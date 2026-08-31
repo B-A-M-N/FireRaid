@@ -50,16 +50,10 @@ export async function hashBindToken(token: string): Promise<string> {
     .join("");
 }
 
-/**
- * Constant-time string comparison. Returns true if equal.
- * Exported for unit-testing timing-safe behavior.
- */
-export function constantTimeEqualStr(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
+// P1-AUDIT-2 (P1-7): the single shared constant-time primitive (the prior
+// local copy early-returned on length mismatch, leaking token length).
+export { constantTimeEqualStr } from "../core/tokens.js";
+import { constantTimeEqualStr } from "../core/tokens.js";
 
 /**
  * Verify the Bearer secret against env.FIRERAID_LAB_API_SECRET.

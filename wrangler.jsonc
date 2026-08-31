@@ -27,6 +27,12 @@
     {
       "binding": "DB",
       "database_name": "fireraid",
+      // P1-32: placeholder — `npx wrangler d1 create fireraid` prints the
+      // real id; paste it here (README "Deployment" covers the steps). Local
+      // dev (`wrangler dev`) and every test gate ignore this field, so the
+      // placeholder is safe until first remote deploy; a remote deploy with
+      // the placeholder fails fast with an invalid-database-id error rather
+      // than silently targeting the wrong database.
       "database_id": "REPLACE_AFTER_CREATE"
     }
   ],

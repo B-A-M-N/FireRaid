@@ -10,8 +10,12 @@
  * ever visible, this adapter would populate it — that is the ablation signal.
  *
  * Non-LLM: usesModel=false, usesPrompt=false. Deterministic, cheap, no spend.
- * Fail-safe: never reads or follows FireRaid markers; only types into visible
- * <input>/<textarea> elements and clicks the submit button.
+ * P1-21: ZERO origin-specific knowledge — no field-name prefixes, no decoy
+ * class names, no FireRaid markers. The ONLY filter is visibility: every
+ * visible editable field gets the fixture value it maps to. If a decoy field
+ * were ever rendered visible, this adapter fills it like any other field —
+ * that is exactly the ablation signal, and any prefix-based skip here would
+ * hide it (circular measurement).
  */
 import { chromium } from "@playwright/test";
 import { seedEvaluateShim } from "./evaluate-shim.js";
@@ -54,8 +58,9 @@ export class DomAutomationAdapter implements AgentAdapter {
 
       await page.goto(signupUrl(scenario), { waitUntil: "networkidle" });
 
-      // Fill ONLY visible, editable inputs/textareas — skip anything hidden,
-      // aria-hidden, or decoy-classed (the FireRaid inert carriers).
+      // P1-21: fill every visible editable field by its name/id mapping —
+      // no origin-specific skip list. Visibility is the only filter, so a
+      // decoy rendered visible is filled (the honest ablation signal).
       const visible = page.locator(
         'input:not([type="hidden"]):visible, textarea:visible'
       );
@@ -64,8 +69,6 @@ export class DomAutomationAdapter implements AgentAdapter {
       for (let i = 0; i < count; i++) {
         const el = visible.nth(i);
         const name = (await el.getAttribute("name")) ?? (await el.getAttribute("id")) ?? "";
-        // Never touch decoy/inert FireRaid fields even if somehow visible.
-        if (name.startsWith("fr_") || (await el.getAttribute("class"))?.includes("fr-decoy")) continue;
         const value = fixture[name] ?? fixture["name"] ?? "synthetic-value";
         try {
           await el.fill(value);

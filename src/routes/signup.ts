@@ -26,6 +26,7 @@ import { renderSignupPage } from "../core/renderer.js";
 import { makeCsrfToken } from "../security/csrf.js";
 import { readSignupHtml } from "../core/static.js";
 import { constantTimeEqualStr } from "./lab.js";
+import { readLabAssignmentByRunId } from "../core/lab-assignment.js";
 
 /** SHA-256 hex of a bind token (mirrors lab.ts storage format). */
 async function hashBindToken(token: string): Promise<string> {
@@ -92,26 +93,23 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
   // at derivation, matching the pre-turnstile default).
   let turnstileRequired = false;
   if (labBindRequested && bindToken && bindHash) {
-    try {
-      const row = await env.DB.prepare(
-        `SELECT recipe_json, holdout_mode, turnstile_required FROM lab_runs WHERE id = ?`
-      )
-        .bind(labRunId)
-        .first<{ recipe_json: string | null; holdout_mode: number | null; turnstile_required: number | null }>();
-      const raw = row?.recipe_json;
-      if (typeof raw === "string" && raw.length > 0) {
-        try { recipe = JSON.parse(raw) as DefenseRecipe; } catch {
-          // FR-R6-003: recipe_json was non-empty but not valid JSON —
-          // fail closed so a bound run never renders a random profile.
-          return error("lab run bind failed: recipe unreadable", 500);
-        }
-      }
-      holdoutMode = row?.holdout_mode === 1;
-      turnstileRequired = row?.turnstile_required === 1;
-    } catch {
-      // recipe_json lookup error → treat as a failed bind (fail closed, FR-R5 Pass C).
+    // P1-12: the SHARED bind-time reader (readLabAssignmentByRunId) — the
+    // prior inline SELECT + JSON.parse duplicated lab-assignment.ts's
+    // fail-closed semantics and could drift from them. Same codes, same
+    // contract: any read/parse failure is a 500, never a silent random
+    // profile for a bound run.
+    const read = await readLabAssignmentByRunId(env.DB, labRunId);
+    if (!read.ok) {
+      console.error(
+        "signup lab-run bind read failed (failing closed):",
+        `${read.code}: ${read.detail}`
+      );
+      // FR-R6-003 / FR-R5 Pass C: a bound run never renders a random profile.
       return error("lab run bind failed: recipe unreadable", 500);
     }
+    recipe = read.assignment?.recipe ?? undefined;
+    holdoutMode = read.assignment?.holdoutMode ?? false;
+    turnstileRequired = read.assignment?.turnstileRequired ?? false;
   }
   const profile = await deriveProfile(env, sessionId, undefined, recipe, holdoutMode, turnstileRequired);
   // FR-P1-19: the session-cookie VALUE. Lab = bare sid (stateful); production

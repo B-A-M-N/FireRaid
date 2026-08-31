@@ -17,7 +17,7 @@ import { readAdminHtml } from "./core/static.js";
 import { looksLikeTestSiteKey, looksLikeTestSecret } from "./turnstile/verify.js";
 import { isLabMode, validateProfileVersionConfig } from "./env.js";
 import { validateProfileKeyRing } from "./core/session.js";
-import { runRetentionSweep } from "./cloudflare/retention.js";
+import { runRetentionSweep, RAW_TELEMETRY_RETENTION_DAYS } from "./cloudflare/retention.js";
 
 /**
  * Validate configuration at startup.
@@ -107,8 +107,16 @@ export default {
           1,
           Math.min(Number(env.FIRERAID_RETENTION_DAYS ?? "30") || 30, 365)
         );
+        // P1-10: raw keystroke-level telemetry expires on its own, shorter
+        // window — it is the most sensitive data the store holds and has no
+        // reader after the session TTL lapses.
+        const rawRetentionDays = Math.max(
+          1,
+          Math.min(Number(env.FIRERAID_RAW_TELEMETRY_RETENTION_DAYS ?? String(RAW_TELEMETRY_RETENTION_DAYS)) || RAW_TELEMETRY_RETENTION_DAYS, retentionDays)
+        );
         const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-        const sweep = await runRetentionSweep(env.DB, cutoff);
+        const rawCutoff = Date.now() - rawRetentionDays * 24 * 60 * 60 * 1000;
+        const sweep = await runRetentionSweep(env.DB, cutoff, { rawCutoff });
         // FR-P0-15: the lab-run lifecycle sweep (PENDING→EXPIRED,
         // stale-BOUND→ABANDONED) runs in the SAME cron — one scheduled
         // invocation owns all background DB maintenance, so lab-run state

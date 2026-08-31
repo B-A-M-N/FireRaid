@@ -68,6 +68,8 @@ export async function persistSession(
  */
 export interface LoadedSession extends SessionPayload {
   profileKeyId: string | null;
+  /** P1-9: verified canary-route hit compacted onto the session row. */
+  causalRouteHit?: number | null;
 }
 
 export async function loadSession(
@@ -85,6 +87,7 @@ export async function loadSession(
     finalScore: row.finalScore,
     finalDisposition: row.finalDisposition,
     profileKeyId: row.profileKeyId,
+    causalRouteHit: row.causalRouteHit,
   };
 }
 

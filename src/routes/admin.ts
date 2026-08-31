@@ -10,6 +10,9 @@
  */
 import { json, error, withSecurityHeaders } from "../security/headers.js";
 import { requireAdmin, createAdminToken, adminCookieHeader, verifyAdminSecret } from "../security/admin-auth.js";
+import { experimentMetrics } from "../analytics/run-metrics.js";
+import { readLabAssignment } from "../core/lab-assignment.js";
+import type { DefenseRecipe } from "../core/recipe-schema.js";
 import type { Env } from "../env.js";
 import { reconstructFromSessionId } from "../core/reconstruct.js";
 import { runRetentionSweep } from "../cloudflare/retention.js";
@@ -179,44 +182,42 @@ export async function adminSessionDetail(req: Request, env: Env, sessionId: stri
   const defense_families: string[] = [];
   let reconstructionError: string | undefined;
 
-  // Fetch recipe_json from lab_runs (BOUND or COMPLETE only)
-  let recipeJson: string | null = null;
+  // P1-AUDIT-2 (P1-29): the SHARED lab-assignment resolver — the prior
+  // hand-rolled read selected recipe_json + turnstile_required but NOT
+  // holdout_mode, so a holdout-bound run reconstructed a DIFFERENT semantic
+  // treatment for display, and a D1 read failure silently fell back to the
+  // random profile. readLabAssignment carries all three fields and fails
+  // closed; the error is surfaced to the admin, never silently randomized.
+  let labRecipe: DefenseRecipe | undefined;
+  let holdoutMode: boolean | undefined;
   // FR-P0-17: verification condition is part of the hashed variant id.
-  let adminTurnstileRequired = false;
-  try {
-    const r = await env.DB.prepare(
-      `SELECT recipe_json, turnstile_required FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
-    )
-      .bind(sessionId)
-      .first<{ recipe_json: string | null; turnstile_required: number | null }>();
-    recipeJson = r?.recipe_json ?? null;
-    adminTurnstileRequired = r?.turnstile_required === 1;
-  } catch {
-    // lab_runs table may not exist; recipe stays null — reconstruction still works
+  let adminTurnstileRequired: boolean | undefined;
+  const assignmentRead = await readLabAssignment(env.DB, sessionId);
+  if (!assignmentRead.ok) {
+    console.error(
+      "admin session detail: lab assignment unreadable (failing closed):",
+      `${assignmentRead.code}: ${assignmentRead.detail}`
+    );
+    reconstructionError = `${assignmentRead.code}: ${assignmentRead.detail}`;
+  } else if (assignmentRead.assignment) {
+    labRecipe = assignmentRead.assignment.recipe ?? undefined;
+    holdoutMode = assignmentRead.assignment.holdoutMode;
+    adminTurnstileRequired = assignmentRead.assignment.turnstileRequired;
   }
 
-  const recipe = recipeJson
-    ? (() => {
-        try {
-          return JSON.parse(recipeJson);
-        } catch {
-          // Unparseable recipe — reconstruction proceeds without it;
-          // the caller will see reconstructionError below.
-          return null;
-        }
-      })()
-    : undefined;
+  if (reconstructionError === undefined) {
+    const result = await reconstructFromSessionId(env, sessionId, {
+      profileVersion: (session as { profile_version: number }).profile_version,
+      recipe: labRecipe,
+      holdoutMode,
+      turnstileRequired: adminTurnstileRequired,
+    });
 
-  const result = await reconstructFromSessionId(env, sessionId, {
-    profileVersion: (session as { profile_version: number }).profile_version,
-    recipe: recipe ?? undefined,
-    turnstileRequired: adminTurnstileRequired,
-  });
-
-  if (result.ok) {
-    defense_families.push(...result.profile.families);
-  } else {
-    reconstructionError = `${result.code}: ${result.detail}`;
+    if (result.ok) {
+      defense_families.push(...result.profile.families);
+    } else {
+      reconstructionError = `${result.code}: ${result.detail}`;
+    }
   }
 
   return json({
@@ -255,32 +256,20 @@ export async function adminExperimentDetail(req: Request, env: Env, experimentId
       `SELECT * FROM harness_runs WHERE experiment_id = ? ORDER BY created_at`
     )
     .bind(experimentId)
-    .all<{
-      id: string;
-      experiment_id: string;
-      error_code?: string;
-      outcome?: string;
-      disposition?: string;
-      canary_triggered?: number;
-    }>();
+    .all();
 
-  // Compute aggregate metrics
-  const totalRuns = runs.results.length;
-  const validRuns = runs.results.filter((r) => !r.error_code);
-  const submitted = validRuns.filter((r) => r.outcome === "submitted");
-  const quarantined = validRuns.filter((r) => r.disposition === "QUARANTINE");
-  const canaryTriggered = validRuns.filter((r) => r.canary_triggered);
+  // P1-AUDIT-2 (P1-28): metrics come from the ONE canonical module — the
+  // same validity / submission-truth / canary-column definitions the
+  // official analyzer implements (analyze.py cites this file). The prior
+  // ad-hoc block computed "valid" as `no error_code`, submission from the
+  // agent's outcome string, and canary signals from the retired
+  // `canary_triggered` column — admin numbers that disagreed with the
+  // analysis numbers.
+  const metrics = experimentMetrics(runs.results as Parameters<typeof experimentMetrics>[0]);
 
   return json({
     experiment,
-    metrics: {
-      totalRuns,
-      validRuns: validRuns.length,
-      submissionRate: validRuns.length > 0 ? submitted.length / validRuns.length : 0,
-      quarantineRate: validRuns.length > 0 ? quarantined.length / validRuns.length : 0,
-      canaryTriggerRate: validRuns.length > 0 ? canaryTriggered.length / validRuns.length : 0,
-      errorRate: totalRuns > 0 ? (totalRuns - validRuns.length) / totalRuns : 0,
-    },
+    metrics,
     runs: runs.results,
   });
 }
@@ -346,6 +335,8 @@ export async function adminExport(req: Request, env: Env): Promise<Response> {
 // POST /api/admin/cleanup — retention/cleanup for old records (FR-R3-080)
 // Deletes records older than the retention period
 const DEFAULT_RETENTION_DAYS = 30;
+// P1-10: raw keystroke telemetry window (matches the cron default).
+const DEFAULT_RAW_RETENTION_DAYS = 7;
 
 export async function adminCleanup(req: Request, env: Env): Promise<Response> {
   if (!(await requireAdmin(req, env))) return error("unauthorized", 401);
@@ -353,19 +344,26 @@ export async function adminCleanup(req: Request, env: Env): Promise<Response> {
 
   const url = new URL(req.url);
   const retentionDays = Math.max(1, Math.min(Number(url.searchParams.get("days")) || DEFAULT_RETENTION_DAYS, 365));
+  // P1-10: raw telemetry obeys its own (shorter) window, mirroring the cron
+  // path; clamp to the derived-records window so raw payloads never outlive
+  // dispositions.
+  const rawRetentionDays = Math.max(1, Math.min(Number(url.searchParams.get("rawDays")) || DEFAULT_RAW_RETENTION_DAYS, retentionDays));
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const rawCutoff = Date.now() - rawRetentionDays * 24 * 60 * 60 * 1000;
 
   // P1-AUDIT-2 (ops): delegate to the SHARED sweep module (cloudflare/
   // retention.ts) — the cron path runs it batched; the admin one-shot keeps
   // its unbounded (complete) semantics. The previous duplicate statement
   // list here had already drifted from the cron sweep (no session_metrics
   // orphan cleanup, no lab-run expiry).
-  const sweep = await runRetentionSweep(env.DB, cutoff, { unbounded: true });
+  const sweep = await runRetentionSweep(env.DB, cutoff, { unbounded: true, rawCutoff });
 
   return json({
     ok: true,
     retentionDays,
+    rawRetentionDays,
     cutoff,
+    rawCutoff,
     deleted: {
       telemetryBatches: sweep.telemetryBatches,
       canaryHits: sweep.canaryHits,
