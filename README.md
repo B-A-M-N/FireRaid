@@ -1,5 +1,15 @@
 # FireRaid
 
+> [!WARNING]
+> **Experimental — under active proving.** FireRaid is a research prototype in the
+> middle of a multi-phase audit-remediation and verification campaign (Phases A–F).
+> Its defense properties are being proven, not assumed: several audit findings have
+> been fixed and regression-pinned, but the project has **not** been validated in a
+> production deployment, its efficacy claims are established only inside the lab
+> ledger experiment described below, and nothing here should be relied on to stop
+> real-world abuse. Assume any release may change behavior, schemas, and claims
+> without notice.
+
 FireRaid is an experimental agent-admission defense lab for studying autonomous browser registration.
 
 It generates deterministic per-session defense profiles, records causal and behavioral signals, and evaluates those defenses against multiple browser-agent architectures.
