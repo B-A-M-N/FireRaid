@@ -116,7 +116,10 @@ describe("Phase C: real agent → middleware → origin ledger", () => {
     expect(cookie).toContain("__Host-fr_sid=");
 
     // Derive the SAME profile the facade issued (same secret/version/sid).
-    const sid = cookie.split(";")[0].split("=")[1].split(".")[0];
+    // Cookie value is the fr1 envelope — decode the payload body for the sid.
+    const envVal = cookie.split(";")[0].split("=")[1];
+    const payload = JSON.parse(atob(envVal!.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))) as { sid: string };
+    const sid = payload.sid;
     const { deriveProfilePure } = await import("../../src/core/profile.js");
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },

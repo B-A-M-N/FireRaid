@@ -9,27 +9,47 @@ import type {
   HostEnforcementAdapter,
   HostCanaryStore,
 } from "./interface.js";
+import {
+  signSessionEnvelope,
+  verifySessionEnvelope,
+  type SessionEnvelope,
+} from "../core/session-envelope.js";
+import type { ProfileKeyRing } from "../core/session.js";
 
 const SESSION_COOKIE = "__Host-fr_sid";
 const SESSION_TTL_S = 30 * 60;
 
 /**
- * Reference session adapter — opaque id + SIGNED cookie, host owns storage.
+ * Reference session adapter — opaque id + SIGNED SESSION ENVELOPE cookie
+ * (P1-AUDIT-2 Phase D, audit item 9: FR-P1-19 parity).
  *
- * P1-AUDIT-2: the bare sid cookie was forgeable — an attacker could rewrite
- * their `__Host-fr_sid` to any target session id, and the POST path trusted
- * it, so a victim's profile (derived from the victim's sid) would be scored
- * against the attacker's submission, and a decoy hit attributed to the wrong
- * session. The cookie value is now a signed envelope `sid.marker` where
- * marker = HMAC-SHA-256(secret, "fr-sid:" + sid). readSessionId REJECTS any
- * cookie whose signature does not verify, so a tampered/forged sid is treated
- * as "no session" (admission denied, never forwarded).
+ * History: the bare sid cookie was forgeable (an attacker could rewrite
+ * `__Host-fr_sid` to any target session and have the victim's profile score
+ * the attacker's submission). The first fix wrapped the sid in an HMAC tag
+ * (`sid.marker`) — tamper-proof but context-free: no issued-at (no TTL) and
+ * no profile version (a mid-session key bump silently re-derived a
+ * DIFFERENT profile for an in-flight session — the exact rotation hazard
+ * FR-P1-19 eliminated on the Worker).
+ *
+ * Now the cookie value IS the core production envelope:
+ *
+ *     fr1.<base64url({v,sid,iat,pv,kid} JSON)>.<base64url(HMAC-SHA256)>
+ *
+ * issued and verified through core/session-envelope.ts — the SAME functions
+ * the Worker path uses — so both planes share one format, one verification
+ * (signature, TTL expiry, future-dating, unknown-kid fail-closed) and one
+ * rotation story (kid selects the signing key from the profile key ring).
+ * Hosts that persist their own session state can consume the verified
+ * payload via verifiedPayload() (e.g. to derive with the envelope's pv/kid
+ * instead of the deployment default, mirroring ensureSessionRow).
  */
 export class ReferenceSessionAdapter implements HostSessionAdapter {
-  private readonly secret: string;
+  private readonly ring: ProfileKeyRing;
+  private readonly version: number;
 
-  constructor(secret: string) {
-    this.secret = secret;
+  constructor(secret: string, opts?: { version?: number; keyId?: string }) {
+    this.ring = { current: { id: opts?.keyId ?? "default", secret } };
+    this.version = opts?.version ?? 1;
   }
 
   async createSession(): Promise<string> {
@@ -38,45 +58,32 @@ export class ReferenceSessionAdapter implements HostSessionAdapter {
       .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
-  /** Signed cookie value: bare sid, then an HMAC tag over it. */
-  private async sign(sid: string): Promise<string> {
-    const key = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode(this.secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-    const sig = await crypto.subtle.sign(
-      "HMAC",
-      key,
-      new TextEncoder().encode(`fr-sid:${sid}`)
-    );
-    const tag = Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("");
-    return `${sid}.${tag}`;
+  async sessionCookie(sessionId: string): Promise<string> {
+    const envelope = await signSessionEnvelope(this.ring, sessionId, Date.now(), this.version);
+    return `${SESSION_COOKIE}=${envelope}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_S}`;
   }
 
-  async sessionCookie(sessionId: string): Promise<string> {
-    const signed = await this.sign(sessionId);
-    return `${SESSION_COOKIE}=${signed}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_S}`;
+  /** Verify a raw cookie value; null when malformed/tampered/expired. */
+  async verifiedPayload(raw: string): Promise<SessionEnvelope | null> {
+    const verdict = await verifySessionEnvelope(this.ring, raw, Date.now());
+    return verdict.ok ? verdict.payload : null;
   }
 
   async readSessionId(req: Request): Promise<string | null> {
+    const raw = this.rawCookieValue(req);
+    if (!raw) return null;
+    const payload = await this.verifiedPayload(raw);
+    return payload ? payload.sid : null;
+  }
+
+  private rawCookieValue(req: Request): string | null {
     const cookies = req.headers.get("cookie") ?? "";
-    let raw = "";
     for (const part of cookies.split(";")) {
       const i = part.indexOf("=");
       if (i < 0) continue;
-      if (part.slice(0, i).trim() === SESSION_COOKIE) raw = part.slice(i + 1).trim();
+      if (part.slice(0, i).trim() === SESSION_COOKIE) return part.slice(i + 1).trim();
     }
-    if (!raw) return null;
-    // Split and verify the HMAC tag; reject tampered/forged cookies.
-    const dot = raw.lastIndexOf(".");
-    if (dot <= 0) return null;
-    const sid = raw.slice(0, dot);
-    const provided = raw.slice(dot + 1);
-    if (provided !== (await this.sign(sid)).slice(sid.length + 1)) return null;
-    return sid;
+    return null;
   }
 }
 

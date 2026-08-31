@@ -114,8 +114,12 @@ describe("host canary route (audit item 6)", () => {
 
   it("tampered session cookie → deny NO_SESSION", async () => {
     const d = deps();
+    // A structurally valid envelope with a forged body + forged signature:
+    // verification must reject it (BAD_SIGNATURE → null → NO_SESSION).
     const res = await admit(
-      new Request("http://mw/c/sometoken", { headers: { cookie: "__Host-fr_sid=forged.0000" } }),
+      new Request("http://mw/c/sometoken", {
+        headers: { cookie: "__Host-fr_sid=fr1.Zm9yZ2Vk.Zm9yZ2Vk" },
+      }),
       d,
       async () => HTML
     );
@@ -192,8 +196,12 @@ describe("host canary route (audit item 6)", () => {
   });
 });
 
-/** Extract the bare sid from the reference adapter's signed cookie value. */
+/** Extract the bare sid from the reference adapter's ENVELOPE cookie value. */
 function decodeSessionId(setCookie: string): string {
   const v = setCookie.split(";")[0].split("=")[1] ?? "";
-  return v.split(".")[0];
+  // fr1.<base64url(payload JSON)>.<sig> — decode the body, read sid.
+  const body = v.split(".")[1] ?? "";
+  const b64 = body.replace(/-/g, "+").replace(/_/g, "/");
+  const json = JSON.parse(atob(b64)) as { sid: string };
+  return json.sid;
 }
