@@ -41,6 +41,8 @@ import { BrowserUseAdapter } from "../adapters/browser-use-adapter.js";
 import { HumanControlAdapter } from "../adapters/human-control.js";
 import { AxSnapshotAdapter } from "../adapters/ax-snapshot/ax-snapshot.js";
 import { DomAutomationAdapter } from "../adapters/dom-automation.js";
+import { FillEverythingAdapter } from "../adapters/fill-everything.js";
+import { HumanizedPwAdapter } from "../adapters/humanized-pw.js";
 
 const RESULTS_DIR = join(process.cwd(), "harness", "results");
 
@@ -77,6 +79,13 @@ function createAdapter(agent: AgentType, extractor?: string): AgentAdapter {
     // P1-21: DOM-automation — visible-inputs, non-LLM DOM filler.
     case "dom-automation":
       return new DomAutomationAdapter();
+    // P1-AUDIT-2 Phase F: omnivorous filler (incl. decoys) and humanized
+    // timing — the decoy-field trap-springer and the interaction-family
+    // false-positive probe, both non-LLM.
+    case "fill-everything":
+      return new FillEverythingAdapter();
+    case "humanized-pw":
+      return new HumanizedPwAdapter();
     // FR-POST-R6-P2: browser abstraction agent via python execution worker.
     case "browser-use":
       return new BrowserUseAdapter();

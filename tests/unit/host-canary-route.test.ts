@@ -196,6 +196,92 @@ describe("host canary route (audit item 6)", () => {
   });
 });
 
+describe("urlencoded form-post carrier (P1-AUDIT-2 Phase F)", () => {
+  it("browser-style x-www-form-urlencoded POST parses, verifies CSRF, evaluates", async () => {
+    const d = deps();
+    const cookie = await issueSessionCookie(d);
+    const sid = decodeSessionId(cookie);
+    const profile = await deriveProfilePure(
+      { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
+      ABLATION_RECIPES.CONTROL
+    );
+    const csrf = await makeCsrf(SECRET, sid);
+    // Exactly what a no-JS browser posts: the form's field set incl. the
+    // hidden csrf, urlencoded, content-type x-www-form-urlencoded.
+    const formBody = new URLSearchParams({
+      csrf,
+      name: "Q",
+      email: "formcarrier@ledger-probe.invalid",
+      ...(profile.decoyField ? { [profile.decoyField.fieldName]: "" } : {}),
+    }).toString();
+    const res = await admit(
+      new Request("http://mw/signup", {
+        method: "POST",
+        headers: {
+          cookie,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: formBody,
+      }),
+      d,
+      async () => HTML
+    );
+    // CONTROL recipe: no evidence → ACCEPT → forward (kind "admit").
+    expect(res.kind).toBe("admit");
+  });
+
+  it("urlencoded with a WRONG csrf → deny CSRF_FAILED", async () => {
+    const d = deps();
+    const cookie = await issueSessionCookie(d);
+    const formBody = new URLSearchParams({
+      csrf: "forged-token",
+      name: "Q",
+      email: "x@ledger-probe.invalid",
+    }).toString();
+    const res = await admit(
+      new Request("http://mw/signup", {
+        method: "POST",
+        headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+        body: formBody,
+      }),
+      d,
+      async () => HTML
+    );
+    expect(res.kind).toBe("deny");
+    expect(res.disposition).toBe("CSRF_FAILED");
+  });
+
+  it("urlencoded decoy fill → evidence → not ACCEPT (denied, never forwarded)", async () => {
+    const d = deps();
+    const cookie = await issueSessionCookie(d);
+    const sid = decodeSessionId(cookie);
+    const profile = await deriveProfilePure(
+      { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
+      ABLATION_RECIPES.FULL
+    );
+    const csrf = await makeCsrf(SECRET, sid);
+    // Omnivore carrier: decoy field populated (whatever value — the fill
+    // alone is Class B/C evidence; with scoring families present the
+    // decision must not be ACCEPT).
+    const formBody = new URLSearchParams({
+      csrf,
+      name: "Q",
+      email: "fill@ledger-probe.invalid",
+      [profile.decoyField!.fieldName]: "some-filled-value",
+    }).toString();
+    const res = await admit(
+      new Request("http://mw/signup", {
+        method: "POST",
+        headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+        body: formBody,
+      }),
+      d,
+      async () => HTML
+    );
+    expect(res.kind).toBe("deny");
+  });
+});
+
 /** Extract the bare sid from the reference adapter's ENVELOPE cookie value. */
 function decodeSessionId(setCookie: string): string {
   const v = setCookie.split(";")[0].split("=")[1] ?? "";

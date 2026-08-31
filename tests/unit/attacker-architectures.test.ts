@@ -25,9 +25,14 @@ describe("P1-21 attacker architecture taxonomy", () => {
     // P1-21 new architectures.
     expect(caps["dom-automation"].implemented).toBe(true);
     expect(caps["dom-automation"].usesModel).toBe(false); // non-LLM
+    // P1-AUDIT-2 Phase F: the two non-LLM attacker architectures landed —
+    // fill-everything (omnivorous, decoy-field trap-springer) and
+    // humanized-pw (humanized timing, interaction false-positive probe).
+    expect(caps["fill-everything"].implemented).toBe(true);
+    expect(caps["fill-everything"].usesModel).toBe(false); // deterministic loop, not LLM
+    expect(caps["humanized-pw"].implemented).toBe(true);
+    expect(caps["humanized-pw"].usesModel).toBe(false);
     // Not-yet-landed model-backed ones are declared but rejected (fail-closed).
-    expect(caps["fill-everything"].implemented).toBe(false);
-    expect(caps["humanized-pw"].implemented).toBe(false);
     expect(caps["vision-only"].implemented).toBe(false);
     expect(caps["fireraid-aware"].implemented).toBe(false);
   });

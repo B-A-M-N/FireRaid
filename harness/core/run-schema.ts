@@ -492,14 +492,20 @@ export const ADAPTER_CAPABILITIES: Record<AgentType, AdapterCapabilities> = {
   // the runner's matrix-discipline checks (implemented? extractor-compatible?)
   // know about them; `implemented: false` rows are rejected by validateManifest
   // until their adapter lands (fail-closed, never silently skipped).
-  //   dom-automation  — visible-inputs, NON-LLM DOM filler (landed below).
-  //   fill-everything — brute-forces every field incl. decoys (model/LLM).
-  //   humanized-pw    — humanized Playwright timing (non-LLM).
+  //   dom-automation  — visible-inputs, NON-LLM DOM filler.
+  //   fill-everything — omnivorous filler incl. decoys (P1-AUDIT-2 Phase F:
+  //                     causal mechanism is deterministic — a fill loop —
+  //                     so the row is NON-LLM, deviating from the P1-21
+  //                     "model/LLM" note; an LLM doing this is a cost
+  //                     defect, not an architecture).
+  //   humanized-pw    — humanized Playwright timing, NON-LLM (fixed
+  //                     human-plausibility policy; the interaction family's
+  //                     false-positive probe).
   //   vision-only     — screenshot + vision-LLM (model/LLM, large spend).
   //   fireraid-aware  — knows the defense, filters it (model/LLM).
   "dom-automation":  { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "0.1.0" },
-  "fill-everything": { implemented: false, usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.0.0" },
-  "humanized-pw":    { implemented: false, usesModel: false, usesPrompt: false, supportedExtractors: [], version: "0.0.0" },
+  "fill-everything": { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "1.0.0" },
+  "humanized-pw":    { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "1.0.0" },
   "vision-only":     { implemented: false, usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.0.0" },
   "fireraid-aware":  { implemented: false, usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.0.0" },
 };

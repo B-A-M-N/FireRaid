@@ -87,6 +87,18 @@ export async function startOriginLedgerRuntime(opts: {
   // Fetch the upstream's signup HTML once — the facade injects into it.
   const upstreamHtml = await (await fetch(`http://localhost:${UPSTREAM_PORT}/signup`)).text();
 
+  // P1-AUDIT-2 Phase F: the facade serves the REAL FireRaid telemetry
+  // client (public/signup.js). The upstream serves a stub at the same path
+  // ("ordinary upstream: no fireraid client script") — but then NO browser
+  // session on the host plane ever produces telemetry, and the interaction
+  // ablation cannot fire there at all. The client is part of FireRaid's
+  // injected contract (like the artifacts), not the upstream's; the Worker
+  // ships it as a static asset and the facade mirrors that. With it, a
+  // browser on the host plane intercepts its own submit and POSTs the SAME
+  // JSON contract the Worker path uses ({csrf, form, eventBatch}).
+  const { readFileSync } = await import("node:fs");
+  const signupJs = readFileSync(new URL("../../public/signup.js", import.meta.url)).toString();
+
   // 2. Middleware deps. The recipe is PER-TRIAL — set by setTrialRecipe().
   const session = new ReferenceSessionAdapter(opts.secret);
   let trialRecipe: DefenseRecipe | undefined;
@@ -126,6 +138,13 @@ export async function startOriginLedgerRuntime(opts: {
 
   const facade: Server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost:${FACADE_PORT}`);
+    // P1-AUDIT-2 Phase F: static telemetry client, mirrored from the
+    // Worker's asset serving (the injected page's <script src="/signup.js">).
+    if (req.method === "GET" && url.pathname === "/signup.js") {
+      res.writeHead(200, { "content-type": "application/javascript" });
+      res.end(signupJs);
+      return;
+    }
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
     const body = Buffer.concat(chunks);
@@ -133,6 +152,9 @@ export async function startOriginLedgerRuntime(opts: {
       method: req.method,
       headers: {
         cookie: req.headers.cookie ?? "",
+        // Pass the caller's content-type VERBATIM — the middleware
+        // distinguishes the urlencoded (raw form) vs JSON (client-script)
+        // submit carriers by it.
         "content-type": req.headers["content-type"] ?? "application/json",
       },
       body: req.method === "GET" ? undefined : body,

@@ -140,11 +140,31 @@ export async function admit(
     const sessionId = await deps.session.readSessionId(req);
     if (!sessionId) return { kind: "deny", disposition: "NO_SESSION" };
 
+    // P1-AUDIT-2 Phase F: a host plane in front of an ORDINARY page receives
+    // browser form posts — application/x-www-form-urlencoded, not the
+    // Worker-shaped JSON {csrf, form, eventBatch} (the Worker path is
+    // JSON-only because its client script intercepts submit; an ordinary
+    // page has no such script). Both carriers parse into the SAME internal
+    // shape; the urlencoded csrf hidden field folds into body.csrf.
+    const contentType = (req.headers.get("content-type") ?? "").split(";")[0].trim();
     let body: { csrf?: string; form?: Record<string, string>; eventBatch?: unknown };
-    try {
-      body = await req.json();
-    } catch {
-      return { kind: "deny", disposition: "BAD_JSON" };
+    if (contentType === "application/x-www-form-urlencoded") {
+      let text: string;
+      try {
+        text = await req.text();
+      } catch {
+        return { kind: "deny", disposition: "BAD_FORM" };
+      }
+      const entries: Record<string, string> = {};
+      for (const [k, v] of new URLSearchParams(text)) entries[k] = v;
+      const { csrf, ...form } = entries;
+      body = { csrf, form };
+    } else {
+      try {
+        body = await req.json();
+      } catch {
+        return { kind: "deny", disposition: "BAD_JSON" };
+      }
     }
     const form = (body.form ?? {}) as Record<string, string>;
 
@@ -236,6 +256,10 @@ export async function admit(
       }
 
       // Admission allowed: strip FireRaid fields and forward to upstream.
+      // A urlencoded post carries the submit button's name/value too — the
+      // strip pass only removes FireRaid fields, so non-string values can
+      // never appear here (URLSearchParams yields strings), but the forward
+      // payload must stay Record<string,string>-shaped.
       const cleanForm = stripFireRaidFields(form, profile);
       const cookies = req.headers.get("cookie") ?? "";
       const upstreamCreated = await deps.enforcement.allow(
