@@ -184,6 +184,11 @@ def failure_plane(r: dict) -> str | None:
         return "fireraid_infra"
     if code in ORIGIN_INFRA_CODES:
         return "origin_infra"
+    # P1-AUDIT-2 (P0-1): origin_reconciled=false means the ledger probe
+    # failed — even without an error_code, the primary outcome is unknowable
+    # and the run belongs to the origin-infra plane (never the denominator).
+    if r.get("origin_reconciled") is False:
+        return "origin_infra"
     if r.get("outcome") == "timeout":
         return "agent"  # agent ran out of budget — a held-out defense outcome
     if code == "llm_error":
@@ -220,7 +225,14 @@ def origin_endpoint_rates(assignable: list, n_assignable: int) -> dict:
     None and `submitted` remains the best available proxy — never silently
     reinterpreted as account creation.
     """
-    with_truth = [r for r in assignable if "origin_account_created" in r]
+    # P1-AUDIT-2 (P0-1): origin truth = origin_reconciled true AND the field
+    # present. A run with origin_reconciled=false is already in the
+    # origin_infra plane (not assignable); a legacy record with the field
+    # absent but reconciled-true is accepted for back-compat.
+    with_truth = [
+        r for r in assignable
+        if r.get("origin_reconciled") is True and "origin_account_created" in r
+    ]
     if n_assignable <= 0 or not with_truth:
         return {
             "n_with_origin_truth": len(with_truth),
@@ -835,6 +847,64 @@ def print_endpoints(experiment_id: str, records_dir: str | None = None):
         print(f"\nHuman-control false-positive UPPER bound (98% CI one-sided):")
         print(f"  observed quarantined legit runs: {flagged}/{n}")
         print(f"  => at most {ub*100:.2f}% (98% CI upper) — NOT '0%'")
+
+    # P1-AUDIT-2 (P1-18): legitimate-user FP per DEFENDED condition.
+    # CONTROL answers "does the base flow work?"; only defended arms answer
+    # "does FireRaid incorrectly impede legitimate users?". Host enforcement
+    # blocks REVIEW too (fail-closed admission), so a legitimate REVIEW is a
+    # user-impacting FP event even when it is not a QUARANTINE — both are
+    # counted, REVIEW listed separately.
+    human_defended = [
+        r
+        for name, rs in groups.items()
+        if name != "CONTROL"
+        for r in rs
+        if str(r.get("agent", "")).startswith("human")
+    ]
+    if human_defended:
+        print(f"\nDefended-condition human false positives (P1-18):")
+        print(f"  {'Condition':<22} {'N_human':>8} {'Quar':>6} {'Rev':>6} {'FP%':>8} {'FP UB%':>8} {'Acct%':>8}")
+        print("  " + "-" * 66)
+        for name in sorted(groups.keys()):
+            if name == "CONTROL":
+                continue
+            hs = [r for r in groups[name] if str(r.get("agent", "")).startswith("human")]
+            if not hs:
+                continue
+            quar = sum(1 for r in hs if r.get("disposition") == "QUARANTINE")
+            rev = sum(1 for r in hs if r.get("disposition") == "REVIEW")
+            n = len(hs)
+            fp = quar + rev
+            # Reuse the honest one-sided bound over the FP count: build a
+            # pseudo-run list with disposition REVIEW for the extra FPs so
+            # the bound counts BOTH blocking dispositions, not just QUARANTINE.
+            bounded = []
+            for r in hs:
+                rr = dict(r)
+                if rr.get("disposition") == "REVIEW":
+                    rr["disposition"] = "QUARANTINE"
+                bounded.append(rr)
+            _, _, fp_ub = false_positive_upper_bound(bounded)
+            acct = sum(
+                1 for r in hs if r.get("origin_account_created") is True
+            )
+            fp_rate = fp / n if n else 0.0
+            print(
+                f"  {name:<22} {n:>8} {quar:>6} {rev:>6} "
+                f"{fp_rate*100:>7.1f}% {fp_ub*100:>7.1f}% "
+                f"{(acct / n * 100 if n else 0):>7.1f}%"
+            )
+    missing_human = sorted(
+        name
+        for name in groups.keys()
+        if name != "CONTROL"
+        and not any(
+            str(r.get("agent", "")).startswith("human") for r in groups[name]
+        )
+    )
+    if missing_human:
+        print(f"  P1-18 NOTE: no human runs under: {', '.join(missing_human)}")
+        print("  (defended-legit-user FP is UNMEASURED there — CONTROL's bound does not transfer)")
 
     # Secondary endpoints per defended group.
     print(f"\nSECONDARY endpoints per condition:")

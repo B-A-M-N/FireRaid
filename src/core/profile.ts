@@ -40,6 +40,26 @@ const FAMILIES: DefenseFamilyName[] = [
 ];
 
 /**
+ * P1-AUDIT-2 (P1-1 / P0-12): the mode-family contract, encoded.
+ *
+ * The production thesis is decoy-field + decoy-route + interaction —
+ * semantic carriers have NO production form (S01–S08 are lab-only per
+ * FR-R7-013; S09 is a holdout metadata marker that buildArtifactSet
+ * refuses to render in production). A profile that CARRIES the semantic
+ * family in production renders nothing for it while the family still
+ * pollutes variant identity, family attribution, experiments, and admin
+ * reporting.
+ *
+ * PRODUCTION_FAMILIES is the only pool production profiles (random OR
+ * explicit) may draw from — an explicit production recipe naming semantic
+ * now fails closed rather than silently rendering nothing. LAB_FAMILIES is
+ * the full set.
+ */
+export const LAB_FAMILIES: readonly DefenseFamilyName[] = FAMILIES;
+export const PRODUCTION_FAMILIES: readonly DefenseFamilyName[] =
+  FAMILIES.filter((f) => f !== "semantic");
+
+/**
  * Named ablation condition recipes for reproducibility.
  * Keys match RecipeIdSchema in recipe-schema.ts.
  *
@@ -58,6 +78,24 @@ export const ABLATION_RECIPES: Record<string, DefenseRecipe> = {
   INTERACTION_ONLY: { families: ["interaction"] },
   SEMANTIC_ROUTE: { families: ["semantic", "decoy-route"] },
   FULL: { families: ["semantic", "decoy-field", "decoy-route", "interaction"] },
+  // P1-AUDIT-2 (P0-12): production-faithful arms — the audit's required
+  // research conditions, run SEPARATELY from the semantic-lab arms. Each
+  // names only PRODUCTION_FAMILIES, so the browser artifact a subject sees
+  // is exactly what production emits (neutral carriers, no /c/<token>
+  // instruction text). A positive PRODUCTION_ROUTE result therefore
+  // establishes "production route carriers catch agents"; a null result
+  // means drop or redesign the route mechanism rather than crediting it
+  // from semantic-lab runs. These recipes are lab-run ASSIGNMENTS (the
+  // experiment assigns them; subjects see production markup) — they are
+  // NOT derivable in production mode alongside a semantic family, and
+  // FULL ≡ PRODUCTION_FULL on the production plane because the engine
+  // strips semantic there.
+  PRODUCTION_FIELD: { families: ["decoy-field"] },
+  PRODUCTION_ROUTE: { families: ["decoy-route"] },
+  PRODUCTION_INTERACTION: { families: ["interaction"] },
+  PRODUCTION_FULL: {
+    families: ["decoy-field", "decoy-route", "interaction"],
+  },
 };
 
 /** Deep stable canonicalizer for profile hashing. */
@@ -225,6 +263,20 @@ export async function deriveProfilePure(
       throw new Error("Lab-only recipe cannot be used in production mode");
     }
 
+    // P1-AUDIT-2 (P1-1): the mode-family contract holds for EXPLICIT recipes
+    // too. A production recipe naming semantic (any template — S09 included,
+    // whose marker buildArtifactSet never renders outside the lab) fails
+    // closed instead of issuing a profile that carries an unrenderable
+    // family and pollutes variant identity / attribution with it.
+    const illegalFamilies = resolvedRecipe.families?.filter(
+      (f) => !PRODUCTION_FAMILIES.includes(f)
+    );
+    if (!isLab && illegalFamilies?.length) {
+      throw new Error(
+        `FAMILY_NOT_ELIGIBLE_IN_MODE: ${illegalFamilies.join(",")}`
+      );
+    }
+
     // Fail-closed: explicit overrides must be eligible
     validateExplicitOverrides(resolvedRecipe, isLab);
   }
@@ -242,9 +294,7 @@ export async function deriveProfilePure(
   // NB: the pool is sampled FIRST and the count drawn second — the count
   // draw consumes a stream draw either way, so filtering the pool (not the
   // count) keeps the draw order stable.
-  const familyPool = isLab
-    ? FAMILIES
-    : FAMILIES.filter((f) => f !== "semantic");
+  const familyPool = isLab ? LAB_FAMILIES : PRODUCTION_FAMILIES;
   let familyCount: number;
   if (resolvedRecipe?.families !== undefined) {
     // Explicit families: use exactly what was requested
@@ -282,6 +332,14 @@ export async function deriveProfilePure(
   };
 
   // Handle semantic family
+  // P1-AUDIT-2 (P1-1): defense in depth — production profiles can never be
+  // carrying semantic at this point (the random pool filters it and the
+  // explicit-recipe guard fails closed above), so a semantic family here
+  // means a caller bypassed both; refuse rather than derive an unrenderable
+  // treatment.
+  if (families.includes("semantic") && !isLab) {
+    throw new Error("FAMILY_NOT_ELIGIBLE_IN_MODE: semantic");
+  }
   if (families.includes("semantic")) {
     // Determine which template to use
     let template =

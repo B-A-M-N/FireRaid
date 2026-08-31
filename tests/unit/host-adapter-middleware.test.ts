@@ -191,7 +191,7 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
 
 describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => {
   const LAB_FULL: Parameters<typeof deriveProfilePure>[1] = {
-    families: ["semantic", "decoy-field", "decoy-route", "interaction"],
+    families: ["decoy-field", "decoy-route", "interaction"],
   };
 
   it("capture OFF never yields noPointerEvents (was a false positive by construction)", async () => {
@@ -273,5 +273,80 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
     // have come from a fabricated metric. Assert the forward happened (the
     // no-pointer signal alone is not disqualifying for this recipe).
     expect(res.kind).toBe("admit");
+  });
+});
+
+describe("P1-AUDIT-2 (P1-14): telemetry-drain carrier on the host plane", () => {
+  it("POST /api/events accepts a valid batch and returns the Worker-shaped ACK", async () => {
+    const d = deps();
+    const sessionId = await d.session.createSession();
+    const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+    const req = new Request("http://mw/api/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({
+        events: [
+          { seq: 1, dt: 0, kind: "page_ready" },
+          { seq: 2, dt: 300, kind: "focus", target: "name" },
+          { seq: 3, dt: 900, kind: "input", target: "name" },
+        ],
+      }),
+    });
+    const res = await admit(req, d, htmlLoader);
+    expect(res.kind).toBe("ingest");
+    expect(res.received).toBe(3);
+    expect(res.acceptedThrough).toBe(3);
+    // The drain persisted into the observation store — the later submit
+    // scores the whole stream, not just what rode along.
+    expect(await d.telemetry.collect(sessionId)).toHaveLength(3);
+  });
+
+  it("POST /api/events with a structurally invalid batch is a DENY (worker 400/413 verdict, host shape)", async () => {
+    const enforcement = new FakeEnforcement();
+    const d = deps({ enforcement });
+    const sessionId = await d.session.createSession();
+    const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+    const req = new Request("http://mw/api/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({
+        events: [
+          { seq: 2, dt: 0, kind: "page_ready" },
+          { seq: 1, dt: 100, kind: "focus", target: "name" }, // seq order violation
+        ],
+      }),
+    });
+    const res = await admit(req, d, htmlLoader);
+    expect(res.kind).toBe("deny");
+    expect(res.disposition).toBe("INVALID_TELEMETRY");
+    expect(enforcement.allowed).toBe(0);
+  });
+
+  it("POST /api/events without a session is NO_SESSION (never an ingest)", async () => {
+    const d = deps();
+    const req = new Request("http://mw/api/events", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ events: [{ seq: 1, dt: 0, kind: "page_ready" }] }),
+    });
+    const res = await admit(req, d, htmlLoader);
+    expect(res.kind).toBe("deny");
+    expect(res.disposition).toBe("NO_SESSION");
+  });
+
+  it("telemetryIngestPath: '' disables ingest handling (submit-only host)", async () => {
+    const d = deps({ telemetryIngestPath: "" });
+    const sessionId = await d.session.createSession();
+    const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+    const req = new Request("http://mw/api/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ events: [{ seq: 1, dt: 0, kind: "page_ready" }] }),
+    });
+    // Falls through to the submit branch: no csrf → CSRF_FAILED deny
+    // (NOT an ingest result).
+    const res = await admit(req, d, htmlLoader);
+    expect(res.kind).toBe("deny");
+    expect(res.disposition).toBe("CSRF_FAILED");
   });
 });

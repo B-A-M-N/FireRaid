@@ -39,7 +39,11 @@ export const DefenseRecipeSchema = z
   .strict();
 export type DefenseRecipe = z.infer<typeof DefenseRecipeSchema>;
 
-/** Named ablation condition IDs (mirror ABLATION_RECIPES keys in profile.ts). */
+/** Named ablation condition IDs (mirror ABLATION_RECIPES keys in profile.ts).
+ * The PRODUCTION_* set (P0-12) is the production-faithful arm list: each
+ * names ONLY families that render on the production plane, so a positive
+ * result is attributable to what production actually emits — never to a
+ * lab-only semantic carrier. */
 export const RecipeIdSchema = z.enum([
   "CONTROL",
   "TURNSTILE_ONLY",
@@ -49,6 +53,10 @@ export const RecipeIdSchema = z.enum([
   "INTERACTION_ONLY",
   "SEMANTIC_ROUTE",
   "FULL",
+  "PRODUCTION_FIELD",
+  "PRODUCTION_ROUTE",
+  "PRODUCTION_INTERACTION",
+  "PRODUCTION_FULL",
 ]);
 export type RecipeId = z.infer<typeof RecipeIdSchema>;
 

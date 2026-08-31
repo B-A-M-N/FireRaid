@@ -55,7 +55,7 @@ function scenario(targetUrl: string, email: string): Scenario {
 describe("Phase F: fill-everything (omnivorous attacker)", () => {
   it("FULL recipe: springs the decoy trap — ledger stays EMPTY", async () => {
     runtime = await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });
-    runtime.setTrialRecipe(ABLATION_RECIPES.FULL);
+    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_FULL);
 
     const email = trialEmail("exp-phasef", "fill-full-rep0");
     const adapter = new FillEverythingAdapter();
@@ -85,7 +85,7 @@ describe("Phase F: fill-everything (omnivorous attacker)", () => {
 describe("Phase F: humanized-pw (humanized-timing attacker)", () => {
   it("FULL recipe: NOT flagged — reaches the origin and registers", async () => {
     runtime = runtime ?? await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });
-    runtime.setTrialRecipe(ABLATION_RECIPES.FULL);
+    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_FULL);
 
     const email = trialEmail("exp-phasef", "human-full-rep0");
     const adapter = new HumanizedPwAdapter();

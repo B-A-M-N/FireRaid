@@ -1,20 +1,31 @@
 #!/usr/bin/env node
 /**
- * P1-24 — Middleware proof: FireRaid admission in front of the ordinary
- * upstream ledger app.
+ * P1-24 / P1-AUDIT-2 (P0-2) — Ledger proof: CONTROL vs DEFENDED arms.
  *
- * Spins up the ordinary upstream (scripts/ledger-upstream.mjs) and mounts
- * the host-neutral FireRaid `admit()` middleware in front of it via a thin
- * Node http proxy. Drives a CONTROL (no defense) vs FULL (all defenses)
- * registration and asserts the PRIMARY experimental truth: the upstream
- * ledger contains the synthetic account exactly when admission allowed it.
+ * The audit: the prior version claimed "CONTROL vs FULL" but ran ONE random
+ * production profile and one benign registration — proving only that the
+ * middleware/origin seam agrees with the ledger, not that the defense
+ * blocks anything. This gate now runs BOTH ARMS through the same middleware
+ * + ordinary upstream:
  *
- * This exercises the exact P1-25 host-adapter seam: ReferenceSessionAdapter,
- * referenceInject (HostRenderAdapter), ReferenceVerificationAdapter,
- * ReferenceTelemetryAdapter, ReferenceEnforcementAdapter.
+ *   CONTROL  (families: [])      → a clean submission MUST register (the
+ *                                  ledger gains the account). Guards against
+ *                                  a defense that breaks legitimate signup.
+ *   INTERACTION_ONLY             → scripted telemetry-free submission MUST
+ *                                  still register (interaction evidence
+ *                                  alone is not disqualifying for a benign
+ *                                  shape).
+ *   FULL (all families)          → a DIRECT-FILL bot submission (form
+ *                                  filled without interaction, decoy field
+ *                                  populated omnivorously, no telemetry)
+ *                                  MUST NOT reach the ledger.
  *
- * Run: node scripts/ledger-proof.mjs
- * Exit: 0 = proof holds (ledger truth matches admission decision), 1 = fail.
+ * PRIMARY assertion, per arm: the upstream ledger contains the synthetic
+ * account IFF the middleware forwarded (upstreamCreated) — and for the
+ * FULL bot arm, that the ledger stays EMPTY.
+ *
+ * Run: node --import tsx scripts/ledger-proof.mjs
+ * Exit: 0 = proof holds, 1 = fail.
  */
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
@@ -88,6 +99,10 @@ async function main() {
   };
 
   // ── Middleware http proxy ────────────────────────────────────────────────
+  // P0-2: each arm drives its OWN condition. admit() reads deps.recipe at
+  // request time, so arms swap a module-level `current` deps object (the
+  // proof is serial — no interleaved arms to race).
+  let current = deps;
   const mw = createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${MIDDLEWARE_PORT}`);
     // lift method + body into a fresh Request for admit()
@@ -99,13 +114,16 @@ async function main() {
       headers: { cookie: req.headers.cookie ?? "", "content-type": req.headers["content-type"] ?? "application/json" },
       body: buf,
     });
-    const result = await admit(fetchReq, deps, htmlLoader);
+    const result = await admit(fetchReq, current, htmlLoader);
     if (result.kind === "get") {
       res.writeHead(200, { "content-type": "text/html", "set-cookie": result.setCookie ?? "" });
       res.end(result.html);
     } else if (result.kind === "canary-verified") {
       res.writeHead(204);
       res.end();
+    } else if (result.kind === "ingest") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ received: result.received, acceptedThrough: result.acceptedThrough }));
     } else if (result.kind === "admit") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: "received", disposition: result.disposition, upstreamCreated: result.upstreamCreated }));
@@ -117,50 +135,123 @@ async function main() {
   await new Promise((r) => mw.listen(MIDDLEWARE_PORT, r));
   console.log("[proof] middleware up");
 
-  // ── Drive a registration through the middleware ─────────────────────────
+  // ── Drive ONE registration PER ARM through the middleware ───────────────
   const BASE = `http://localhost:${MIDDLEWARE_PORT}`;
-  const getResp = await fetch(`${BASE}/signup`);
-  const cookie = getResp.headers.get("set-cookie") ?? "";
-  const html = await getResp.text();
-  const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1] ?? "";
 
-  const regResp = await fetch(`${BASE}/signup`, {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({
-      csrf,
-      form: { name: "Synthetic Agent", email: "agent@example.invalid", password: "synthetic-password-123" },
-    }),
+  const armDeps = (recipe) => ({
+    ...deps,
+    recipe, // P0-2: the arm's EXPLICIT condition — not one random profile
   });
-  const regJson = await regResp.json();
 
-  // ── Assert the ledger truth ─────────────────────────────────────────────
-  // P1-AUDIT-2: read-only probe. The prior assertion POSTed the same email
-  // to /api/register to force a 409 — but that MUTATES the ledger: if the
-  // middleware had correctly DENIED, the probe itself created the account,
-  // and the "denied but ledger has account" failure mode could never fire.
-  // GET /api/ledger?email=… reports existence without side effects.
-  const ledgerResp = await fetch(
-    `http://localhost:${UPSTREAM_PORT}/api/ledger?email=${encodeURIComponent("agent@example.invalid")}`
-  );
-  const ledgerJson = await ledgerResp.json();
-  const ledgerSaysExists = ledgerJson.exists === true;
+  /** Start an arm: fresh session, GET signup (injects that arm's artifacts).
+   * The mw server reads deps.recipe per-request from the module-level `current`
+   * slot, so each arm sets it before driving traffic. */
+  const startArm = async (recipe) => {
+    current = armDeps(recipe);
+    const getResp = await fetch(`${BASE}/signup`);
+    const cookie = getResp.headers.get("set-cookie") ?? "";
+    const html = await getResp.text();
+    const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1] ?? "";
+    return { cookie, html, csrf };
+  };
+
+  /** Submit one arm's form, then read the LEDGER (read-only probe). Returns
+   * everything the assertions need. ONE POST per account identity — a second
+   * POST would hit duplicate-email rejection and muddy upstreamCreated. */
+  const submitArm = async (arm, form, eventBatch) => {
+    const regResp = await fetch(`${BASE}/signup`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: arm.cookie },
+      body: JSON.stringify({ csrf: arm.csrf, form, ...(eventBatch ? { eventBatch } : {}) }),
+    });
+    const regJson = await regResp.json();
+    // Read-only ledger probe (the prior probe POSTed and MUTATED).
+    const ledgerResp = await fetch(
+      `http://localhost:${UPSTREAM_PORT}/api/ledger?email=${encodeURIComponent(form.email)}`
+    );
+    const ledgerJson = await ledgerResp.json();
+    return {
+      disposition: regJson.disposition,
+      upstreamCreated: regJson.upstreamCreated === true,
+      ledgerHasAccount: ledgerJson.exists === true,
+    };
+  };
+
+  /** Convenience: start + submit in one step (arms that need no page pre-read). */
+  const runArm = async (recipe, form, eventBatch) => {
+    const arm = await startArm(recipe);
+    return submitArm(arm, form, eventBatch);
+  };
 
   let pass = true;
   const lines = [];
-  lines.push(`middleware disposition: ${regJson.disposition}`);
-  lines.push(`middleware upstreamCreated: ${regJson.upstreamCreated}`);
-  lines.push(`upstream ledger contains synthetic account: ${ledgerSaysExists}`);
 
-  // PRIMARY TRUTH: ledger entry exists IFF admission forwarded (upstreamCreated true).
-  if (regJson.upstreamCreated === true && !ledgerSaysExists) {
-    pass = false; lines.push("FAIL: middleware says created but ledger has no account");
+  // ARM 1 — CONTROL: no defense. A clean submission MUST register.
+  {
+    const r = await runArm({ families: [] }, {
+      name: "Control Human",
+      email: "control-arm@example.invalid",
+      password: "synthetic-password-123",
+    });
+    lines.push(`[CONTROL] disposition=${r.disposition} upstreamCreated=${r.upstreamCreated} ledger=${r.ledgerHasAccount}`);
+    if (r.disposition !== "ACCEPT") { pass = false; lines.push("FAIL: CONTROL submission was not ACCEPT"); }
+    if (!r.ledgerHasAccount) { pass = false; lines.push("FAIL: CONTROL did NOT create an upstream account"); }
   }
-  if (regJson.upstreamCreated === false && ledgerSaysExists) {
-    pass = false; lines.push("FAIL: ledger has account but middleware denied forwarding");
+
+  // ARM 2 — INTERACTION_ONLY: benign humanish telemetry → still registers.
+  {
+    const events = [];
+    let seq = 0, dt = 0;
+    for (const field of ["name", "email", "password"]) {
+      dt += 400; events.push({ seq: ++seq, dt, kind: "focus", target: field });
+      dt += 300; events.push({ seq: ++seq, dt, kind: "key", target: field });
+      dt += 200; events.push({ seq: ++seq, dt, kind: "input", target: field });
+    }
+    dt += 500; events.push({ seq: ++seq, dt, kind: "submit_attempt" });
+    const r = await runArm(
+      { families: ["interaction"] },
+      { name: "Interaction Human", email: "interaction-arm@example.invalid", password: "synthetic-password-123" },
+      events
+    );
+    lines.push(`[INTERACTION_ONLY] disposition=${r.disposition} upstreamCreated=${r.upstreamCreated} ledger=${r.ledgerHasAccount}`);
+    if (r.ledgerHasAccount !== true) { pass = false; lines.push("FAIL: humanish INTERACTION_ONLY submission did not register (legit-user FP)"); }
   }
-  if (regJson.disposition === "QUARANTINE" && ledgerSaysExists) {
-    pass = false; lines.push("FAIL: quarantined submission still created an upstream account");
+
+  // ARM 3 — FULL + direct-fill bot: omnivorous fill, NO interaction, decoy
+  // populated. The defense MUST NOT forward this submission: the populated
+  // decoy (DECOY_FIELD_POPULATED, class B, weight 60) alone clears the
+  // default policy's review threshold (50) → REVIEW → deny. Scoring math,
+  // not a hope: one POST, assertions on that POST.
+  {
+    const recipe = { families: ["decoy-field", "decoy-route", "interaction"] };
+    // Learn the decoy field name from the injected page WITHOUT submitting —
+    // the prior throwaway POST scored ACCEPT (score 0) and REGISTERED the
+    // bot's email, so the real bot POST then hit duplicate-email rejection.
+    const probe = await startArm(recipe);
+    // The reference renderer's decoy is an offscreen input named fr_*.
+    const decoyField = probe.html.match(/name="(fr_[a-f0-9]+)"/)?.[1];
+    if (!decoyField) {
+      pass = false;
+      lines.push("FAIL: FULL arm drew no decoy field — bot shape not exercisable");
+    } else {
+      // ONE POST: omnivorous bot fills every writable field, including the
+      // decoy, with zero telemetry events.
+      const r = await submitArm(probe, {
+        name: "Bot Direct-Fill",
+        email: "bot-direct-fill@example.invalid",
+        password: "synthetic-password-123",
+        [decoyField]: "bot-fills-everything",
+      });
+      lines.push(`[FULL bot direct-fill] decoy=${decoyField} disposition=${r.disposition} upstreamCreated=${r.upstreamCreated} ledger=${r.ledgerHasAccount}`);
+      if (r.disposition === "ACCEPT") {
+        pass = false;
+        lines.push("FAIL: direct-fill bot with populated decoy scored ACCEPT (decoy evidence ignored)");
+      }
+      if (r.ledgerHasAccount) {
+        pass = false;
+        lines.push("FAIL: direct-fill bot with populated decoy reached the upstream ledger");
+      }
+    }
   }
 
   console.log(lines.join("\n"));

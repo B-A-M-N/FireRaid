@@ -62,11 +62,18 @@ export interface MiddlewareDeps {
    * lab-run recipe flow. Omit for a random profile.
    */
   recipe?: DefenseRecipe;
+  /**
+   * P1-AUDIT-2 (P1-14): path the middleware treats as the telemetry-drain
+   * carrier (the real client POSTs {events: [...]} there). Default
+   * "/api/events" — the Worker contract. Set to "" to disable ingest
+   * handling entirely.
+   */
+  telemetryIngestPath?: string;
 }
 
 export interface MiddlewareResult {
-  /** "get" | "admit" | "deny" | "canary-verified" | "error". */
-  kind: "get" | "admit" | "deny" | "canary-verified" | "error";
+  /** "get" | "admit" | "deny" | "canary-verified" | "ingest" | "error". */
+  kind: "get" | "admit" | "deny" | "canary-verified" | "ingest" | "error";
   /** The HTML to return on GET (kind === "get"). */
   html?: string;
   /** Set-Cookie header(s) to return. */
@@ -75,6 +82,9 @@ export interface MiddlewareResult {
   disposition?: string;
   /** Whether the upstream ledger created the account (the experiment's truth). */
   upstreamCreated?: boolean;
+  /** Ingest ACK (kind === "ingest"): events accepted, stream watermark. */
+  received?: number;
+  acceptedThrough?: number;
 }
 
 // Strip FireRaid-injected fields before forwarding to the upstream so the
@@ -142,6 +152,40 @@ export async function admit(
   if (req.method === "POST") {
     const sessionId = await deps.session.readSessionId(req);
     if (!sessionId) return { kind: "deny", disposition: "NO_SESSION" };
+
+    // P1-AUDIT-2 (P1-14): the REAL client (public/signup.js) persists its
+    // queue via POST /api/events ({events: [...]} → {received, acceptedThrough})
+    // before submitting, exactly as on the Worker plane. Without this route
+    // a host plane 403s every drain, the residual queue rides entirely on
+    // the submit carrier, and a long session builds an eventBatch the
+    // contract rejects (TOO_MANY_EVENTS). Same canonical validator, same
+    // Worker-shaped ACK — the observation store is the session's WHOLE
+    // stream, so the later submit scores everything anyway.
+    const ingestPath = deps.telemetryIngestPath ?? "/api/events";
+    if (new URL(req.url).pathname === ingestPath) {
+      let ingestBody: { events?: unknown };
+      try {
+        ingestBody = (await req.json()) as { events?: unknown };
+      } catch {
+        return { kind: "deny", disposition: "BAD_JSON" };
+      }
+      const accepted = await deps.telemetry.accept(sessionId, ingestBody.events ?? []);
+      if (accepted === null) {
+        // Structurally invalid batch — the Worker returns 400/413 here; the
+        // middleware's deny contract is the host shape for the same verdict.
+        deps.enforcement.deny(sessionId, "INVALID_TELEMETRY");
+        return { kind: "deny", disposition: "INVALID_TELEMETRY" };
+      }
+      // Worker-shaped ACK. acceptedThrough = the stream's last seq — the
+      // reference store is seq-ordered, so everything accepted is stored.
+      const stream = await deps.telemetry.collect(sessionId);
+      const acceptedThrough = stream.length > 0 ? stream[stream.length - 1].seq : 0;
+      return {
+        kind: "ingest",
+        acceptedThrough,
+        received: accepted,
+      };
+    }
 
     // P1-AUDIT-2 Phase F: a host plane in front of an ORDINARY page receives
     // browser form posts — application/x-www-form-urlencoded, not the

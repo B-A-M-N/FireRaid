@@ -6,7 +6,12 @@
  * distinct sessionIds for determinism.
  */
 import { describe, it, expect } from "vitest";
-import { deriveProfilePure, ABLATION_RECIPES } from "../../src/core/profile.js";
+import {
+  deriveProfilePure,
+  ABLATION_RECIPES,
+  PRODUCTION_FAMILIES,
+} from "../../src/core/profile.js";
+import { buildArtifactSet } from "../../src/core/artifacts.js";
 
 const SECRET = "test-secret-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6";
 
@@ -168,5 +173,78 @@ describe("ablation recipe semantics", () => {
         badRecipe
       )
     ).rejects.toThrow("INVALID_RECIPE");
+  });
+
+  // ── P1-AUDIT-2 (P0-12): production-faithful arms ─────────────────────────
+  // Each PRODUCTION_* recipe must derive cleanly in production mode, carry
+  // ONLY production-renderable families, and build a NON-null artifact for
+  // every family it carries (the property the semantic arms could never
+  // satisfy on the production plane).
+  const PROD_ARM_EXPECTATIONS: Record<
+    string,
+    { families: string[]; has: (keyof import("../../src/types/profile.js").DefenseProfile)[] }
+  > = {
+    PRODUCTION_FIELD: {
+      families: ["decoy-field"],
+      has: ["decoyField"],
+    },
+    PRODUCTION_ROUTE: {
+      families: ["decoy-route"],
+      has: ["decoyRoute"],
+    },
+    PRODUCTION_INTERACTION: {
+      families: ["interaction"],
+      has: ["interaction"],
+    },
+    PRODUCTION_FULL: {
+      families: ["decoy-field", "decoy-route", "interaction"],
+      has: ["decoyField", "decoyRoute", "interaction"],
+    },
+  };
+
+  for (const [id, want] of Object.entries(PROD_ARM_EXPECTATIONS)) {
+    it(`${id} → production-derivable, exact families, NO semantic dimension`, async () => {
+      const p = await deriveProfilePure(
+        { secret: SECRET, version: 1, sessionId: `prod-arm-${id}`, mode: "production" },
+        recipe(id)
+      );
+      expect([...p.families].sort()).toEqual([...want.families].sort());
+      expect(p.families).not.toContain("semantic");
+      expect(p.semantic).toBeUndefined();
+      for (const key of want.has) {
+        expect(p[key], `${id} must define ${key}`).toBeDefined();
+      }
+      // Every carried family must have a production artifact to render.
+      const artifacts = buildArtifactSet(p, { labMode: false });
+      if (p.decoyField) expect(artifacts.decoyField).not.toBeNull();
+      if (p.decoyRoute) expect(artifacts.decoyRoute).not.toBeNull();
+      expect(artifacts.semantic).toBeNull();
+    });
+  }
+
+  it("FULL in production mode throws (semantic is not a production family — P1-1)", async () => {
+    await expect(
+      deriveProfilePure(
+        { secret: SECRET, version: 1, sessionId: "full-prod", mode: "production" },
+        recipe("FULL")
+      )
+    ).rejects.toThrow("FAMILY_NOT_ELIGIBLE_IN_MODE: semantic");
+  });
+
+  it("FULL in production mode WITHOUT an explicit recipe degrades to PRODUCTION_FULL's family set", async () => {
+    // The engine-level equivalence the P0-12 doc comment claims: with
+    // semantic stripped by the mode-family contract, a random production
+    // FULL is drawn from exactly the PRODUCTION_FAMILIES pool.
+    for (let i = 0; i < 40; i++) {
+      const p = await deriveProfilePure({
+        secret: SECRET,
+        version: 1,
+        sessionId: `prod-rand-${i}`,
+        mode: "production",
+      });
+      for (const f of p.families) {
+        expect(PRODUCTION_FAMILIES).toContain(f);
+      }
+    }
   });
 });

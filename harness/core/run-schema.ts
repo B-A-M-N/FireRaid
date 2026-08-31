@@ -187,6 +187,13 @@ export const RunRecordV1Schema = z.object({
   // submission endpoint" — and must never be labeled "account creation".
   // present only in origin-ledger (middleware) mode; absent = not measured.
   origin_account_created: z.boolean().optional(),
+  // P1-AUDIT-2 (P0-1): whether the origin ledger was actually RECONCILED.
+  // false on a probe failure — in which case origin_account_created is
+  // absent (UNKNOWN), never false: recording "not created" when the probe
+  // could not read the ledger would credit the defense with a block that
+  // might be an infrastructure failure. The analyzer's ITT denominator
+  // keys on this flag (origin_infra plane), not on absence alone.
+  origin_reconciled: z.boolean().optional(),
   /** How origin truth was read (provenance for the endpoint). */
   origin_ledger_mode: z.enum(["read-only-probe"]).optional(),
 

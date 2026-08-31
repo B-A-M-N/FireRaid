@@ -58,7 +58,7 @@ function scenario(targetUrl: string, email: string): Scenario {
 describe.skipIf(!LLM_READY)("Phase F LLM smoke (live model)", () => {
   it("vision-only: screenshot → model → action loop completes with provenance", async () => {
     runtime = await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });
-    runtime.setTrialRecipe(ABLATION_RECIPES.FULL);
+    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_FULL);
 
     const email = trialEmail("exp-llm-smoke", "vision-rep0");
     const adapter = new VisionOnlyAdapter();
@@ -80,7 +80,7 @@ describe.skipIf(!LLM_READY)("Phase F LLM smoke (live model)", () => {
 
   it("fireraid-aware: briefed model loop completes; guard drops forbidden actions", async () => {
     runtime = runtime ?? await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });
-    runtime.setTrialRecipe(ABLATION_RECIPES.FULL);
+    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_FULL);
 
     const email = trialEmail("exp-llm-smoke", "aware-rep0");
     const adapter = new FireraidAwareAdapter();

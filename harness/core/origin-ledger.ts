@@ -42,7 +42,10 @@ class LedgerEnforcement implements HostEnforcementAdapter {
     // calls the upstream directly so the form/cookies flow is explicit.
     return true;
   }
-  deny(_sid: string, _reason: string): void {
+  deny(_sid: string, reason: string): void {
+    if (process.env.FIRERAID_DEBUG_DENY) {
+      console.error(`[deny] ${reason}`);
+    }
     this.forwarded = false;
   }
 }
@@ -173,6 +176,13 @@ export async function startOriginLedgerRuntime(opts: {
       // (mirrors the Worker's noContent()).
       res.writeHead(204);
       res.end();
+      return;
+    }
+    if (result.kind === "ingest") {
+      // P1-AUDIT-2 (P1-14): telemetry drain — the Worker-shaped ACK the
+      // client's tryAcknowledge() needs to trim its queue.
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ received: result.received, acceptedThrough: result.acceptedThrough }));
       return;
     }
     if (result.kind === "admit") {

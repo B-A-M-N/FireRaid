@@ -46,7 +46,7 @@ function deps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
     enforcement: { allow: async () => true, deny: () => {} },
     canaryStore: new ReferenceCanaryStore(),
     labMode: false,
-    recipe: ABLATION_RECIPES.FULL,
+    recipe: ABLATION_RECIPES.PRODUCTION_FULL,
     ...over,
   };
 }
@@ -63,7 +63,7 @@ describe("host canary route (audit item 6)", () => {
     const sid = decodeSessionId(cookie);
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
-      ABLATION_RECIPES.FULL
+      ABLATION_RECIPES.PRODUCTION_FULL
     );
     const token = profile.decoyRoute!.endpointToken;
 
@@ -134,7 +134,7 @@ describe("host canary route (audit item 6)", () => {
     const sid = decodeSessionId(cookie);
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
-      ABLATION_RECIPES.FULL
+      ABLATION_RECIPES.PRODUCTION_FULL
     );
     const token = profile.decoyRoute!.endpointToken;
     store.failStore = true;
@@ -160,7 +160,7 @@ describe("host canary route (audit item 6)", () => {
     const sid = decodeSessionId(cookie);
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
-      ABLATION_RECIPES.FULL
+      ABLATION_RECIPES.PRODUCTION_FULL
     );
     const token = profile.decoyRoute!.endpointToken;
 
@@ -257,7 +257,7 @@ describe("urlencoded form-post carrier (P1-AUDIT-2 Phase F)", () => {
     const sid = decodeSessionId(cookie);
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
-      ABLATION_RECIPES.FULL
+      ABLATION_RECIPES.PRODUCTION_FULL
     );
     const csrf = await makeCsrf(SECRET, sid);
     // Omnivore carrier: decoy field populated (whatever value — the fill

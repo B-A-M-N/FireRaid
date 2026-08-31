@@ -738,14 +738,19 @@ async function executeTrial(
   // agent reached the middleware's submit endpoint" (secondary measurement).
   if (originRuntime && ledgerEmail) {
     const created = await originRuntime.ledgerHasAccount(ledgerEmail);
-    record.origin_account_created = created ?? false;
     record.origin_ledger_mode = "read-only-probe";
     if (created === null) {
-      // The primary outcome is UNKNOWABLE — same epistemic class as a
-      // FireRaid reconciliation failure, so same failure semantics.
+      // P1-AUDIT-2 (P0-1): the primary outcome is UNKNOWABLE. The prior
+      // `created ?? false` recorded "not created" — crediting the defense
+      // with a block that might be a probe failure. Unknown is absent:
+      // origin_account_created is NOT set, origin_reconciled is false, and
+      // the run lands in the analyzer's origin_infra plane.
+      record.origin_reconciled = false;
       record.error_code = record.error_code ?? "ORIGIN_RECONCILIATION_FAILED";
       record.server_reconciled = false;
     } else {
+      record.origin_account_created = created;
+      record.origin_reconciled = true;
       record.server_reconciled = true;
     }
   }

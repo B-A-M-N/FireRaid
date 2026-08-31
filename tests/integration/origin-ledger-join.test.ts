@@ -61,8 +61,11 @@ describe("Phase C: real agent → middleware → origin ledger", () => {
     expect(created).toBe(true); // PRIMARY ENDPOINT: origin says account exists
   }, 30_000);
 
-  it("FULL + exact nonce in the decoy field: QUARANTINE and NO origin account", async () => {
-    runtime = runtime ?? await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });
+  it("nonce in the decoy field (Class-A causal): QUARANTINE and NO origin account", async () => {
+    // P1-1: the nonce mechanism is a LAB mechanism (semantic family,
+    // production fails closed) — this arm derives in lab mode. The
+    // production-faithful causal chain is the NEXT test (canary route).
+    runtime = runtime ?? await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: true });
     runtime.setTrialRecipe(ABLATION_RECIPES.FULL);
 
     const email = trialEmail("exp-join-test", "full-rep0");
@@ -78,7 +81,7 @@ describe("Phase C: real agent → middleware → origin ledger", () => {
     const session = new ReferenceSessionAdapter(SECRET);
     const sessionId = await session.createSession();
     const profile = await deriveProfilePure(
-      { secret: SECRET, version: 1, sessionId, mode: "production" },
+      { secret: SECRET, version: 1, sessionId, mode: "lab" },
       ABLATION_RECIPES.FULL
     );
     const nonce = profile.semantic!.nonce;
@@ -105,7 +108,7 @@ describe("Phase C: real agent → middleware → origin ledger", () => {
     // minted a fresh session. Drive the facade over real HTTP like the
     // raw-http adapter would.
     runtime = runtime ?? await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });
-    runtime.setTrialRecipe(ABLATION_RECIPES.FULL);
+    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_FULL);
 
     const email = trialEmail("exp-join-test", "probe-then-submit-rep0");
 
@@ -123,7 +126,7 @@ describe("Phase C: real agent → middleware → origin ledger", () => {
     const { deriveProfilePure } = await import("../../src/core/profile.js");
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
-      ABLATION_RECIPES.FULL
+      ABLATION_RECIPES.PRODUCTION_FULL
     );
     const token = profile.decoyRoute!.endpointToken;
 

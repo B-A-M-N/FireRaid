@@ -70,18 +70,40 @@ describe("Phase E: production random family pool", () => {
     expect(sawSemantic).toBeGreaterThan(10);
   });
 
-  it("explicit S09 recipe still works in production (fail-closed validation path)", async () => {
+  it("explicit semantic recipe in production FAILS CLOSED (P1-1: family contract is explicit too)", async () => {
+    // S09's marker renders NOWHERE in production (buildArtifactSet returns a
+    // null semantic artifact there), so the audit's P1-1 position is that a
+    // production profile may never CARRY the semantic family — explicit
+    // recipes included. The prior behavior (issue the profile, render
+    // nothing) polluted variant identity with a dimension that has no
+    // production form.
+    await expect(
+      deriveProfilePure(
+        {
+          secret: SECRET,
+          version: 1,
+          sessionId: "pool-explicit-s09-prod",
+          mode: "production",
+        },
+        { families: ["semantic"], semanticTemplate: "S09", placementId: "P06" }
+      )
+    ).rejects.toThrow("FAMILY_NOT_ELIGIBLE_IN_MODE: semantic");
+  });
+
+  it("explicit S09 recipe still works in LAB (where its probe actually renders)", async () => {
     const profile = await deriveProfilePure(
       {
         secret: SECRET,
         version: 1,
-        sessionId: "pool-explicit-s09",
-        mode: "production",
+        sessionId: "pool-explicit-s09-lab",
+        mode: "lab",
       },
       { families: ["semantic"], semanticTemplate: "S09", placementId: "P06" }
     );
     expect(profile.families).toContain("semantic");
     expect(profile.semantic?.templateId).toBe("S09");
+    // And the artifact core agrees: lab mode renders the S09 marker.
+    expect(buildArtifactSet(profile, { labMode: true }).semantic).not.toBeNull();
   });
 
   it("explicit lab-only template in production still throws (guard intact)", async () => {

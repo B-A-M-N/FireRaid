@@ -383,10 +383,18 @@
     push("submit_attempt");
     await drainToBatches();
 
-    // Take the whole remaining queue as the submit payload (it fits: the
-    // submit body cap is larger than the batch cap, and drainToBatches just
-    // emptied everything the server already has).
-    const submitBatch = events.splice(0, events.length);
+    // P1-AUDIT-2 (P1-14): attach at most ONE BOUNDED batch to the submit —
+    // the same takeBatch() cap the /api/events contract enforces. The prior
+    // splice(0, events.length) re-sent the WHOLE residual queue when a drain
+    // failed (network down, or a host plane without an /api/events route),
+    // building an eventBatch the server contract explicitly rejects
+    // (>256 events → TOO_MANY_EVENTS → the whole registration died on
+    // telemetry transport, exactly the coupling P1-14 forbids). The rest of
+    // the queue stays for the next drain; registration never depends on it.
+    const submitBatch = takeBatch() ?? [];
+    if (submitBatch.length > 0) {
+      events.splice(0, submitBatch.length);
+    }
 
     const formData = new FormData(form);
     const formObj = {};

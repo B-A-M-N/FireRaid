@@ -47,6 +47,15 @@ const ALL_CONDITIONS: DefenseRecipe[] = [
   ABLATION_RECIPES.INTERACTION_ONLY,
 ].filter(Boolean);
 
+/** Semantic-bearing recipes are LAB conditions (P1-1: production fails
+ * closed on a family it cannot render), so parity arms that draw a semantic
+ * dimension derive in lab mode; production-only recipes derive in
+ * production mode. The parity property is mode-independent — both planes
+ * use the same mode for the same arm. */
+function modeFor(recipe: DefenseRecipe): "lab" | "production" {
+  return (recipe.families ?? []).includes("semantic") ? "lab" : "production";
+}
+
 /** The Worker submit route's decision core (routes/submit.ts steps 9–11),
  * extracted verbatim so the test drives the SAME code. */
 async function workerDecision(
@@ -140,7 +149,7 @@ describe("Worker vs host decision parity (Batch 3)", () => {
         for (let i = 0; i < 200; i++) {
           sessionId = await new ReferenceSessionAdapter(SECRET).createSession();
           const p = await deriveProfilePure(
-            { secret: SECRET, version: VERSION, sessionId, mode: "production" },
+            { secret: SECRET, version: VERSION, sessionId, mode: modeFor(recipe) },
             recipe
           );
           // For the "none" stream we need interaction scoring on to make the
@@ -178,7 +187,7 @@ describe("Worker vs host decision parity (Batch 3)", () => {
             deny: (_sid: string, reason: string) => { denial.reason = reason; },
           },
           canaryStore,
-          labMode: false,
+          labMode: modeFor(recipe) === "lab",
           recipe,
         };
         const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
