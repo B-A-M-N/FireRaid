@@ -232,19 +232,36 @@ export async function deriveProfilePure(
   // Derive families
   const minFamilies = 2;
   const maxFamilies = Math.min(4, FAMILIES.length);
+  // P1-AUDIT-2 Phase E: the RANDOM family pool is mode-filtered. In
+  // production the semantic family can never render — S01–S08 are lab-only
+  // (FR-R7-013) and S09 is holdout-partition metadata excluded from random
+  // selection (FR-R6-041) — so a drawn semantic slot was always a null
+  // render that still consumed a slot in the 2–4 draw and skewed variant
+  // identity. Explicit recipes keep the fail-closed validation path
+  // (validateExplicitOverrides); this filter is the random-pool fix ONLY.
+  // NB: the pool is sampled FIRST and the count drawn second — the count
+  // draw consumes a stream draw either way, so filtering the pool (not the
+  // count) keeps the draw order stable.
+  const familyPool = isLab
+    ? FAMILIES
+    : FAMILIES.filter((f) => f !== "semantic");
   let familyCount: number;
   if (resolvedRecipe?.families !== undefined) {
     // Explicit families: use exactly what was requested
     familyCount = resolvedRecipe.families.length;
   } else {
-    familyCount = minFamilies + (await stream.nextInt(maxFamilies - minFamilies + 1));
+    const drawnCount = minFamilies + (await stream.nextInt(maxFamilies - minFamilies + 1));
+    // Clamp to the filtered pool: production drops "semantic" (3 left) and
+    // the raw draw can reach 4. The count draw still consumed one stream
+    // draw either way — draw order is unchanged.
+    familyCount = Math.min(drawnCount, familyPool.length);
   }
 
   let families: DefenseFamilyName[];
   if (resolvedRecipe?.families !== undefined) {
     families = [...resolvedRecipe.families];
   } else {
-    families = (await sampleWithoutReplacement(stream, FAMILIES, familyCount)).sort();
+    families = (await sampleWithoutReplacement(stream, familyPool, familyCount)).sort();
   }
 
   const profile: DefenseProfile = {

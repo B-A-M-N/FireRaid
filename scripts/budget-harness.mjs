@@ -45,20 +45,29 @@ const BUDGETS = {
   // R7-024 contract: a signup that never takes a stateful action costs
   // ZERO D1. Continuously enforced by this harness.
   "abandoned-signup": { workerRequests: 2, d1Reads: 0, d1Writes: 0 },
-  // Materialize + submit + audit + watermark paths, with headroom for
-  // profile/capture-mask variation.
-  "normal-signup": { workerRequests: 12, d1Reads: 14, d1Writes: 10 },
-  "keyboard-heavy-signup": { workerRequests: 18, d1Reads: 24, d1Writes: 18 },
-  "autofill-signup": { workerRequests: 12, d1Reads: 14, d1Writes: 10 },
-  "failed-verification-retry": { workerRequests: 18, d1Reads: 22, d1Writes: 16 },
-  "verified-canary": { workerRequests: 14, d1Reads: 16, d1Writes: 10 },
-  // 12 flushes × ~4 reads/flush (ensureSessionRow + watermark + state load
-  // + capture-mask-once) + ~3 writes/flush (ingest batch + state save).
-  // Per-flush state load/save lives OUTSIDE the ingest batch today; folding
-  // it in is future work — the budget holds the line until then.
-  "long-telemetry-session": { workerRequests: 24, d1Reads: 52, d1Writes: 40 },
-  "agent-stop": { workerRequests: 14, d1Reads: 16, d1Writes: 12 },
-  "pagehide-flush": { workerRequests: 12, d1Reads: 14, d1Writes: 10 },
+  // P1-AUDIT-2 Phase E tightening — the envelope fast-path now verifies the
+  // HMAC (CPU) BEFORE the D1 SELECT and keys the SELECT on the VERIFIED
+  // bare sid (the old fast path queried by the envelope string, missed on
+  // EVERY stateful request, and paid verify+derive+INSERT+re-SELECT).
+  // Observed post-fix: normal-signup 5 reads/4 writes (was 14/10),
+  // keyboard-heavy 16/11 (was 24/18), long-telemetry 37/25 (was 52/40).
+  // Budgets sit at observed + headroom for capture-mask variation.
+  "normal-signup": { workerRequests: 6, d1Reads: 8, d1Writes: 6 },
+  "keyboard-heavy-signup": { workerRequests: 10, d1Reads: 20, d1Writes: 14 },
+  "autofill-signup": { workerRequests: 6, d1Reads: 8, d1Writes: 6 },
+  "failed-verification-retry": { workerRequests: 8, d1Reads: 8, d1Writes: 8 },
+  // Includes up to 20 signup probes searching for a route-bearing profile
+  // (bounded retry added when the scenario's silent no-op was fixed) — the
+  // attempt loop re-signups free (abandoned signups cost 0 D1), and the
+  // measured canary path itself is 2 reads / 2 writes.
+  "verified-canary": { workerRequests: 24, d1Reads: 8, d1Writes: 6 },
+  // 12 flushes × ~3 reads/flush (verified-sid SELECT + watermark + state
+  // load) + ~2 writes/flush (ingest batch + state save) — post-fast-path
+  // fix. Folding the state load/save into the ingest batch is future work;
+  // the budget holds the line until then.
+  "long-telemetry-session": { workerRequests: 18, d1Reads: 44, d1Writes: 30 },
+  "agent-stop": { workerRequests: 4, d1Reads: 5, d1Writes: 4 },
+  "pagehide-flush": { workerRequests: 4, d1Reads: 5, d1Writes: 4 },
 };
 
 // ── Worker lifecycle ───────────────────────────────────────────────────────
@@ -256,18 +265,27 @@ const SCENARIOS = {
   },
 
   "verified-canary": async () => {
-    const { sid, html } = await signup();
-    const token = html.match(/\/c\/([a-f0-9]+)/)?.[1];
-    if (!token) {
-      // Profile draws that place no decoy-route canary are a valid
-      // condition — nothing to drive; the budget still applies to what
-      // DID run (signup). Rerun if you need the canary variant.
-      return;
+    // P1-AUDIT-2 fix: this scenario used to SILENTLY NO-OP when the drawn
+    // profile carried no decoy route (a plain "return") — the harness then
+    // reported a PASS for a scenario that measured only /signup. Retry
+    // until a route-bearing profile is drawn (bounded), so the budget
+    // always covers the materialize + verify + persist path it names.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const { sid, html } = await signup();
+      // Production carriers the token in the neutral <template> (P1-22) —
+      // NOT as visible "/c/<token>" text (lab-only). Match the carrier.
+      const token = html.match(/data-rt-token="([a-f0-9]+)"/)?.[1];
+      if (token) {
+        const resp = await fetch(`${BASE}/c/${token}`, {
+          headers: { cookie: `__Host-fr_sid=${sid}` },
+        });
+        if (resp.status === 403) throw new Error("canary hit rejected the session");
+        return;
+      }
     }
-    const resp = await fetch(`${BASE}/c/${token}`, {
-      headers: { cookie: `__Host-fr_sid=${sid}` },
-    });
-    if (resp.status === 403) throw new Error("canary hit rejected the session");
+    throw new Error(
+      "verified-canary: no decoy-route profile drawn in 20 signups — cannot measure the canary path"
+    );
   },
 
   "long-telemetry-session": async () => {

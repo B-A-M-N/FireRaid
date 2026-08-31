@@ -340,9 +340,16 @@
   };
 
   // FR-R7-015: one final keep-alive on pagehide (no periodic timer).
+  // P1-AUDIT-2 Phase E: the flush takes ONE SENDABLE BATCH (takeBatch — the
+  // same count/byte caps the server enforces), not the whole queue. The
+  // prior events.slice() could exceed MAX_EVENTS_PER_BATCH or maxBatchBytes
+  // on a long session → server 413 → the ENTIRE final batch was lost. One
+  // bounded batch is the most the server can accept in a single keepalive
+  // request anyway; anything older was already drained by earlier flushes.
   window.addEventListener("pagehide", () => {
     if (events.length === 0) return;
-    const batch = events.slice();
+    const batch = takeBatch();
+    if (!batch) return;
     try {
       fetch("/api/events", {
         method: "POST",
@@ -351,7 +358,7 @@
         keepalive: true,
       })
         .then(async (resp) => {
-          if (resp.ok) {
+          if (resp.ok || resp.status === 409) {
             const body = await resp.json().catch(() => ({}));
             if (typeof body.acceptedThrough === "number") {
               trimAcknowledgedPrefix(body.acceptedThrough);
