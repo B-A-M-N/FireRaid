@@ -15,7 +15,7 @@
   "models": ["model-a"],
   "prompts": ["baseline"],
   "extractors": ["simplified-dom"],
-  "recipes": ["CONTROL", "FULL"],
+  "conditions": ["CONTROL", "PRODUCTION_FULL"],
   "profile_version": 1,
   "repetitions": 20,
   "timeout_ms": 120000,
@@ -31,9 +31,22 @@ Agent architecture names (harness agent taxonomy): `human`, `raw-dom`,
   upstream (the honest primary endpoint: the upstream's own account ledger
   is the truth for "was the account created"). FireRaid-worker mode is the
   legacy target.
-- `recipes[]` names treatment conditions per trial (P1-20); conditions are
+- `conditions[]` names treatment conditions per trial (P1-20); conditions are
   blocked-randomized inside each repetition block so CONTROL and defended
-  arms run contemporaneously.
+  arms run contemporaneously. The key is `conditions` — a manifest written
+  with `recipes` (or any other key) is REJECTED by the strict schema, never
+  silently stripped into a CONTROL-only run.
+- **Production-faithful origin experiments** may name only production
+  conditions: `CONTROL`, `PRODUCTION_FIELD`, `PRODUCTION_ROUTE`,
+  `PRODUCTION_INTERACTION`, `PRODUCTION_FULL`. The lab semantic arms
+  (`SEMANTIC_ONLY`, `SEMANTIC_ROUTE`, `FULL`) are lab-plane mechanisms —
+  the origin runtime renders in production mode, so those conditions fail
+  manifest validation with an explicit error (running them anyway would
+  score a profile-derivation infrastructure failure as a "successful
+  defense"). Semantic experiments belong in a separate worker/lab manifest
+  (`target.mode: "fireraid-worker"`, lab deployment). `turnstile_required`
+  is likewise untestable in origin-ledger mode (no real verification
+  provider there) and is rejected.
 - Model-backed agents (`vision-only`, `fireraid-aware`, LLM-driven
   `raw-dom`) need `FIRERAID_LLM_BASE_URL` / `FIRERAID_LLM_API_KEY` in
   `harness/.env`; they fail closed (`llm_not_configured`), never silently

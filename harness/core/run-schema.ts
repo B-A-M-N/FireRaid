@@ -400,10 +400,15 @@ export const ExperimentManifestSchema = z.object({
      *   "origin-ledger" — the host-neutral admit() middleware in front of
      *     the ordinary upstream ledger app. `origin_account_created` (read
      *     from the origin's own ledger) is the PRIMARY endpoint.
+     *
+     *     P1-AUDIT-2 response (P1-9): origin-ledger mode is structurally
+     *     distinct — the runner substitutes the local facade for target.url
+     *     and there is NO separately-addressable ledger endpoint (the
+     *     runtime owns the upstream). The unused `ledgerUrl` field is
+     *     REMOVED: unused experimental configuration makes operators think
+     *     they are targeting something they are not.
      */
     mode: z.enum(["fireraid-worker", "origin-ledger"]).default("fireraid-worker"),
-    /** origin-ledger mode: URL of the origin ledger's read-only probe. */
-    ledgerUrl: z.string().url().optional(),
   }),
   repetitions: z.number().int().positive(),
   timeout_ms: z.number().int().positive(),
@@ -544,6 +549,35 @@ export function validateManifest(raw: unknown): {
 
   const manifest = result.data;
   const errors: string[] = [];
+
+  /**
+   * P1-AUDIT-2 (P0-8/P0-9): origin-ledger mode is PRODUCTION rendering —
+   * the runtime derives every profile in production mode. Conditions that
+   * cannot exist there fail VALIDATION, not the trial: a lab-only semantic
+   * recipe previously reached profile derivation, failed closed into an
+   * EVAL_ERROR deny, no account was created — and the experiment read the
+   * infrastructure failure as a successful defense (exactly the confound
+   * the production-family split exists to prevent). The same rule rejects
+   * Turnstile efficacy arms: the reference verification adapter always
+   * verifies, so turnstile_required=true would be a silent no-op arm
+   * (TURNSTILE_ONLY ≈ CONTROL) rather than a treatment.
+   */
+  if (manifest.target.mode === "origin-ledger") {
+    const conditions = manifest.conditions ?? [manifest.recipe_id ?? "CONTROL"];
+    const semanticConditions = conditions.filter((c) =>
+      ["SEMANTIC_ONLY", "SEMANTIC_ROUTE", "FULL"].includes(c)
+    );
+    if (semanticConditions.length > 0) {
+      errors.push(
+        `target.mode=origin-ledger renders in PRODUCTION; lab-only semantic conditions are not expressible there: ${semanticConditions.join(", ")} (use PRODUCTION_FIELD/PRODUCTION_ROUTE/PRODUCTION_INTERACTION/PRODUCTION_FULL, or run a separate lab-mode experiment)`
+      );
+    }
+    if (manifest.turnstile_required !== undefined) {
+      errors.push(
+        `target.mode=origin-ledger has no real verification provider: turnstile_required is untestable there (the reference adapter always verifies — the arm would be a silent no-op). Omit it or measure Turnstile separately against the worker.`
+      );
+    }
+  }
 
   // FR-R4-034: check that every declared agent is implemented
   for (const agent of manifest.agents) {
