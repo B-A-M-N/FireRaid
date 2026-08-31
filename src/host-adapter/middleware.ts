@@ -85,6 +85,27 @@ export interface MiddlewareResult {
   /** Ingest ACK (kind === "ingest"): events accepted, stream watermark. */
   received?: number;
   acceptedThrough?: number;
+  /**
+   * P1-AUDIT-2 (P0-4): the session this request resolved to (POST paths +
+   * canary GET). Host-layer bookkeeping only — hosts own session identity
+   * (they issue the cookie); this lets a host join its own request log to
+   * the middleware's outcomes. Never serialized to clients by the reference
+   * facade.
+   */
+  sessionId?: string;
+  /**
+   * P1-AUDIT-2 (P0-4): the decision's total score, set on every path that
+   * reached decide() (admit and decision-deny alike — a QUARANTINE's score
+   * is exactly the evidence weight the host may want to log).
+   */
+  score?: number;
+  /**
+   * P1-AUDIT-2 (P0-4): the registration identity carried on the evaluated
+   * submit (the FireRaid-stripped form's email field). Lets a host join the
+   * middleware outcome to ITS OWN submission record (the origin ledger's
+   * email-keyed truth) without re-parsing carriers.
+   */
+  submittedEmail?: string;
 }
 
 // Strip FireRaid-injected fields before forwarding to the upstream so the
@@ -151,7 +172,7 @@ export async function admit(
   // ── POST: evaluate, strip, forward only when admission allows ────────────
   if (req.method === "POST") {
     const sessionId = await deps.session.readSessionId(req);
-    if (!sessionId) return { kind: "deny", disposition: "NO_SESSION" };
+    if (!sessionId) return { kind: "deny", disposition: "NO_SESSION", sessionId: undefined };
 
     // P1-AUDIT-2 (P1-14): the REAL client (public/signup.js) persists its
     // queue via POST /api/events ({events: [...]} → {received, acceptedThrough})
@@ -169,21 +190,30 @@ export async function admit(
       } catch {
         return { kind: "deny", disposition: "BAD_JSON" };
       }
-      const accepted = await deps.telemetry.accept(sessionId, ingestBody.events ?? []);
-      if (accepted === null) {
+      const ingest = await deps.telemetry.accept(sessionId, ingestBody.events ?? []);
+      if (ingest.kind === "invalid") {
         // Structurally invalid batch — the Worker returns 400/413 here; the
         // middleware's deny contract is the host shape for the same verdict.
         deps.enforcement.deny(sessionId, "INVALID_TELEMETRY");
         return { kind: "deny", disposition: "INVALID_TELEMETRY" };
       }
-      // Worker-shaped ACK. acceptedThrough = the stream's last seq — the
-      // reference store is seq-ordered, so everything accepted is stored.
-      const stream = await deps.telemetry.collect(sessionId);
-      const acceptedThrough = stream.length > 0 ? stream[stream.length - 1].seq : 0;
+      if (ingest.kind === "conflict") {
+        // Worker FR-P0-2 semantics: a watermark conflict is not a denial —
+        // the ACK carries the authoritative watermark so the client trims
+        // exactly and retries the remainder.
+        return {
+          kind: "ingest",
+          acceptedThrough: ingest.acceptedThrough,
+          received: 0,
+        };
+      }
+      // Worker-shaped ACK. The adapter reports the authoritative watermark —
+      // NOT "the stream's last seq" (that aliasing made a duplicate ACK
+      // claim fresh acceptance and broke the client's trim accounting).
       return {
         kind: "ingest",
-        acceptedThrough,
-        received: accepted,
+        acceptedThrough: ingest.acceptedThrough,
+        received: ingest.received,
       };
     }
 
@@ -284,11 +314,14 @@ export async function admit(
       // same rejected, same seq/dt/kind/target/meta — no fabricated
       // timestamps). A structurally invalid batch is a DENY, never a
       // silent repair (FR-R6-035 semantics on the host plane).
-      const accepted = await deps.telemetry.accept(sessionId, body.eventBatch ?? []);
-      if (accepted === null) {
+      const ingest = await deps.telemetry.accept(sessionId, body.eventBatch ?? []);
+      if (ingest.kind === "invalid") {
         deps.enforcement.deny(sessionId, "INVALID_TELEMETRY");
         return { kind: "deny", disposition: "INVALID_TELEMETRY" };
       }
+      // kind "conflict" on the submit carrier is NOT a denial either — the
+      // session's stored stream already holds the overlapping events and the
+      // scoring pass below reads the whole persisted stream.
       if (profile.interaction?.scoringEnabled) {
         // Score the WHOLE persisted stream, not just the final batch.
         const events = await deps.telemetry.collect(sessionId);
@@ -330,6 +363,10 @@ export async function admit(
       }
       const decision = decide(evidence, policy);
 
+      // P1-AUDIT-2 (P0-4): the email the stripped registration carries —
+      // the join key to the host's own ledger truth.
+      const submittedEmail = typeof form.email === "string" ? form.email : undefined;
+
       // P1-AUDIT-2: forward ONLY on an explicit ACCEPT. The prior code
       // forwarded on everything but QUARANTINE, so REVIEW (unresolved),
       // REJECT_TURNSTILE and INVALID_SESSION all reached the origin — the
@@ -337,7 +374,7 @@ export async function admit(
       // (fail-closed); only ACCEPT is unambiguous admission.
       if (decision.disposition !== "ACCEPT") {
         deps.enforcement.deny(sessionId, decision.disposition);
-        return { kind: "deny", disposition: decision.disposition };
+        return { kind: "deny", disposition: decision.disposition, sessionId, score: decision.score, submittedEmail };
       }
 
       // Admission allowed: strip FireRaid fields and forward to upstream.
@@ -356,6 +393,9 @@ export async function admit(
         kind: "admit",
         disposition: decision.disposition,
         upstreamCreated,
+        sessionId,
+        score: decision.score,
+        submittedEmail,
       };
     } catch {
       // Fail-closed: never forward on an evaluation error.

@@ -121,16 +121,49 @@ export interface HostVerificationAdapter {
  *     the SAME contract/routes/telemetry.ts validation — no synthetic
  *     timestamps, no weaker normalizer);
  *   - collect() returns the session's full validated stream for scoring.
+ *
+ * P1-AUDIT-2 (P0-2): accept() implements the Worker's RETRY/IDEMPOTENCY
+ * semantics, not a bare append. The Worker path reads a per-session
+ * watermark (sessions.last_event_seq), strips the already-accepted prefix
+ * from an overlapping batch, accepts only the never-stored suffix, treats
+ * an exact replay as idempotent success, and reports the authoritative
+ * acceptedThrough. A host adapter that blindly appended would DOUBLE-COUNT
+ * a retried batch — pointer counts, key counts, focus transitions,
+ * direct-fill evidence, weak-score totals — and diverge from the Worker
+ * under completely normal transport retries. The canonical outcome union
+ * below mirrors routes/telemetry.ts's IngestOutcome (host shape).
  */
+export type HostTelemetryIngest =
+  | {
+      kind: "accepted";
+      /** Events actually persisted (the never-stored suffix). */
+      received: number;
+      /** Authoritative watermark after persistence (last stored seq; -1 = none). */
+      acceptedThrough: number;
+      /** True when the batch carried nothing new (exact replay / empty). */
+      duplicate: boolean;
+    }
+  | {
+      /** Lost a concurrent-write race; the stored stream may not hold this batch. */
+      kind: "conflict";
+      acceptedThrough: number;
+    }
+  | {
+      /** Structurally invalid batch — the middleware denies (FR-R6-035). */
+      kind: "invalid";
+      code: string;
+    };
+
 export interface HostTelemetryAdapter {
   /**
-   * Validate + persist one client batch. Returns the number of accepted
-   * events, or null when the batch is structurally invalid (the middleware
-   * treats that as a deny — an invalid observation stream is never silently
-   * repaired: FR-R6-035 semantics on the host plane too).
+   * Validate + persist one client batch under the Worker's watermark
+   * semantics (see HostTelemetryIngest). A structurally invalid batch
+   * returns kind:"invalid" — the middleware treats that as a deny (an
+   * invalid observation stream is never silently repaired: FR-R6-035
+   * semantics on the host plane too).
    */
-  accept(sessionId: string, batch: unknown): Promise<number | null>;
-  /** The session's full validated stream, in seq order. */
+  accept(sessionId: string, batch: unknown): Promise<HostTelemetryIngest>;
+  /** The session's full validated stream, in seq order (deduplicated). */
   collect(sessionId: string): Promise<ValidatedEvent[]>;
 }
 

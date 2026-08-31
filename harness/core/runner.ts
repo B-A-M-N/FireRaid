@@ -509,6 +509,7 @@ async function executeTrial(
         prompt_variant: trial.prompt,
         extractor: trial.extractor,
         profile_version: manifest.profile_version,
+        ...(trial.recipeId !== undefined ? { recipe_id: trial.recipeId } : {}),
         profile_id: "pending-reconciliation",
         defense_families: [],
         server_reconciled: false,
@@ -589,6 +590,12 @@ async function executeTrial(
   // FR-P0-7: v2-native. exposure_state/surface start UNMEASURED and are
   // revised from the perception artifacts below — the old binary
   // canary_exposed was never a measurement for artifact-less agents.
+  // P1-AUDIT-2 (P0-3): recipe_id is the ASSIGNED treatment identity —
+  // immutable experimental assignment known at creation time, NOT something
+  // reconciliation confers. Worker-lab reconciliation re-confirms it from
+  // the server; origin-ledger mode has no server, so without it here the
+  // analyzer's grouping rule (recipe_id → else defense_families) collapsed
+  // every origin trial into one group.
   let record: RunRecordV2 = {
     schema_version: 2,
     run_id: runId,
@@ -600,6 +607,7 @@ async function executeTrial(
     prompt_variant: trial.prompt,
     extractor: trial.extractor,
     profile_version: manifest.profile_version,
+    ...(trial.recipeId !== undefined ? { recipe_id: trial.recipeId } : {}),
     profile_id: "pending-reconciliation",
     defense_families: [],
     // FR-R6-058: session_id is the SERVER-generated session identifier —
@@ -750,9 +758,41 @@ async function executeTrial(
   // account? Read-only probe; probe failure records UNKNOWN (undefined),
   // never a silent false. In this mode `record.submitted` means only "the
   // agent reached the middleware's submit endpoint" (secondary measurement).
+  //
+  // P1-AUDIT-2 (P0-4): the two truths are INDEPENDENT. The ledger probe sets
+  // ONLY origin_reconciled/origin_account_created — it is not evidence about
+  // FireRaid's decision. server_reconciled=true now requires the
+  // middleware-side HostTrialTruth (profile identity, families, disposition,
+  // score, canary verification) captured by the runtime's facade; a run can
+  // be server-reconciled without origin truth (probe down) or
+  // origin-reconciled without server truth (no submit evaluated).
   if (originRuntime && ledgerEmail) {
     const created = await originRuntime.ledgerHasAccount(ledgerEmail);
     record.origin_ledger_mode = "read-only-probe";
+
+    // Middleware-side truth first (independent of the probe).
+    const truth = originRuntime.trialTruth();
+    if (truth) {
+      record.session_id = truth.sessionId;
+      record.profile_id = truth.profileId;
+      record.profile_variant_id = truth.profileVariantId;
+      record.defense_families = [...truth.defenseFamilies];
+      record.scoring_policy = truth.scoringPolicy;
+      record.submitted = true;
+      if (truth.disposition) record.disposition = truth.disposition;
+      if (truth.score !== undefined) record.score = truth.score;
+      record.canary_verified_server = truth.canaryVerified;
+      // P0-12: exact issued treatment material — the same reconciliation
+      // input Worker-lab mode gets from the server's treatment_material.
+      record.treatment_material = {
+        semantic_nonce: truth.treatmentMaterial.semanticNonce ?? null,
+        decoy_field_name: truth.treatmentMaterial.fieldName ?? null,
+        route_token: truth.treatmentMaterial.routeToken ?? null,
+      };
+      record.server_reconciled = true;
+    }
+
+    // Origin-ledger truth second (still independent).
     if (created === null) {
       // P1-AUDIT-2 (P0-1): the primary outcome is UNKNOWABLE. The prior
       // `created ?? false` recorded "not created" — crediting the defense
@@ -761,11 +801,9 @@ async function executeTrial(
       // the run lands in the analyzer's origin_infra plane.
       record.origin_reconciled = false;
       record.error_code = record.error_code ?? "ORIGIN_RECONCILIATION_FAILED";
-      record.server_reconciled = false;
     } else {
       record.origin_account_created = created;
       record.origin_reconciled = true;
-      record.server_reconciled = true;
     }
   }
 

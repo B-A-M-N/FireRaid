@@ -16,6 +16,7 @@ import {
 } from "../core/session-envelope.js";
 import type { ProfileKeyRing } from "../core/session.js";
 import { validateTelemetryBatch, type ValidatedEvent } from "../security/request-validation.js";
+import type { HostTelemetryIngest } from "./interface.js";
 import type { DefenseProfile } from "../types/profile.js";
 import { getPolicyOrThrow, type ScoringPolicy } from "../core/decision.js";
 
@@ -129,21 +130,60 @@ export function resolveScoringPolicy(
  * the same events, and preserves the same seq/dt/kind/target/meta as the
  * Worker plane. No synthetic timestamps, no weaker normalizer.
  *
- * In-memory per-isolate state, like ReferenceCanaryStore; hosts with real
- * persistence implement HostTelemetryAdapter over their own store using the
- * same canonical validation.
+ * P1-AUDIT-2 (P0-2): the store implements the WORKER's watermark-gated
+ * ingestion semantics over the canonical events:
+ *   - per-session watermark = the highest stored seq;
+ *   - an overlapping batch's accepted prefix is trimmed, only the
+ *     never-stored suffix persists (a lost-ACK retry no longer
+ *     double-counts pointer/key/focus/direct-fill evidence);
+ *   - an exact replay is idempotent success reporting the watermark;
+ *   - the ACK carries the authoritative acceptedThrough so a client can
+ *     trim its outbox exactly like the Worker's /api/events contract.
+ * Hosts with real persistence implement HostTelemetryAdapter over their own
+ * store using the same watermark contract.
  */
 export class ReferenceTelemetryAdapter implements HostTelemetryAdapter {
-  /** sessionId → events in arrival (seq) order. */
+  /** sessionId → events in seq order (deduplicated by the watermark gate). */
   private readonly streams = new Map<string, ValidatedEvent[]>();
 
-  async accept(sessionId: string, batch: unknown): Promise<number | null> {
+  async accept(sessionId: string, batch: unknown): Promise<HostTelemetryIngest> {
     const check = validateTelemetryBatch(batch);
-    if (!check.ok) return null;
+    if (!check.ok) {
+      return { kind: "invalid", code: check.code };
+    }
+    if (check.events.length === 0) {
+      // Empty batch: idempotent, reports the current watermark (Worker
+      // ingestTelemetryBatch's empty-batch branch).
+      const stream = this.streams.get(sessionId) ?? [];
+      return {
+        kind: "accepted",
+        received: 0,
+        acceptedThrough: stream.length > 0 ? stream[stream.length - 1].seq : -1,
+        duplicate: true,
+      };
+    }
     const stream = this.streams.get(sessionId) ?? [];
-    for (const e of check.events) stream.push(e);
+    // Watermark = the last stored seq (the stream is seq-ordered by
+    // construction — validateTelemetryBatch enforces strictly increasing
+    // seq within a batch, and the suffix filter keeps the store sorted).
+    const watermark = stream.length > 0 ? stream[stream.length - 1].seq : -1;
+    // Strip the already-accepted prefix; persist only the never-stored
+    // suffix (Worker ingestTelemetryBatch's overlap semantics — a batch
+    // may carry both stored events AND new ones).
+    const suffix = check.events.filter((e) => e.seq > watermark);
+    if (suffix.length === 0) {
+      // Exact replay: idempotent success (never a double append).
+      return { kind: "accepted", received: 0, acceptedThrough: watermark, duplicate: true };
+    }
+    for (const e of suffix) stream.push(e);
     this.streams.set(sessionId, stream);
-    return check.events.length;
+    const acceptedThrough = suffix[suffix.length - 1].seq;
+    return {
+      kind: "accepted",
+      received: suffix.length,
+      acceptedThrough,
+      duplicate: false,
+    };
   }
 
   async collect(sessionId: string): Promise<ValidatedEvent[]> {
@@ -153,6 +193,15 @@ export class ReferenceTelemetryAdapter implements HostTelemetryAdapter {
   /** Test/diagnostics accessor: the raw persisted stream for a session. */
   streamsFor(sessionId: string): ValidatedEvent[] {
     return this.streams.get(sessionId) ?? [];
+  }
+
+  /**
+   * Lifecycle hygiene: drop one session's stream. Unique per-trial session
+   * ids mean cross-trial contamination cannot happen, but a long-lived
+   * host process should not accumulate every session forever.
+   */
+  clearSession(sessionId: string): void {
+    this.streams.delete(sessionId);
   }
 }
 

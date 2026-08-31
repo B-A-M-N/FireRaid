@@ -211,12 +211,21 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
       enforcement,
       recipe: LAB_FULL,
       telemetry: {
-        // Canonical validation + in-memory persistence (P0-5 contract).
+        // Canonical validation + watermark-gated in-memory persistence
+        // (P0-5 + P0-2 contract).
         accept: async (sid: string, b: unknown) => {
           const check = validateTelemetryBatch(b);
-          if (!check.ok) return null;
-          (store[sid] ??= []).push(...check.events);
-          return check.events.length;
+          if (!check.ok) return { kind: "invalid" as const, code: check.code };
+          const stream = (store[sid] ??= []);
+          const wm = stream.length > 0 ? stream[stream.length - 1].seq : -1;
+          const suffix = check.events.filter((e) => e.seq > wm);
+          for (const e of suffix) stream.push(e);
+          return {
+            kind: "accepted" as const,
+            received: suffix.length,
+            acceptedThrough: suffix.length > 0 ? suffix[suffix.length - 1].seq : wm,
+            duplicate: suffix.length === 0,
+          };
         },
         collect: async (sid: string) => store[sid] ?? [],
       },
@@ -250,12 +259,21 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
       enforcement,
       recipe: LAB_FULL,
       telemetry: {
-        // Canonical validation + in-memory persistence (P0-5 contract).
+        // Canonical validation + watermark-gated in-memory persistence
+        // (P0-5 + P0-2 contract).
         accept: async (sid: string, b: unknown) => {
           const check = validateTelemetryBatch(b);
-          if (!check.ok) return null;
-          (store[sid] ??= []).push(...check.events);
-          return check.events.length;
+          if (!check.ok) return { kind: "invalid" as const, code: check.code };
+          const stream = (store[sid] ??= []);
+          const wm = stream.length > 0 ? stream[stream.length - 1].seq : -1;
+          const suffix = check.events.filter((e) => e.seq > wm);
+          for (const e of suffix) stream.push(e);
+          return {
+            kind: "accepted" as const,
+            received: suffix.length,
+            acceptedThrough: suffix.length > 0 ? suffix[suffix.length - 1].seq : wm,
+            duplicate: suffix.length === 0,
+          };
         },
         collect: async (sid: string) => store[sid] ?? [],
       },

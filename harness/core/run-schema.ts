@@ -149,6 +149,8 @@ export const RunRecordV1Schema = z.object({
   profile_id: z.string(),
   recipe_id: z.string().optional(),
   defense_families: z.array(z.string()),
+  /** P1-AUDIT-2 (P0-4): the issued profile's scoring policy (origin mode). */
+  scoring_policy: z.string().optional(),
   semantic_template: z.string().optional(),
   placement: z.string().optional(),
   // P1-AUDIT-2 (audit item 16): the EXACT issued per-family material from
