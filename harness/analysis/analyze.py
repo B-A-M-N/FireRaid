@@ -41,13 +41,37 @@ def load_runs(experiment_id: str, records_dir: str | None = None) -> list:
         # FR-POST-R6-P7: resume.json (and any other non-RunRecord bookkeeping
         # file) lives alongside run records — a record has schema_version.
         # Loading bookkeeping as data produced phantom NO_RECIPE groups.
-        if f.name == "resume.json":
+        # P0-6: experiment.json is the declaration sidecar, not a record.
+        if f.name in ("resume.json", "experiment.json"):
             continue
         with open(f) as fh:
             data = json.load(fh)
         if isinstance(data, dict) and "schema_version" in data:
             runs.append(data)
     return runs
+
+
+def load_declaration(experiment_id: str, records_dir: str | None = None) -> dict | None:
+    """
+    P1-AUDIT-2 (P0-6): read the experiment.json sidecar the runner writes
+    (target_mode, manifest_hash, conditions). Absent for legacy datasets —
+    None, never fabricated.
+    """
+    dir_path = Path(records_dir) if records_dir else RESULTS_DIR / experiment_id
+    decl_path = dir_path / "experiment.json"
+    if not decl_path.exists():
+        return None
+    try:
+        with open(decl_path) as fh:
+            decl = json.load(fh)
+        return decl if isinstance(decl, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def origin_endpoint_is_required(declaration: dict | None) -> bool:
+    """P0-6: is this dataset declared origin-ledger (origin coverage REQUIRED)?"""
+    return bool(declaration) and declaration.get("target_mode") == "origin-ledger"
 
 
 def exposure_view(r: dict) -> tuple:
@@ -223,11 +247,16 @@ def origin_endpoint_rates(assignable: list, n_assignable: int) -> dict:
     """
     P1-AUDIT-2 Phase C: PRIMARY endpoint rates from origin-ledger truth.
 
-    origin_account_creation_rate — share of ASSIGNABLE trials where the
-        ordinary upstream actually created the account (ITT denominator:
-        infrastructure failures excluded, agent timeouts/errors included —
-        every non-created outcome blocked the account).
+    origin_account_creation_rate — share of ELIGIBLE trials (P0-6: origin
+        truth actually MEASURED — origin_reconciled true AND the field
+        present) where the ordinary upstream created the account. Within
+        that denominator the ITT stance holds: infrastructure failures are
+        excluded (they are not assignable at all), agent timeouts/errors
+        included — every non-created outcome blocked the account.
     itt_block_rate — 1 − creation rate; the defense-effectiveness endpoint.
+    origin_measurement_coverage — eligible / assignable (data quality).
+        Unmeasured assignable records are NOT counted as "not created"
+        (the P0-6 dilution defect); low coverage INVALIDATES the endpoint.
 
     When no run carries origin truth (FireRaid-worker mode) both rates are
     None and `submitted` remains the best available proxy — never silently
@@ -237,24 +266,33 @@ def origin_endpoint_rates(assignable: list, n_assignable: int) -> dict:
     # present. A run with origin_reconciled=false is already in the
     # origin_infra plane (not assignable); a legacy record with the field
     # absent but reconciled-true is accepted for back-compat.
-    with_truth = [
+    eligible = [
         r for r in assignable
         if r.get("origin_reconciled") is True and "origin_account_created" in r
     ]
-    if n_assignable <= 0 or not with_truth:
+    n_eligible = len(eligible)
+    coverage = (n_eligible / n_assignable) if n_assignable > 0 else 0.0
+    if n_assignable <= 0 or n_eligible == 0:
         return {
-            "n_with_origin_truth": len(with_truth),
+            "n_with_origin_truth": n_eligible,
+            "origin_measurement_coverage": (coverage, 0.0, 0.0),
             "origin_account_creation_rate": None,
             "itt_block_rate": None,
         }
-    created = sum(1 for r in assignable if r.get("origin_account_created") is True)
-    creation_ci = wilson_interval(created, n_assignable)
+    created = sum(1 for r in eligible if r.get("origin_account_created") is True)
+    creation_ci = wilson_interval(created, n_eligible)
     return {
-        "n_with_origin_truth": len(with_truth),
-        "origin_account_creation_rate": (created / n_assignable, *creation_ci),
+        "n_with_origin_truth": n_eligible,
+        "origin_measurement_coverage": (
+            coverage,
+            *wilson_interval(n_eligible, n_assignable),
+        ),
+        # P0-6: created / ELIGIBLE — the old `created / n_assignable`
+        # diluted the rate with unmeasured records acting as blocks.
+        "origin_account_creation_rate": (created / n_eligible, *creation_ci),
         # Complement of the creation rate; CI bounds mirrored.
         "itt_block_rate": (
-            1 - created / n_assignable,
+            1 - created / n_eligible,
             1 - creation_ci[1],
             1 - creation_ci[0],
         ),
@@ -480,24 +518,92 @@ def group_runs(runs: list) -> dict:
 
 
 # ─── P1-26: primary + secondary endpoints, risk reduction with CIs ──────────
+# P1-AUDIT-2 (P0-5): the PRIMARY endpoint is ORIGIN-LEDGER account creation.
+# The old `account_creation_rate()` measured `submitted` — FireRaid's own
+# claim that it forwarded — and labeled it "account creation". It survives
+# only as the explicitly-named submission_proxy_rate (secondary, worker-mode
+# fallback), never as the primary.
 
-def account_creation_rate(runs: list) -> tuple:
+def submission_proxy_rate(runs: list) -> tuple:
     """
-    PRIMARY endpoint (P1-26): account-creation rate = fraction of VALID runs
-    whose submission was accepted by the origin (server `submitted` is True).
-    Returns (point, lo, hi) Wilson interval. Denominator = valid runs.
+    SECONDARY proxy (P1-26 legacy, renamed P0-5): fraction of VALID runs
+    whose submission was accepted by FireRaid (server `submitted` is True).
+
+    This is NOT account creation. It is "the middleware allowed a
+    submission through" — the best available endpoint for FireRaid-worker
+    mode records (no origin ledger), and a useful comparator against the
+    origin endpoint. It must never be labeled "account-creation rate".
     """
     valid = [r for r in runs if is_valid_run(r)]
     n = len(valid)
     if n == 0:
         return (0.0, 0.0, 0.0)
-    created = sum(1 for r in valid if r.get("submitted") is True)
+    submitted = sum(1 for r in valid if r.get("submitted") is True)
+    return (submitted / n, *wilson_interval(submitted, n))
+
+
+def origin_eligible(runs: list) -> list:
+    """
+    P1-AUDIT-2 (P0-6): the origin endpoint's true denominator. A run is
+    ELIGIBLE only when origin truth was actually MEASURED for it:
+    origin_reconciled is True AND origin_account_created is present.
+    Assignable runs without origin truth (legacy worker records,
+    probe-outage records) are NOT silently counted as "not created" — the
+    prior denominator let unmeasured records dilute the primary endpoint
+    exactly like successful blocks.
+    """
+    return [
+        r for r in runs
+        if r.get("origin_reconciled") is True
+        and "origin_account_created" in r
+    ]
+
+
+def account_creation_rate(runs: list) -> tuple:
+    """
+    PRIMARY endpoint (P1-26 / P0-5): account-creation rate from ORIGIN
+    LEDGER truth — the share of ELIGIBLE runs (P0-6) whose origin
+    reconciliation observed the ordinary upstream actually creating the
+    account. Wilson interval over that denominator.
+
+    Returns (0, 0, 0) when no run in `runs` carries origin truth — an
+    honest "unmeasured", never a silent 0% via a proxy substitution.
+    """
+    eligible = [
+        r for r in origin_eligible(runs)
+        if is_assignable(r)
+    ]
+    n = len(eligible)
+    if n == 0:
+        return (0.0, 0.0, 0.0)
+    created = sum(1 for r in eligible if r.get("origin_account_created") is True)
     return (created / n, *wilson_interval(created, n))
+
+
+def origin_measurement_coverage(runs: list) -> tuple:
+    """
+    P0-6: data-quality companion to the primary endpoint — the share of
+    ASSIGNABLE runs that actually carry origin truth. For an experiment
+    declared target.mode=origin-ledger this coverage must be ~100%
+    (excluded: classified infrastructure failures); a materially lower
+    coverage INVALIDATES the endpoint and the report says so loudly.
+    """
+    assignable = [r for r in runs if is_assignable(r)]
+    if not assignable:
+        return (0.0, 0.0, 0.0)
+    measured = len(origin_eligible(runs))
+    return (measured / len(assignable), *wilson_interval(measured, len(assignable)))
 
 
 def risk_reduction(control_runs: list, defended_runs: list) -> dict:
     """
     P1-26: defended-minus-control effect on the PRIMARY endpoint.
+
+    P1-AUDIT-2 (P0-5): the primary endpoint is ORIGIN account creation. When
+    NEITHER arm carries origin truth (pure FireRaid-worker records) the
+    function falls back to the SUBMISSION PROXY — explicitly labeled in the
+    returned dict — so worker-mode reports still work but never present the
+    proxy as account creation.
 
     Absolute risk reduction (ARR) = control_rate - defended_rate.
     Relative risk reduction (RRR) = ARR / control_rate.
@@ -508,11 +614,15 @@ def risk_reduction(control_runs: list, defended_runs: list) -> dict:
 
     Returns a dict with point estimates + CIs for both ARR and RRR, plus the
     per-arm account-creation rates. If the control arm has zero created
-    accounts (or zero valid runs), RRR is undefined (None) rather than a
+    accounts (or zero eligible runs), RRR is undefined (None) rather than a
     fabricated "infinite protection" claim.
     """
-    c_rate, c_lo, c_hi = account_creation_rate(control_runs)
-    d_rate, d_lo, d_hi = account_creation_rate(defended_runs)
+    c_origin_n = len([r for r in origin_eligible(control_runs) if is_assignable(r)])
+    d_origin_n = len([r for r in origin_eligible(defended_runs) if is_assignable(r)])
+    using_origin = (c_origin_n + d_origin_n) > 0
+    rate_fn = account_creation_rate if using_origin else submission_proxy_rate
+    c_rate, c_lo, c_hi = rate_fn(control_runs)
+    d_rate, d_lo, d_hi = rate_fn(defended_runs)
 
     arr = c_rate - d_rate
     arr_lo = c_lo - d_hi
@@ -534,6 +644,11 @@ def risk_reduction(control_runs: list, defended_runs: list) -> dict:
         "rrr": (rrr, rrr_lo, rrr_hi),
         "control_n": sum(1 for r in control_runs if is_valid_run(r)),
         "defended_n": sum(1 for r in defended_runs if is_valid_run(r)),
+        # P0-5: which truth the effect was computed on. Never let a worker-
+        # mode proxy render as "account creation".
+        "endpoint_basis": "origin_account_creation" if using_origin else "submission_proxy",
+        "control_n_eligible": c_origin_n,
+        "defended_n_eligible": d_origin_n,
     }
 
 
@@ -816,13 +931,17 @@ def print_endpoints(experiment_id: str, records_dir: str | None = None):
     """
     P1-26: endpoints report.
 
-    PRIMARY endpoint = account-creation rate (origin ledger contains the synthetic
-    account). For each defended condition vs CONTROL, print absolute + relative
-    risk reduction with propagated CIs. Then print the human-control
-    false-positive UPPER bound (never a "zero" claim). Secondary endpoints
-    (legit completion, REVIEW/QUARANTINE, retry success, causal hits,
-    stop/handoff, errors/timeouts, p50/p95 latency, storage cost) are summarized
-    from compute_rates per group.
+    PRIMARY endpoint = ORIGIN account-creation rate (the ordinary upstream's
+    own ledger). For each defended condition vs CONTROL, print absolute +
+    relative risk reduction with propagated CIs — computed on the origin
+    endpoint when origin truth exists (P0-5), explicitly labeled as the
+    submission proxy otherwise. Origin measurement coverage (P0-6) is
+    reported per arm; a coverage the origin-ledger protocol cannot justify
+    INVALIDATES the endpoint and is said so in the output. Then print the
+    human-control false-positive UPPER bound (never a "zero" claim).
+    Secondary endpoints (legit completion, REVIEW/QUARANTINE, retry success,
+    causal hits, stop/handoff, errors/timeouts, p50/p95 latency, storage
+    cost) are summarized from compute_rates per group.
     """
     runs = load_runs(experiment_id, records_dir)
     if not runs:
@@ -838,9 +957,50 @@ def print_endpoints(experiment_id: str, records_dir: str | None = None):
         return
 
     control = groups["CONTROL"]
-    c_rate, c_lo, c_hi = account_creation_rate(control)
-    print(f"\nPRIMARY endpoint: account-creation rate (defended vs CONTROL)")
-    print(f"  CONTROL account-creation: {c_rate*100:.1f}% [{c_lo*100:.1f}%, {c_hi*100:.1f}%]  (n={sum(1 for r in control if is_valid_run(r))})")
+
+    # P0-6: for a dataset DECLARED origin-ledger, incomplete origin coverage
+    # on assignable trials invalidates the primary endpoint — the report
+    # says so prominently instead of rendering a diluted rate.
+    declaration = load_declaration(experiment_id, records_dir)
+    if origin_endpoint_is_required(declaration):
+        all_assignable = [r for r in runs if is_assignable(r)]
+        n_elig = len(origin_eligible(runs))
+        if all_assignable and n_elig < len(all_assignable):
+            print(
+                f"\n  *** ORIGIN ENDPOINT INVALID (P0-6): experiment is declared\n"
+                f"  origin-ledger but only {n_elig}/{len(all_assignable)} assignable\n"
+                f"  trials carry origin truth. The endpoint is NOT reported as an\n"
+                f"  efficacy result; re-run the missing trials or exclude them via\n"
+                f"  the classified-infrastructure protocol. ***\n"
+            )
+
+    # P0-5: the primary endpoint is the ORIGIN ledger. The submission proxy
+    # prints alongside it whenever both are measurable — the two MUST be
+    # allowed to diverge (a forwarded submission is not a created account).
+    control_origin_n = len(origin_eligible(control))
+    using_origin = control_origin_n > 0 or any(
+        len(origin_eligible(rs)) > 0 for name, rs in groups.items() if name != "CONTROL"
+    )
+    rate_fn = account_creation_rate if using_origin else submission_proxy_rate
+    basis_label = (
+        "origin account-creation (PRIMARY)"
+        if using_origin
+        else "submission proxy (NO origin truth in dataset — NOT account creation)"
+    )
+
+    c_rate, c_lo, c_hi = rate_fn(control)
+    print(f"\nPRIMARY endpoint: {basis_label}")
+    print(f"  CONTROL: {c_rate*100:.1f}% [{c_lo*100:.1f}%, {c_hi*100:.1f}%]  (n_eligible={len([r for r in origin_eligible(control) if is_assignable(r)])}, n_valid={sum(1 for r in control if is_valid_run(r))})")
+    # P0-6: coverage, always visible for the primary endpoint.
+    cov, cov_lo, cov_hi = origin_measurement_coverage(control)
+    print(f"  CONTROL origin measurement coverage: {cov*100:.1f}% [{cov_lo*100:.1f}%, {cov_hi*100:.1f}%] (eligible/assignable)")
+    # P0-5 divergence visibility: the proxy prints next to the origin truth.
+    if using_origin:
+        p_rate, p_lo, p_hi = submission_proxy_rate(control)
+        print(
+            f"  CONTROL submission proxy (secondary, for divergence): "
+            f"{p_rate*100:.1f}% [{p_lo*100:.1f}%, {p_hi*100:.1f}%]"
+        )
     print(f"  {'Condition':<22} {'Defended%':>10} {'ARR':>10} {'RRR':>10}  {'ARR 95% CI':>18}")
     print("  " + "-" * 72)
     for name in sorted(groups.keys()):
@@ -854,6 +1014,23 @@ def print_endpoints(experiment_id: str, records_dir: str | None = None):
         arr_ci = f"[{rr['arr'][1]*100:.1f}%, {rr['arr'][2]*100:.1f}%]"
         rrr_s = f"{rrr*100:.1f}%" if rrr is not None else "n/a"
         print(f"  {name:<22} {d_rate*100:>9.1f}% {arr*100:>9.1f}% {rrr_s:>10}  {arr_ci:>18}")
+        # Per-arm coverage: a defended arm measured on 60% of its trials is
+        # not an efficacy result.
+        arm_cov = origin_measurement_coverage(defended)[0]
+        if using_origin and arm_cov < 1.0:
+            n_assign = len([r for r in defended if is_assignable(r)])
+            n_elig = len([r for r in origin_eligible(defended) if is_assignable(r)])
+            print(
+                f"  {'':22} WARNING: origin coverage {arm_cov*100:.1f}% "
+                f"({n_elig}/{n_assign} assignable measured) — unmeasured "
+                f"trials are EXCLUDED, not counted as blocks"
+            )
+    if using_origin:
+        print(
+            f"\n  endpoint basis: {risk_reduction(control, groups[sorted(k for k in groups if k != 'CONTROL')[0]])['endpoint_basis']}"
+            if len(groups) > 1
+            else "\n  endpoint basis: origin_account_creation"
+        )
 
     # Human-control false-positive upper bound (honest, never "zero").
     human_control = [r for r in control if str(r.get("agent", "")).startswith("human")]

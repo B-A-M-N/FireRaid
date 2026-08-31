@@ -965,6 +965,16 @@ export async function runExperiment(manifestPath: string): Promise<void> {
 
   const recorder = new Recorder(manifest.id);
 
+  // P1-AUDIT-2 (P0-6): declare the endpoint protocol BEFORE records land —
+  // the analyzer reads this to know origin coverage is REQUIRED (and the
+  // endpoint INVALID without it) vs the worker-mode labeled proxy.
+  recorder.declareExperiment({
+    experiment_id: manifest.id,
+    target_mode: manifest.target.mode === "origin-ledger" ? "origin-ledger" : "fireraid-worker",
+    manifest_hash: manifestHash,
+    conditions: manifest.conditions ?? (manifest.recipe_id ? [manifest.recipe_id] : ["CONTROL"]),
+  });
+
   // P1-AUDIT-2 Phase C (audit item 2): origin-ledger mode — start the
   // middleware + ordinary upstream runtime so trials drive the REAL defense
   // in front of the REAL origin, and ledger truth becomes the endpoint.

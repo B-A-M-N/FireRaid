@@ -85,8 +85,15 @@ describe("P0-3: origin-ledger records carry assigned treatment identity", () => 
 
     // Load the ACTUAL record files (not expandManifest output).
     expect(existsSync(resultDir())).toBe(true);
-    const files = readdirSync(resultDir()).filter((f) => f.endsWith(".json") && f !== "resume.json");
+    const files = readdirSync(resultDir()).filter(
+      (f) => f.endsWith(".json") && f !== "resume.json" && f !== "experiment.json"
+    );
     expect(files.length).toBe(2);
+    // P0-6: the endpoint-protocol declaration sidecar the analyzer reads.
+    const declaration = JSON.parse(
+      readFileSync(join(resultDir(), "experiment.json"), "utf-8")
+    ) as { target_mode?: string };
+    expect(declaration.target_mode).toBe("origin-ledger");
 
     const records = files.map((f) =>
       JSON.parse(readFileSync(join(resultDir(), f), "utf-8")) as Record<string, unknown>

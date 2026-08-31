@@ -57,6 +57,36 @@ export class Recorder {
   }
 
   /**
+   * P1-AUDIT-2 (P0-6): write the experiment-level declaration sidecar the
+   * analyzer reads to know which endpoint protocol a dataset belongs to
+   * (origin-ledger ⇒ the primary endpoint REQUIRES origin measurement
+   * coverage; worker-mode ⇒ `submitted` stays a labeled proxy). Called once
+   * by the runner before the first record lands. Idempotent.
+   */
+  declareExperiment(declaration: {
+    experiment_id: string;
+    target_mode: "origin-ledger" | "fireraid-worker";
+    manifest_hash: string;
+    conditions?: string[];
+  }): void {
+    const dir = join(RESULTS_DIR, this.experimentId);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const path = join(dir, "experiment.json");
+    // Never clobber a declaration whose hash differs — that is a different
+    // experiment occupying the same directory and must not be papered over.
+    if (existsSync(path)) {
+      const existing = JSON.parse(readFileSync(path, "utf-8")) as { manifest_hash?: string };
+      if (existing.manifest_hash !== declaration.manifest_hash) {
+        throw new Error(
+          `experiment.json hash mismatch for ${this.experimentId}: directory already declares ${existing.manifest_hash}`
+        );
+      }
+      return;
+    }
+    writeFileSync(path, JSON.stringify(declaration, null, 2));
+  }
+
+  /**
    * Persist a single run record.
    * FR-R4-084: validates via Zod before writing.
    * FR-P0-7: v2 schema — a v1 record handed here is a caller bug (the runner
