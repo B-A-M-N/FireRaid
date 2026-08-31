@@ -21,6 +21,13 @@ export const AgentType = z.enum([
   "browser-use",
   "ax-snapshot",
   "raw-http",
+  // P1-21: realistic attacker architectures (added to the taxonomy; see
+  // ADAPTER_CAPABILITIES for implemented status).
+  "dom-automation",   // visible-inputs, non-LLM DOM filler
+  "fill-everything",  // brute-forces every field including decoys
+  "humanized-pw",     // humanized Playwright (human-like timing)
+  "vision-only",      // screenshot + vision-LLM
+  "fireraid-aware",   // knows the defense exists, filters it
 ]);
 export type AgentType = z.infer<typeof AgentType>;
 
@@ -386,7 +393,14 @@ export const ExperimentManifestSchema = z.object({
   //   turnstile_required — per-run Turnstile experimental condition.
   //   holdout_mode — restrict semantic templates to the holdout partition.
   // recipe_id XOR recipe: one treatment identity per run (FR-R6-010).
+  // P1-20: `conditions` is the INTERLEAVED superset — a manifest lists every
+  //   ablation condition it wants in ONE experiment; expandManifest emits one
+  //   trial per condition×dimension and a seeded shuffle interleaves the
+  //   conditions WITHIN each repetition block so CONTROL/defended comparisons
+  //   are contemporaneous (no batch-order confounding). When `conditions` is
+  //   absent, the single `recipe_id` is used (backward compatible).
   recipe_id: RecipeIdSchema.optional(),
+  conditions: z.array(RecipeIdSchema).optional(),
   turnstile_required: z.boolean().optional(),
   holdout_mode: z.boolean().default(false),
 
@@ -440,6 +454,20 @@ export const ADAPTER_CAPABILITIES: Record<AgentType, AdapterCapabilities> = {
   // baseline, no model, no prompt, extractor-agnostic (it reads transport
   // bytes only; exposure artifacts are typed as raw-html).
   "raw-http":       { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "0.1.0" },
+  // P1-21: realistic attacker architectures. Capability rows are declared so
+  // the runner's matrix-discipline checks (implemented? extractor-compatible?)
+  // know about them; `implemented: false` rows are rejected by validateManifest
+  // until their adapter lands (fail-closed, never silently skipped).
+  //   dom-automation  — visible-inputs, NON-LLM DOM filler (landed below).
+  //   fill-everything — brute-forces every field incl. decoys (model/LLM).
+  //   humanized-pw    — humanized Playwright timing (non-LLM).
+  //   vision-only     — screenshot + vision-LLM (model/LLM, large spend).
+  //   fireraid-aware  — knows the defense, filters it (model/LLM).
+  "dom-automation":  { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "0.1.0" },
+  "fill-everything": { implemented: false, usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.0.0" },
+  "humanized-pw":    { implemented: false, usesModel: false, usesPrompt: false, supportedExtractors: [], version: "0.0.0" },
+  "vision-only":     { implemented: false, usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.0.0" },
+  "fireraid-aware":  { implemented: false, usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.0.0" },
 };
 
 /**
@@ -506,51 +534,104 @@ export function validateManifest(raw: unknown): {
 }
 
 /**
- * Expand a manifest into individual trial descriptors.
+ * Expand a manifest into individual trial descriptors (P1-20).
+ *
  * FR-R4-039: only vary dimensions an adapter consumes.
+ * P1-20: when the manifest declares `conditions`, emit one trial per
+ *   (condition × agent × model × prompt × extractor × controlVariant) and
+ *   then deterministically interleave the conditions WITHIN each repetition
+ *   block via a seeded Fisher–Yates (seed derived from manifest.seed +
+ *   repetition). This makes CONTROL/defended comparisons contemporaneous —
+ *   no batch-order confounding — so the ablation delta is not confounded by
+ *   a condition that ran entirely before another.
+ *
+ * When `conditions` is omitted, the single top-level `recipe_id` is used and
+ *   trials retain their creation order (backward compatible).
  */
 export function expandManifest(manifest: ExperimentManifest): TrialDescriptor[] {
-  const trials: TrialDescriptor[] = [];
+  const conditions = manifest.conditions ?? [manifest.recipe_id ?? "CONTROL"];
+
+  const allTrials: TrialDescriptor[] = [];
   let index = 0;
 
   for (let rep = 0; rep < manifest.repetitions; rep++) {
-    for (const agent of manifest.agents) {
-      const caps = ADAPTER_CAPABILITIES[agent];
+    const block: TrialDescriptor[] = [];
+    for (const recipeId of conditions) {
+      for (const agent of manifest.agents) {
+        const caps = ADAPTER_CAPABILITIES[agent];
 
-      // FR-R4-039: only vary models/prompts if the adapter uses them
-      const models = caps.usesModel ? manifest.models : [manifest.models[0]];
-      const prompts = caps.usesPrompt ? manifest.prompts : [manifest.prompts[0]];
+        // FR-R4-039: only vary models/prompts if the adapter uses them
+        const models = caps.usesModel ? manifest.models : [manifest.models[0]];
+        const prompts = caps.usesPrompt ? manifest.prompts : [manifest.prompts[0]];
 
-      // FR-R4-039: extractors = intersection with agent-supported, or first default if manifest didn't list them
-      const effectiveExtractors = getEffectiveExtractors(manifest, caps);
+        // FR-R4-039: extractors = intersection with agent-supported, or first default if manifest didn't list them
+        const effectiveExtractors = getEffectiveExtractors(manifest, caps);
 
-      for (const model of models) {
-        for (const prompt of prompts) {
-          for (const extractor of effectiveExtractors) {
-            // FR-R7-006: human agent expands across control variants
-            const controlVariants =
-              agent === "human" ? manifest.control_variants : [undefined];
-            for (const cv of controlVariants) {
-              trials.push({
-                index,
-                repetition: rep,
-                agent,
-                model,
-                prompt,
-                extractor,
-                // FR-R6-008: named treatment identity for provenance.
-                recipeId: manifest.recipe_id,
-                controlVariant: cv,
-              });
-              index++;
+        for (const model of models) {
+          for (const prompt of prompts) {
+            for (const extractor of effectiveExtractors) {
+              // FR-R7-006: human agent expands across control variants
+              const controlVariants =
+                agent === "human" ? (manifest.control_variants ?? ["normal"]) : [undefined];
+              for (const cv of controlVariants) {
+                block.push({
+                  index,
+                  repetition: rep,
+                  agent,
+                  model,
+                  prompt,
+                  extractor,
+                  // FR-R6-008: named treatment identity for provenance.
+                  recipeId,
+                  controlVariant: cv,
+                });
+                index++;
+              }
             }
           }
         }
       }
     }
+
+    // P1-20: interleave conditions within this repetition block. Split the
+    // block by condition, then round-robin (seeded shuffle order) so each
+    // condition appears before the next condition repeats — contemporaneous.
+    if (manifest.conditions) {
+      const byCondition = new Map<string, TrialDescriptor[]>();
+      for (const t of block) {
+        const key = t.recipeId ?? "CONTROL";
+        if (!byCondition.has(key)) byCondition.set(key, []);
+        byCondition.get(key)!.push(t);
+      }
+      const order = interleaveOrder([...byCondition.keys()], manifest.seed, rep);
+      for (const key of order) {
+        for (const t of byCondition.get(key)!) allTrials.push(t);
+      }
+    } else {
+      for (const t of block) allTrials.push(t);
+    }
   }
 
-  return trials;
+  return allTrials;
+}
+
+/**
+ * Deterministic per-block interleave order for the given condition keys.
+ * Seeded by `${seed}:${rep}` so the order is reproducible and stable across
+ * runs (resume correctness) but varies per repetition block.
+ */
+function interleaveOrder(keys: string[], seed: string, rep: number): string[] {
+  const arr = [...keys];
+  let h = 2166136261 >>> 0;
+  const mix = (s: string) => { for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } };
+  mix(`${seed}:${rep}`);
+  // Seeded Fisher–Yates
+  for (let i = arr.length - 1; i > 0; i--) {
+    h ^= h << 13; h >>>= 0; h ^= h >>> 17; h ^= h << 5; h >>>= 0;
+    const j = h % (i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
 }
 
 /**

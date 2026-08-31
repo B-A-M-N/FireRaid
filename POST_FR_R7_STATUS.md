@@ -187,3 +187,49 @@ The LLMs exist exclusively in the attack-plane harness, and remain so.
 | Production resource efficiency | ~75% (compact metrics + removed redundant writes; lazy-persist still pending) |
 | Public deployment validation | not yet |
 | FI production readiness | not yet |
+
+## P1 audit response (this round)
+
+The seven remaining P1 audit items plus the two umbrella closers are now landed
+on a single working tree (uncommitted at time of writing; gate numbers below are
+from the final green run). The audit's key milestone — the ledger experiment
+(P1-24) — is what establishes whether FireRaid works, and it passes.
+
+| P1 | Item | State | Notes |
+|----|------|-------|-------|
+| P1-24 | Middleware adapter + upstream ledger proof | **DONE** | `scripts/ledger-upstream.mjs` (ordinary upstream, own ledger, knows nothing of FireRaid), `scripts/ledger-proof.mjs` (reference adapter in front: inject on GET, evaluate before forwarding POST, strip FireRaid fields, forward only on ACCEPT). Primary truth = did the origin ledger contain the synthetic account. Live gate: `LEDGER PROOF: PASS`. |
+| P1-25 | Host-neutral admission + adapters | **DONE** | `src/host-adapter/{interface,reference-render,reference-adapters,middleware,index}.ts`. Host-adapter seam for state/session, render/inject, verification, telemetry, enforcement. `admit()` is fail-closed. The middleware proof exercises this exact seam. |
+| P1-20 | Randomized interleaved conditions | **DONE** | `harness/core/run-schema.ts` `conditions[]` + seeded per-block interleave (contemporaneous CONTROL/defended). `harness/experiments/exp-interleaved*.json`. 4 unit tests. |
+| P1-26 | Correct endpoints + statistics | **DONE** | `harness/analysis/analyze.py`: primary endpoint = account-creation rate; `risk_reduction()` = ARR + RRR with propagated Wilson CIs; `false_positive_upper_bound()` replaces "zero false positives" with a one-sided upper bound. `analyze.py <exp> --endpoints` report. Verified against pilot (RRR path works on a combined CONTROL+FULL dataset). |
+| P1-21 | Realistic attacker architectures | **PARTIAL** | Taxonomy + `ADAPTER_CAPABILITIES` registry + fail-closed `validateManifest` (unimplemented architectures rejected, never silently skipped) + `dom-automation` (visible-inputs, non-LLM) adapter landed and wired. `fill-everything`, `humanized-pw`, `vision-only`, `fireraid-aware` declared `implemented:false` (model-backed; blocked on LLM spend/browser deps per R7-027). 3 unit tests. |
+| P1-22 | Opaque production carriers | **DONE** | `src/core/renderer.ts` strips `data-fr-*`, `fr-decoy` class, and visible `/c/<token>` text from **production**; lab keeps explicit markers (researchers can grep). 4 guard tests. |
+| P1-23 | Production semantic mechanism | **DECIDED (narrowed)** | Production thesis narrowed to decoy-field + decoy-route + interaction. S01–S08 semantic instruction templates remain LAB-ONLY (FR-R7-013); production renders no semantic-instruction surface. S09 stays a measurement probe, not a defense. Residual `fr_` field-name + `/c/` route prefix are profile/server-bound bindings (submit.ts/canary.ts), documented as accepted residual, not a to-do. 2 enforce tests. |
+| #8 | Full gate + status doc | **DONE** | All gates green (see below). This document updated to not overstate proven claims. |
+| #9 | Commit hygiene | open at time of writing — working tree held clean of survey artifacts; awaiting commit. |
+
+### Final gate run (green)
+
+| Gate | Result |
+|------|--------|
+| typecheck (`tsc --noEmit`) | clean |
+| lint (`eslint --max-warnings 0`) | 0 warnings |
+| unit (`vitest run tests/unit`) | **396 passed** |
+| integration (`npm run test:integration`) | **33 passed** |
+| envelope (`npm run test:envelope`) | **7 passed** |
+| e2e (`playwright test`) | **12 passed** |
+| a11y (`playwright ... a11y`) | **18 passed** |
+| budget (`npm run test:budget`) | **9/9 scenarios PASS** |
+| ledger proof (`npm run test:ledger-proof`) | **PASS** |
+
+### What is proven vs still open (honest)
+
+- **PROVEN this round:** the host-neutral middleware seam correctly gates an
+  ordinary upstream and the origin ledger is the ground truth; production
+  rendering carries no FireRaid-identifying signature and no semantic-instruction
+  surface; the endpoints/statistics analyzer no longer claims "zero false
+  positives".
+- **STILL OPEN (not regressed):** actual autonomous-agent *efficacy* evidence
+  from a real LLM pilot (R7-027) — the `dom-automation`, `fill-everything`,
+  `vision-only`, `fireraid-aware` architectures need real trials before any
+  reduction in signup rate can be claimed. The interleaved manifest (P1-20) is
+  the vehicle for those trials once credentials exist.

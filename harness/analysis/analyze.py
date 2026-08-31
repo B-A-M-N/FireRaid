@@ -330,6 +330,93 @@ def group_runs(runs: list) -> dict:
     return groups
 
 
+# ─── P1-26: primary + secondary endpoints, risk reduction with CIs ──────────
+
+def account_creation_rate(runs: list) -> tuple:
+    """
+    PRIMARY endpoint (P1-26): account-creation rate = fraction of VALID runs
+    whose submission was accepted by the origin (server `submitted` is True).
+    Returns (point, lo, hi) Wilson interval. Denominator = valid runs.
+    """
+    valid = [r for r in runs if is_valid_run(r)]
+    n = len(valid)
+    if n == 0:
+        return (0.0, 0.0, 0.0)
+    created = sum(1 for r in valid if r.get("submitted") is True)
+    return (created / n, *wilson_interval(created, n))
+
+
+def risk_reduction(control_runs: list, defended_runs: list) -> dict:
+    """
+    P1-26: defended-minus-control effect on the PRIMARY endpoint.
+
+    Absolute risk reduction (ARR) = control_rate - defended_rate.
+    Relative risk reduction (RRR) = ARR / control_rate.
+    Each rate carries a Wilson CI; we propagate uncertainty by computing the
+    delta CI via the (conservative) independent-product approximation:
+      delta_lo = (c_lo - d_hi), delta_hi = (c_hi - d_lo)
+    so the interval is wide when either arm is small — honest about power.
+
+    Returns a dict with point estimates + CIs for both ARR and RRR, plus the
+    per-arm account-creation rates. If the control arm has zero created
+    accounts (or zero valid runs), RRR is undefined (None) rather than a
+    fabricated "infinite protection" claim.
+    """
+    c_rate, c_lo, c_hi = account_creation_rate(control_runs)
+    d_rate, d_lo, d_hi = account_creation_rate(defended_runs)
+
+    arr = c_rate - d_rate
+    arr_lo = c_lo - d_hi
+    arr_hi = c_hi - d_lo
+
+    rrr = None
+    rrr_lo = None
+    rrr_hi = None
+    if c_rate > 0:
+        rrr = arr / c_rate
+        # CI on RRR: (arr_lo/c_hi, arr_hi/c_lo) — ratio of independent bounds.
+        rrr_lo = arr_lo / c_hi if c_hi > 0 else None
+        rrr_hi = arr_hi / c_lo if c_lo > 0 else None
+
+    return {
+        "control_rate": (c_rate, c_lo, c_hi),
+        "defended_rate": (d_rate, d_lo, d_hi),
+        "arr": (arr, arr_lo, arr_hi),
+        "rrr": (rrr, rrr_lo, rrr_hi),
+        "control_n": sum(1 for r in control_runs if is_valid_run(r)),
+        "defended_n": sum(1 for r in defended_runs if is_valid_run(r)),
+    }
+
+
+def false_positive_upper_bound(control_runs: list, z: float = 2.326) -> tuple:
+    """
+    P1-26: replace "zero false positives" claims with an UPPER-CONFIDENCE-BOUND
+    on the human-control false-positive rate.
+
+    For the human/control arm we never observe a causal hit, but "0 observed"
+    does not mean "0 possible". Report the one-sided upper bound on the rate
+    of quarantined/flagged legitimate submissions: for x observed events in n
+    valid runs, the (1-α) upper bound is the Wilson/Clopper–Pearson-style
+    bound using z (2.326 ≈ 98% one-sided, 2.576 ≈ 99%). This is the honest
+    statement: "at most X% (98% CI upper)", never "exactly 0%".
+
+    Returns (observed_count, n_valid, upper_bound_rate).
+    """
+    valid = [r for r in control_runs if is_valid_run(r)]
+    n = len(valid)
+    if n == 0:
+        return (0, 0, 0.0)
+    # A "false positive" = a legitimate human run that was quarantined.
+    flagged = sum(1 for r in valid if r.get("disposition") == "QUARANTINE")
+    # Wilson upper bound (one-sided) with the given z.
+    p = flagged / n
+    denom = 1 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    margin = z * math.sqrt((p * (1 - p) + z * z / (4 * n)) / n) / denom
+    return (flagged, n, min(1.0, center + margin))
+
+
+
 def group_cross_sectional(runs: list, dimension: str) -> dict:
     """
     FR-R6-072: cross-sectional grouping — the other analytical axis.
@@ -577,6 +664,75 @@ def print_report(experiment_id: str, records_dir: str | None = None):
             print(f"  {metric:<25} {val*100:>6.1f}%  [{lo*100:.1f}%, {hi*100:.1f}%]")
 
 
+def print_endpoints(experiment_id: str, records_dir: str | None = None):
+    """
+    P1-26: endpoints report.
+
+    PRIMARY endpoint = account-creation rate (origin ledger contains the synthetic
+    account). For each defended condition vs CONTROL, print absolute + relative
+    risk reduction with propagated CIs. Then print the human-control
+    false-positive UPPER bound (never a "zero" claim). Secondary endpoints
+    (legit completion, REVIEW/QUARANTINE, retry success, causal hits,
+    stop/handoff, errors/timeouts, p50/p95 latency, storage cost) are summarized
+    from compute_rates per group.
+    """
+    runs = load_runs(experiment_id, records_dir)
+    if not runs:
+        return
+
+    print(f"\n{'='*70}")
+    print(f"FireRaid Endpoints Report: {experiment_id}")
+    print(f"{'='*70}")
+
+    groups = group_runs(runs)
+    if "CONTROL" not in groups:
+        print("No CONTROL group found — cannot compute defended-minus-control deltas.")
+        return
+
+    control = groups["CONTROL"]
+    c_rate, c_lo, c_hi = account_creation_rate(control)
+    print(f"\nPRIMARY endpoint: account-creation rate (defended vs CONTROL)")
+    print(f"  CONTROL account-creation: {c_rate*100:.1f}% [{c_lo*100:.1f}%, {c_hi*100:.1f}%]  (n={sum(1 for r in control if is_valid_run(r))})")
+    print(f"  {'Condition':<22} {'Defended%':>10} {'ARR':>10} {'RRR':>10}  {'ARR 95% CI':>18}")
+    print("  " + "-" * 72)
+    for name in sorted(groups.keys()):
+        if name == "CONTROL":
+            continue
+        defended = groups[name]
+        rr = risk_reduction(control, defended)
+        d_rate = rr["defended_rate"][0]
+        arr = rr["arr"][0]
+        rrr = rr["rrr"][0]
+        arr_ci = f"[{rr['arr'][1]*100:.1f}%, {rr['arr'][2]*100:.1f}%]"
+        rrr_s = f"{rrr*100:.1f}%" if rrr is not None else "n/a"
+        print(f"  {name:<22} {d_rate*100:>9.1f}% {arr*100:>9.1f}% {rrr_s:>10}  {arr_ci:>18}")
+
+    # Human-control false-positive upper bound (honest, never "zero").
+    human_control = [r for r in control if str(r.get("agent", "")).startswith("human")]
+    if human_control:
+        flagged, n, ub = false_positive_upper_bound(human_control)
+        print(f"\nHuman-control false-positive UPPER bound (98% CI one-sided):")
+        print(f"  observed quarantined legit runs: {flagged}/{n}")
+        print(f"  => at most {ub*100:.2f}% (98% CI upper) — NOT '0%'")
+
+    # Secondary endpoints per defended group.
+    print(f"\nSECONDARY endpoints per condition:")
+    print(f"  {'Condition':<22} {'N_valid':>8} {'Submit%':>9} {'Rev%':>7} {'Quar%':>7} {'Stop%':>7} {'Hand%':>7} {'Err%':>7}")
+    print("  " + "-" * 70)
+    for name in sorted(groups.keys()):
+        g = groups[name]
+        rates = compute_rates(g, len(g))
+        if not rates:
+            continue
+        sub = rates.get("submission_rate", (0, 0, 0))[0]
+        rev = rates.get("review_rate", (0, 0, 0))[0]
+        quar = rates.get("quarantine_rate", (0, 0, 0))[0]
+        stop = rates.get("stop_rate", (0, 0, 0))[0]
+        hand = rates.get("handoff_rate", (0, 0, 0))[0]
+        err = rates.get("error_rate", (0, 0, 0))[0]
+        print(f"  {name:<22} {rates['n_valid']:>8} {sub*100:>8.1f}% {rev*100:>6.1f}% {quar*100:>6.1f}% {stop*100:>6.1f}% {hand*100:>6.1f}% {err*100:>6.1f}%")
+
+
 def export_csv(experiment_id: str, output_path: str, records_dir: str | None = None):
     runs = load_runs(experiment_id, records_dir)
     if not runs:
@@ -615,6 +771,8 @@ if __name__ == "__main__":
     if "--csv" in sys.argv:
         idx = sys.argv.index("--csv")
         export_csv(exp_id, sys.argv[idx + 1], records_dir)
+    elif "--endpoints" in sys.argv:
+        print_endpoints(exp_id, records_dir)
     else:
         print_report(exp_id, records_dir)
         # FR-R6-074: official reports must fail if any authoritative run

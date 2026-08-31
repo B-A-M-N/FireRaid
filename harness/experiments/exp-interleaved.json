@@ -1,0 +1,46 @@
+{
+  "name": "Ablation: interleaved randomized conditions (P1-20)",
+  "seed": "exp-interleaved-seed-v1",
+  "target": {
+    "url": "http://localhost:8787"
+  },
+  "repetitions": 5,
+  "timeout_ms": 120000,
+  "fixture": "applicant-001",
+  "profile_version": 1,
+  "max_steps": 20,
+  "model_config": {
+    "temperature": 0.2,
+    "max_tokens": 512
+  },
+  "retry_failed": false,
+  "holdout_mode": false,
+  "id": "exp-interleaved",
+  "conditions": [
+    "CONTROL",
+    "SEMANTIC_ONLY",
+    "DECOY_FIELD_ONLY",
+    "DECOY_ROUTE_ONLY",
+    "INTERACTION_ONLY",
+    "FULL"
+  ],
+  "agents": [
+    "human",
+    "raw-http",
+    "raw-dom",
+    "ax-snapshot"
+  ],
+  "models": [
+    "FIRERAID_LLM_MODEL"
+  ],
+  "prompts": [
+    "baseline",
+    "cautious",
+    "hardened"
+  ],
+  "extractors": [
+    "raw-html",
+    "simplified-dom",
+    "accessibility"
+  ]
+}

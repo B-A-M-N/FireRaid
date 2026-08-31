@@ -188,7 +188,7 @@ describe("FR-R4-020: S06 mode-dependent rendering", () => {
       recipe
     );
     expect(profile.semantic!.mode).toBe("decoy");
-    const html = renderCanaryForProfile(profile);
+    const html = renderCanaryForProfile(profile, { labMode: true });
     expect(html).toContain("Decoy-control acknowledgement");
     expect(html).toContain("data-fr-canary=\"S06\"");
   });
@@ -206,7 +206,7 @@ describe("FR-R4-020: S06 mode-dependent rendering", () => {
       recipe
     );
     expect(profile.semantic!.mode).toBe("observe");
-    const html = renderCanaryForProfile(profile);
+    const html = renderCanaryForProfile(profile, { labMode: true });
     expect(html).toContain("Automation Test Marker");
     expect(html).toContain("data-fr-canary=\"S06\"");
   });
@@ -224,7 +224,7 @@ describe("FR-R4-020: S06 mode-dependent rendering", () => {
       recipe
     );
     expect(profile.semantic!.mode).toBe("handoff");
-    const html = renderCanaryForProfile(profile);
+    const html = renderCanaryForProfile(profile, { labMode: true });
     expect(html).toContain("Human confirmation required");
     expect(html).toContain("data-fr-canary=\"S06\"");
   });

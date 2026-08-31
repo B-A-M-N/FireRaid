@@ -11,11 +11,18 @@ The project intentionally separates deterministic production defense logic from 
 ## What FireRaid Does
 
 - Generates unpredictable, session-specific defense profiles from a server secret
-- Injects semantic canaries, decoy fields, and decoy endpoints into a signup flow
+- Injects decoy fields, decoy endpoints (routes), and coarse interaction telemetry into the **production** signup flow — these are the production-eligible carriers
+- Injects **semantic canary** templates into the **lab/research** signup flow only (S01–S08 are lab-only by design, FR-R7-013); production emits no semantic-instruction surface
 - Collects coarse interaction telemetry (no invasive fingerprinting)
 - Correlates observed behavior with the exact profile issued
 - Produces auditable decision records (ACCEPT / REVIEW / QUARANTINE)
-- Measures defense effectiveness against autonomous browser agents
+- Measures defense effectiveness against autonomous browser agents in the lab
+
+> **Scope of proof.** FireRaid's efficacy is established by the lab ledger experiment
+> (P1-24): an ordinary upstream signup app, ignorant of FireRaid, whose own account
+> ledger is the ground truth for whether a synthetic account was created. Semantic
+> canaries are a lab measurement mechanism, not a deployed production defense. The
+> production thesis is narrowed to decoy-field + decoy-route + interaction (P1-23).
 
 ## Architecture
 

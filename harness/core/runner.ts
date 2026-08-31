@@ -37,6 +37,7 @@ import { RawHttpAdapter } from "../adapters/raw-http.js";
 import { BrowserUseAdapter } from "../adapters/browser-use-adapter.js";
 import { HumanControlAdapter } from "../adapters/human-control.js";
 import { AxSnapshotAdapter } from "../adapters/ax-snapshot/ax-snapshot.js";
+import { DomAutomationAdapter } from "../adapters/dom-automation.js";
 
 const RESULTS_DIR = join(process.cwd(), "harness", "results");
 
@@ -70,6 +71,9 @@ function createAdapter(agent: AgentType, extractor?: string): AgentAdapter {
     // FR-POST-R6-P1: scripted non-LLM baseline — ignores page semantics.
     case "raw-http":
       return new RawHttpAdapter();
+    // P1-21: DOM-automation — visible-inputs, non-LLM DOM filler.
+    case "dom-automation":
+      return new DomAutomationAdapter();
     // FR-POST-R6-P2: browser abstraction agent via python execution worker.
     case "browser-use":
       return new BrowserUseAdapter();
