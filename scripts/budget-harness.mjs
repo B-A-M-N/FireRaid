@@ -39,7 +39,9 @@ import { DatabaseSync } from "node:sqlite";
 const ROOT = new URL("..", import.meta.url).pathname;
 const PORT = 8797;
 const BASE = `http://localhost:${PORT}`;
-const OBSERVABILITY_URL = `${BASE}/cdn-cgi/local/explorer/api/local/observability/query`;
+// P1-16: spans are read from wrangler's local trace-store SQLite, not the
+// /cdn-cgi/local/explorer query API — that API strips the `attributes`
+// column where rows_read/rows_written live.
 
 /**
  * Audit budgets. A scenario exceeding ANY budget fails the run.

@@ -11,7 +11,10 @@ FireRaid is a research platform for testing automated signup defenses. It is del
 
 ### Session
 - Cryptographically random 128-bit ID (`crypto.getRandomValues`)
-- Secure cookie: `__Host-fr_sid` (HttpOnly, Secure, SameSite=Lax)
+- Secure cookie: `__Host-fr_sid` (HttpOnly, Secure, SameSite=Strict)
+  - Lab mode: bare session id (stateful rows from first request)
+  - Production: HMAC-signed envelope (stateless until the first stateful
+    action materializes the session row — FR-P1-19)
 - 30-minute TTL
 
 ### Defense Profile

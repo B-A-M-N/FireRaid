@@ -252,3 +252,64 @@ from the final green run). The audit's key milestone — the ledger experiment
   architectures (model-backed) need real trials before any reduction in
   signup rate can be claimed. The interleaved manifest (P1-20) is the
   vehicle for those trials once credentials exist.
+
+---
+
+# P1-AUDIT-2 audit response (current round)
+
+**Batch commits:** e00f71d (Batch 0–1: retention sweep module, CAS
+telemetry fold, integrity gate), 6fd12ce (Batch 3: host-neutral
+equivalence), f4fcf31 (Batch 4: production-faithful arms + ledger truth +
+bounded submit), c9362af (Batch 5: security hardening, dead code, admin
+parity) + this commit (Batch 6: docs truth pass).
+
+## Item-by-item accounting
+
+| Item | State | Notes |
+|------|-------|-------|
+| P0-1..P0-12 | **DONE** | Origin-reconciled primary outcome, ledger-proof plane, origin ITT endpoints, envelope fast-path, config validation in cron, per-request span isolation, production family pool, production-faithful recipe arms (PRODUCTION_FIELD/ROUTE/INTERACTION/FULL; FULL ≡ PRODUCTION_FULL on the production plane), honest canary budget scenario, defended-condition FP upper bound with UNMEASURED accounting. |
+| P1-1 mode-family contract | **DONE** | LAB_FAMILIES/PRODUCTION_FAMILIES split; explicit semantic recipes in production fail closed (`FAMILY_NOT_ELIGIBLE_IN_MODE`); random production pool never draws semantic. |
+| P1-7 constant-time consolidation | **DONE** | One primitive in `core/tokens.ts` (length folded into accumulator); session/lab/admin/envelope callers re-pointed. |
+| P1-8 canary insert | **DONE** | Targeted `ON CONFLICT (session_id, family, expected_hash) DO NOTHING`. |
+| P1-9 compact causal-hit state | **DONE** | `sessions.causal_route_hit` (migration 0014) set in the same batch as the hit insert; submit reads the flag from the session SELECT (per-submit COUNT gone; legacy rows fall back to EXISTS). |
+| P1-10 raw telemetry retention | **DONE** | 7-day default raw window (`FIRERAID_RAW_TELEMETRY_RETENTION_DAYS`), clamped ≤ derived window; admin `?rawDays=` mirror; documented in SECURITY.md. |
+| P1-12 single assignment read | **DONE** | `readLabAssignment` (submit/canary) + `readLabAssignmentByRunId` (signup bind) — one parse/fail-closed implementation. |
+| P1-14 bounded submit | **DONE** | Client attaches at most ONE batch; middleware serves the telemetry-drain carrier (`kind:"ingest"`); live-found INVALID_TELEMETRY flake fixed. |
+| P1-15 honest canary budget | **DONE** | Bounded retry (20 signups, miss p≈8e-20) then hard throw — silent no-op PASS impossible. |
+| P1-16 budget metric naming | **DONE** | Rows read/written decoded from wrangler trace-store span attributes (the HTTP query API strips them); report separates statement calls from row movement; undecodable = n/a. |
+| P1-17 exposure denominators | **DONE** | Two-level: `exposure_coverage` (data quality) vs `measured_exposure_rate` (the real rate) in the analyzer. |
+| P1-18 honest FP bound | **DONE** | Per-defended-condition human FP table; Wilson one-sided upper bound; missing-human arms UNMEASURED. |
+| P1-19 outcome taxonomy + ITT | **DONE** | Five failure planes; every emitted provider code classified; ITT submission rate defined for all-invalid groups (latent NameError fixed); assignment-based denominator in `compute_rates`. |
+| P1-20 interleaved conditions | **DONE** | (prior round) Blocked-randomized per-repetition conditions. |
+| P1-21 adapter origin-knowledge | **DONE** | `dom-automation` drops `fr_`/`fr-decoy` skip list — visibility is the only filter; decoys rendered visible MUST be filled (that's the ablation signal). |
+| P1-22 browser provenance | **DONE** | Every Playwright-launched adapter carries browser_name/version; browser-use records its own worker provenance. |
+| P1-23 (P1-AUDIT-2) browser-use preflight | **DONE** | python3 + browser_use import probed BEFORE the first trial; mirrors the worker's own import strategy. |
+| P1-24 opaque-claim narrowing | **DONE** | Status + SECURITY.md scope the claim to FIXED presentation signatures; `fr_`/`/c/` residuals documented as accepted (P1-23). |
+| P1-25 production notice | **DONE (verified)** | Classify-and-test already true: inert `data-rt-carrier` template in production, machine-targeted marker lab-only; positive + opacity tests in both renderers. |
+| P1-26 finalizer concurrency | **DONE** | OR IGNORE + SELECT-form evidence inserts + migration 0013 fingerprint; concurrent loser writes NOTHING (constraint-free), exact replays idempotent. 6 real-SQLite tests. |
+| P1-27 dead stores | **DONE** | D1SubmissionStore/D1EvidenceStore + their interfaces deleted (zero callers). |
+| P1-28 canonical metrics | **DONE** | `src/analytics/run-metrics.ts` — admin and analyze.py share definitions; retired column never read; 5 pinning tests; analyzer docstring cross-cites. |
+| P1-29 admin holdout parity | **DONE** | adminSessionDetail uses the shared resolver (holdout + turnstile carried; D1 failures surface as reconstructionError, never a silent random profile). |
+| P1-32 wrangler placeholder | **DONE** | Annotated in wrangler.jsonc; README deployment section explains it. |
+| P2 dead renderer interface | **DONE** | `renderer-interface.ts` deleted; INTEGRATION.md rewritten to the canonical `buildArtifactSet` contract. |
+| Docs truth pass | **DONE** | README (migration chain + deploy flow + current layout), ARCHITECTURE (SameSite=Strict, envelope session), EXPERIMENTS (real agent names, origin-ledger mode, canonical metrics), SECURITY (real limits, CSP without unsafe-inline, retention, constant-time, opacity residuals), THREAT-MODEL (FP bound not zero-FP, truth hierarchy, residuals). |
+
+## Final gate run (green, this round)
+
+| Gate | Result |
+|------|--------|
+| typecheck (`tsc --noEmit`) | clean |
+| lint (`eslint --max-warnings 0`) | 0 warnings |
+| unit (`vitest run tests/unit`) | **515 passed** (43 files) |
+| integration (`npm run test:integration`) | **40 passed** (5 files) |
+| envelope (`npm run test:envelope`) | 7 passed |
+| budget (`node scripts/budget-harness.mjs`) | 9/9 scenarios PASS (now with row-movement truth) |
+| ledger proof (`npm run test:ledger-proof`) | PASS (3 arms) |
+
+## Still open (unchanged, not regressed)
+
+- Real LLM pilot efficacy evidence (R7-027): `vision-only` / `fireraid-aware`
+  model-backed arms need credentials + trials. The interleaved manifest is
+  the vehicle.
+- Remote deploy smoke on a real Cloudflare account (blocked on
+  `database_id` provisioning).

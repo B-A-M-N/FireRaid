@@ -73,13 +73,23 @@ npm install
 cp .env.example .dev.vars
 # Edit .dev.vars with real values (or use the test defaults)
 
-# Create local D1 database
-npx wrangler d1 create fireraid
-# Update wrangler.jsonc database_id with the returned ID
-npx wrangler d1 execute fireraid --local --file=./migrations/0001_initial.sql
-
-# Run locally
+# Run locally (migrations apply automatically to the local D1 store)
 npx wrangler dev
+```
+
+Then open http://localhost:8787/signup
+
+### Deployment
+
+For a remote deployment you need a real D1 database id in `wrangler.jsonc`
+(the checked-in value is an annotated placeholder — `wrangler dev` and all
+test gates ignore it):
+
+```bash
+npx wrangler d1 create fireraid
+# Paste the printed database_id into wrangler.jsonc (all env blocks)
+npx wrangler d1 migrations apply fireraid --remote   # full migration chain
+npm run deploy:production   # or deploy:lab — named-env deploys only
 ```
 
 Then open http://localhost:8787/signup
@@ -107,17 +117,23 @@ python3 harness/analysis/analyze.py <experiment-id>      # rates + group deltas
 src/            Worker source (defense plane)
   core/         Profile engine, catalog, correlation, decision
   routes/       HTTP handlers (signup, submit, canary, telemetry, health)
-  security/     CSRF, cookies, headers
+  security/     CSRF, cookies, headers, admin auth
+  analytics/    Canonical run-metric definitions (shared with the analyzer)
+  host-adapter/ Host-neutral admission seam (middleware, reference render)
+  cloudflare/   D1 stores, session envelopes, retention sweep
   turnstile/    Turnstile verification
 harness/        Attack/research plane
   core/         Runner, adapter interface, recorder
-  adapters/     Human control, raw-DOM, Browser Use, ax-snapshot, raw-http
+  adapters/     Human control, raw-DOM, browser-use, ax-snapshot, raw-http,
+                dom-automation, fill-everything, humanized-pw, vision-only,
+                fireraid-aware
   extractors/   HTML, simplified DOM, accessibility
   experiments/  Declarative manifests
   results/      Structured run output
   analysis/     Python stats + confidence intervals
+scripts/        Ledger proof, upstream, budget harness, test worker
 public/         Static signup + admin pages
-migrations/     D1 schema
+migrations/     D1 schema (apply the whole chain, never just 0001)
 tests/          Unit, integration, e2e, accessibility
 docs/           Architecture, integration, threat model
 ```
