@@ -201,7 +201,7 @@ from the final green run). The audit's key milestone — the ledger experiment
 | P1-25 | Host-neutral admission + adapters | **DONE** | `src/host-adapter/{interface,reference-render,reference-adapters,middleware,index}.ts`. Host-adapter seam for state/session, render/inject, verification, telemetry, enforcement. `admit()` is fail-closed. The middleware proof exercises this exact seam. |
 | P1-20 | Randomized interleaved conditions | **DONE** | `harness/core/run-schema.ts` `conditions[]` + seeded per-block interleave (contemporaneous CONTROL/defended). `harness/experiments/exp-interleaved*.json`. 4 unit tests. |
 | P1-26 | Correct endpoints + statistics | **DONE** | `harness/analysis/analyze.py`: primary endpoint = account-creation rate; `risk_reduction()` = ARR + RRR with propagated Wilson CIs; `false_positive_upper_bound()` replaces "zero false positives" with a one-sided upper bound. `analyze.py <exp> --endpoints` report. Verified against pilot (RRR path works on a combined CONTROL+FULL dataset). |
-| P1-21 | Realistic attacker architectures | **PARTIAL** | Taxonomy + `ADAPTER_CAPABILITIES` registry + fail-closed `validateManifest` (unimplemented architectures rejected, never silently skipped) + `dom-automation` (visible-inputs, non-LLM) adapter landed and wired. `fill-everything`, `humanized-pw`, `vision-only`, `fireraid-aware` declared `implemented:false` (model-backed; blocked on LLM spend/browser deps per R7-027). 3 unit tests. |
+| P1-21 | Realistic attacker architectures | **PARTIAL** | Taxonomy + `ADAPTER_CAPABILITIES` registry + fail-closed `validateManifest` (unimplemented architectures rejected, never silently skipped). Landed + wired: `dom-automation` (visible-inputs), `fill-everything` (omnivorous incl. decoys — non-LLM; deterministic loop, P1-AUDIT-2 Phase F), `humanized-pw` (humanized timing — non-LLM, Phase F). Still `implemented:false` (model-backed; blocked on LLM spend per R7-027): `vision-only`, `fireraid-aware`. Unit tests + Phase F joined ledger proofs. |
 | P1-22 | Opaque production carriers | **DONE** | `src/core/renderer.ts` strips `data-fr-*`, `fr-decoy` class, and visible `/c/<token>` text from **production**; lab keeps explicit markers (researchers can grep). 4 guard tests. |
 | P1-23 | Production semantic mechanism | **DECIDED (narrowed)** | Production thesis narrowed to decoy-field + decoy-route + interaction. S01–S08 semantic instruction templates remain LAB-ONLY (FR-R7-013); production renders no semantic-instruction surface. S09 stays a measurement probe, not a defense. Residual `fr_` field-name + `/c/` route prefix are profile/server-bound bindings (submit.ts/canary.ts), documented as accepted residual, not a to-do. 2 enforce tests. |
 | #8 | Full gate + status doc | **DONE** | All gates green (see below). This document updated to not overstate proven claims. |
@@ -228,8 +228,26 @@ from the final green run). The audit's key milestone — the ledger experiment
   rendering carries no FireRaid-identifying signature and no semantic-instruction
   surface; the endpoints/statistics analyzer no longer claims "zero false
   positives".
+- **PROVEN in the P1-AUDIT-2 phases (b960fad…46e7b45):** Phase A self-audit
+  corrections (visible production decoy hidden, capture-mask session binding,
+  fail-closed lab-assignment reads, fail-closed canary persistence); Phase B
+  experiment validity (recipeId in trial identity, blocked-randomized
+  interleaving, exact model-input evidence, ITT taxonomy + origin-ledger
+  endpoints in the analyzer); Phase C the JOINED causal chain — real harness
+  adapters drive the middleware facade over HTTP and the origin ledger
+  read-back is the primary endpoint; Phase D host equivalence (shared
+  `buildArtifactSet` artifact core with mapper parity tests; host canary
+  route with `HostCanaryStore` — probe→QUARANTINE→empty-ledger proven; host
+  session envelope byte-identical to the Worker's FR-P1-19 envelope); Phase E
+  cost corrections (envelope fast-path verify-then-select, production family
+  pool no longer draws a never-rendered semantic slot, bounded pagehide
+  flush, honest `verified-canary` budget scenario; normal-signup reads
+  14→5); Phase F adversarial breadth (`fill-everything` omnivore springs the
+  decoy trap at the ledger; `humanized-pw` honest-human signals are NOT
+  flagged; urlencoded form-post carrier; host plane serves the real
+  telemetry client).
 - **STILL OPEN (not regressed):** actual autonomous-agent *efficacy* evidence
-  from a real LLM pilot (R7-027) — the `dom-automation`, `fill-everything`,
-  `vision-only`, `fireraid-aware` architectures need real trials before any
-  reduction in signup rate can be claimed. The interleaved manifest (P1-20) is
-  the vehicle for those trials once credentials exist.
+  from a real LLM pilot (R7-027) — the `vision-only` and `fireraid-aware`
+  architectures (model-backed) need real trials before any reduction in
+  signup rate can be claimed. The interleaved manifest (P1-20) is the
+  vehicle for those trials once credentials exist.
