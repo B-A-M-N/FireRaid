@@ -13,6 +13,7 @@
  * FIX: Resolves prompt variant via resolvePrompt (FR-R4-037/038).
  */
 import { createHash } from "node:crypto";
+import { seedEvaluateShim } from "../evaluate-shim.js";
 import { chromium } from "@playwright/test";
 import { numberSnapshot } from "../../extractors/accessibility.js";
 import { callLlm } from "../../core/model.js";
@@ -179,7 +180,12 @@ export class AxSnapshotAdapter implements AgentAdapter {
       "\n\nUse the ax ref (e.g., ax-003) from the snapshot legend as the target. Each snapshot line is numbered in the observation you receive.";
 
     try {
-      const page = await browser.newPage();
+      // P1-AUDIT-2 Phase F: seed the esbuild keepNames shim BEFORE any page
+      // exists — page.evaluate callbacks with named inner functions crash
+      // in the browser context otherwise (see adapters/evaluate-shim.ts).
+      const context = await browser.newContext();
+      await seedEvaluateShim(context);
+      const page = await context.newPage();
 
       // Capture session cookie
       page.on("response", (resp) => {

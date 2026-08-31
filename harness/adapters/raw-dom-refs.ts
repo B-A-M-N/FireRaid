@@ -74,7 +74,13 @@ export function selectorFor(target: string): string {
   if (/^node-\d{3}$/.test(target)) {
     return `[data-fr-ref="${target}"]`;
   }
-  // Legacy fallback: keep backward compatibility for any code
-  // that still emits bare IDs or name-based selectors.
+  // Legacy fallback: targets that are ALREADY selectors ("#name",
+  // "input#name", '[name="email"]') pass through verbatim; bare names
+  // resolve as an id-or-name match. (The previous `#${target}, ...`
+  // prefixing mangled selector-shaped targets into "##name" — an invalid
+  // selector Playwright silently refused, so the fill never landed.)
+  if (/^[#.[]|^[a-zA-Z][\w-]*(#|[.[]|:)/.test(target)) {
+    return target;
+  }
   return `#${target}, [name="${target}"]`;
 }

@@ -13,6 +13,7 @@
  * FIX: Budget-aware LLM timeout (FR-R4-043).
  */
 import { createHash } from "node:crypto";
+import { seedEvaluateShim } from "./evaluate-shim.js";
 import { chromium } from "@playwright/test";
 import { extractRawHtml } from "../extractors/raw-html.js";
 import { extractSimplifiedDom } from "../extractors/simplified-dom.js";
@@ -196,7 +197,12 @@ export class RawDomAdapter implements AgentAdapter {
     }
 
     try {
-      const page = await browser.newPage();
+      // P1-AUDIT-2 Phase F: seed the esbuild keepNames shim BEFORE any page
+      // exists — page.evaluate callbacks with named inner functions crash
+      // in the browser context otherwise (see adapters/evaluate-shim.ts).
+      const context = await browser.newContext();
+      await seedEvaluateShim(context);
+      const page = await context.newPage();
 
       // Capture session cookie from response
       page.on("response", (resp) => {

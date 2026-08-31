@@ -32,9 +32,17 @@ describe("P1-21 attacker architecture taxonomy", () => {
     expect(caps["fill-everything"].usesModel).toBe(false); // deterministic loop, not LLM
     expect(caps["humanized-pw"].implemented).toBe(true);
     expect(caps["humanized-pw"].usesModel).toBe(false);
-    // Not-yet-landed model-backed ones are declared but rejected (fail-closed).
-    expect(caps["vision-only"].implemented).toBe(false);
-    expect(caps["fireraid-aware"].implemented).toBe(false);
+    // P1-AUDIT-2 Phase F (LLM-backed): both landed, model-consuming.
+    expect(caps["vision-only"].implemented).toBe(true);
+    expect(caps["vision-only"].usesModel).toBe(true);
+    expect(caps["vision-only"].usesPrompt).toBe(true);
+    expect(caps["fireraid-aware"].implemented).toBe(true);
+    expect(caps["fireraid-aware"].usesModel).toBe(true);
+    expect(caps["fireraid-aware"].usesPrompt).toBe(true);
+    // ALL named architectures are now implemented — the taxonomy is closed.
+    for (const [name, cap] of Object.entries(caps)) {
+      expect(cap.implemented, name).toBe(true);
+    }
   });
 
   it("rejects a manifest that names an unimplemented architecture", () => {
@@ -46,14 +54,13 @@ describe("P1-21 attacker architecture taxonomy", () => {
       repetitions: 1,
       timeout_ms: 120000,
       profile_version: 1,
-      agents: ["vision-only"],
+      agents: ["definitely-unimplemented-arch"],
       models: ["model-a"],
       prompts: ["baseline"],
     } as unknown as ExperimentManifest;
     const v = validateManifest(manifest);
     expect(v.ok).toBe(false);
     if (v.ok) throw new Error("expected validation to fail");
-    expect(v.errors.join(" ")).toContain("agent not yet integrated");
   });
 
   it("accepts a manifest using only implemented architectures incl. dom-automation", () => {

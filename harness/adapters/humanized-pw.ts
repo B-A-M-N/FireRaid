@@ -19,6 +19,7 @@
  * ACCEPT) against a patient mechanical human mimic.
  */
 import { chromium } from "@playwright/test";
+import { seedEvaluateShim } from "./evaluate-shim.js";
 import type {
   AgentAdapter,
   AgentRunResult,
@@ -54,7 +55,12 @@ export class HumanizedPwAdapter implements AgentAdapter {
     let actionCount = 0;
 
     try {
-      const page = await browser.newPage();
+      // P1-AUDIT-2 Phase F: seed the esbuild keepNames shim BEFORE any page
+      // exists — page.evaluate callbacks with named inner functions crash
+      // in the browser context otherwise (see adapters/evaluate-shim.ts).
+      const context = await browser.newContext();
+      await seedEvaluateShim(context);
+      const page = await context.newPage();
       page.on("response", (resp) => {
         const setCookie = resp.headers()["set-cookie"];
         if (setCookie && setCookie.includes("__Host-fr_sid")) {

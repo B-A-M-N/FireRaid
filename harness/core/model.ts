@@ -88,6 +88,43 @@ export function normalizeBaseUrl(baseUrl: string): string {
   return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
 }
 
+/** Retryable free-tier transport failures (availability, not our bug). */
+function isTransientLlmError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  // HTTP 408/429/5xx from the router; timeouts; empty-router responses.
+  const status = err.message.match(/^LLM error: (\d{3})$/);
+  if (status) return ["408", "429", "500", "502", "503", "504"].includes(status[1]);
+  return err.message === "MODEL_TIMEOUT" || err.message === "LLM_EMPTY_REPLY";
+}
+
+/**
+ * P1-AUDIT-2 Phase F: bounded retry for FREE-TIER transport flakiness —
+ * routers rate-limit (429) and providers shed load (5xx) between rounds.
+ * Fixed short backoff keeps a smoke step under its timeout; MODEL_TIMEOUT
+ * retries only when the backoff budget allows. A call that exhausts retries
+ * throws the LAST error — the adapter's fail-closed mapping is unchanged.
+ * Retries re-execute the ENTIRE attempt (fresh timeout, same payload), and
+ * provenance always reflects the attempt that actually succeeded.
+ */
+const LLM_RETRY_DELAYS_MS = [1500, 4000, 9000];
+async function withTransportRetry<T>(attempt: () => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i <= LLM_RETRY_DELAYS_MS.length; i++) {
+    if (i > 0) {
+      const delay = LLM_RETRY_DELAYS_MS[i - 1];
+      console.warn(`[llm] transient failure (${String(lastErr).slice(0, 80)}); retry ${i}/${LLM_RETRY_DELAYS_MS.length} in ${delay}ms`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    try {
+      return await attempt();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientLlmError(err)) throw err;
+    }
+  }
+  throw lastErr;
+}
+
 export async function callLlm(
   model: string,
   systemPrompt: string,
@@ -105,56 +142,162 @@ export async function callLlm(
   }
 
   const temperature = config.temperature ?? 0.2;
-  const maxTokens = config.maxTokens ?? 512;
+  // Headroom above bare-JSON needs: free-tier models (e.g. reasoning
+  // variants) spend budget on invisible reasoning BEFORE content — a 512
+  // cap routinely yields an empty reply for a one-line action.
+  const maxTokens = config.maxTokens ?? 1024;
 
   const endpoint = `${normalizeBaseUrl(baseUrl)}/chat/completions`;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  return withTransportRetry(async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  try {
-    const resp = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature,
-        max_tokens: maxTokens,
-      }),
-      signal: controller.signal,
-    });
+    try {
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+          temperature,
+          max_tokens: maxTokens,
+        }),
+        signal: controller.signal,
+      });
 
-    if (!resp.ok) throw new Error(`LLM error: ${resp.status}`);
-    const json = (await resp.json()) as {
-      model?: string;
-      provider?: string;
-      choices: Array<{ message: { content: string | null } }>;
-    };
-    const content = json.choices[0]?.message?.content ?? "";
-    return {
-      content,
-      provenance: {
-        endpoint,
-        modelRequested: model,
-        modelServed: json.model,
-        providerOrigin: json.provider,
-        temperature,
-        maxTokens,
-      },
-    };
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error("MODEL_TIMEOUT");
+      if (!resp.ok) throw new Error(`LLM error: ${resp.status}`);
+      const json = (await resp.json()) as {
+        model?: string;
+        provider?: string;
+        choices: Array<{ message: { content: string | null } }>;
+      };
+      const content = json.choices[0]?.message?.content ?? "";
+      if (!content.trim()) {
+        // HTTP-200 with empty content: reasoning variants exhaust their
+        // token budget on invisible reasoning. Retryable availability
+        // failure — NOT a valid reply.
+        throw new Error("LLM_EMPTY_REPLY");
+      }
+      return {
+        content,
+        provenance: {
+          endpoint,
+          modelRequested: model,
+          modelServed: json.model,
+          providerOrigin: json.provider,
+          temperature,
+          maxTokens,
+        },
+      };
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new Error("MODEL_TIMEOUT");
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
+  });
+}
+
+/**
+ * P1-AUDIT-2 Phase F — multimodal completion for the vision-only adapter.
+ * Identical config/env/timeout/provenance semantics to callLlm(), with one
+ * image (data: URL) embedded as an OpenAI-compatible image_url content part
+ * in the user message. Text and image ride the SAME user turn so the
+ * screenshot is contextualized by the prompt text.
+ */
+export async function callLlmVision(
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  imageDataUrl: string,
+  config: LlmConfig = {},
+  timeoutMs: number = 45000
+): Promise<LlmResult> {
+  loadHarnessEnv();
+
+  const baseUrl = process.env.FIRERAID_LLM_BASE_URL;
+  const apiKey = process.env.FIRERAID_LLM_API_KEY;
+
+  if (!baseUrl || !apiKey) {
+    throw new Error("LLM not configured — set FIRERAID_LLM_BASE_URL and FIRERAID_LLM_API_KEY");
   }
+
+  const temperature = config.temperature ?? 0.2;
+  // Vision payloads are large; default headroom above the text-only floor —
+  // reasoning variants burn invisible tokens before the visible content.
+  const maxTokens = config.maxTokens ?? 2048;
+
+  const endpoint = `${normalizeBaseUrl(baseUrl)}/chat/completions`;
+
+  return withTransportRetry(async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: userPrompt },
+                { type: "image_url", image_url: { url: imageDataUrl } },
+              ],
+            },
+          ],
+          temperature,
+          max_tokens: maxTokens,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!resp.ok) throw new Error(`LLM error: ${resp.status}`);
+      const json = (await resp.json()) as {
+        model?: string;
+        provider?: string;
+        choices: Array<{ message: { content: string | null } }>;
+      };
+      const content = json.choices[0]?.message?.content ?? "";
+      if (!content.trim()) {
+        // HTTP-200 with empty content: reasoning variants exhaust their
+        // token budget on invisible reasoning. Retryable availability
+        // failure — NOT a valid reply.
+        throw new Error("LLM_EMPTY_REPLY");
+      }
+      return {
+        content,
+        provenance: {
+          endpoint,
+          modelRequested: model,
+          modelServed: json.model,
+          providerOrigin: json.provider,
+          temperature,
+          maxTokens,
+        },
+      };
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new Error("MODEL_TIMEOUT");
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  });
 }

@@ -43,6 +43,8 @@ import { AxSnapshotAdapter } from "../adapters/ax-snapshot/ax-snapshot.js";
 import { DomAutomationAdapter } from "../adapters/dom-automation.js";
 import { FillEverythingAdapter } from "../adapters/fill-everything.js";
 import { HumanizedPwAdapter } from "../adapters/humanized-pw.js";
+import { VisionOnlyAdapter } from "../adapters/vision-only.js";
+import { FireraidAwareAdapter } from "../adapters/fireraid-aware.js";
 
 const RESULTS_DIR = join(process.cwd(), "harness", "results");
 
@@ -86,6 +88,13 @@ function createAdapter(agent: AgentType, extractor?: string): AgentAdapter {
       return new FillEverythingAdapter();
     case "humanized-pw":
       return new HumanizedPwAdapter();
+    // P1-AUDIT-2 Phase F (LLM-backed): screenshot+vision attacker and the
+    // defense-educated attacker. Both fail-closed on missing credentials
+    // (llm_not_configured), never silently skipped.
+    case "vision-only":
+      return new VisionOnlyAdapter();
+    case "fireraid-aware":
+      return new FireraidAwareAdapter();
     // FR-POST-R6-P2: browser abstraction agent via python execution worker.
     case "browser-use":
       return new BrowserUseAdapter();
@@ -232,6 +241,12 @@ function agentPerceptionSurface(
       return "accessibility-model-input";
     case "browser-use":
       return "browser-use-observation";
+    case "vision-only":
+      // P1-AUDIT-2 Phase F: the percept IS the PNG screenshot sent to the
+      // vision model (badges burned in) — exposure is measured against it.
+      return "screenshot-model-input";
+    case "fireraid-aware":
+      return "simplified-dom-model-input";
     default:
       return null;
   }

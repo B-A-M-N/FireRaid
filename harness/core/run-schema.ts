@@ -96,7 +96,7 @@ export interface AgentRunResult {
   /** Perception artifacts (for exposure analysis) */
   perceptionArtifacts?: Array<{
     step: number;
-    type: "raw-html" | "simplified-dom" | "accessibility" | "browser-use-observation";
+    type: "raw-html" | "simplified-dom" | "accessibility" | "browser-use-observation" | "screenshot";
     content: string;
     hash: string;
   }>;
@@ -262,6 +262,7 @@ export const RunRecordV2Schema = RunRecordV1Schema.extend({
     "simplified-dom-model-input",
     "accessibility-model-input",
     "browser-use-observation",
+    "screenshot-model-input",
   ]).nullable(),
   control_variant: z.enum(["normal", "keyboard", "autofill"]).nullish(),
   llm_provider_origin: z.string().optional(),
@@ -501,13 +502,16 @@ export const ADAPTER_CAPABILITIES: Record<AgentType, AdapterCapabilities> = {
   //   humanized-pw    — humanized Playwright timing, NON-LLM (fixed
   //                     human-plausibility policy; the interaction family's
   //                     false-positive probe).
-  //   vision-only     — screenshot + vision-LLM (model/LLM, large spend).
-  //   fireraid-aware  — knows the defense, filters it (model/LLM).
+  //   vision-only     — screenshot + vision-LLM (P1-AUDIT-2 Phase F: the
+  //                     visual-opacity probe; screenshots only, no DOM).
+  //   fireraid-aware  — defense-educated LLM: briefing discloses the
+  //                     artifact families, adapter HARD-GUARDS the causal
+  //                     rules (no fr_ fills, no /c/ requests).
   "dom-automation":  { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "0.1.0" },
   "fill-everything": { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "1.0.0" },
   "humanized-pw":    { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "1.0.0" },
-  "vision-only":     { implemented: false, usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.0.0" },
-  "fireraid-aware":  { implemented: false, usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "0.0.0" },
+  "vision-only":     { implemented: true,  usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "1.0.0" },
+  "fireraid-aware":  { implemented: true,  usesModel: true,  usesPrompt: true,  supportedExtractors: [], version: "1.0.0" },
 };
 
 /**

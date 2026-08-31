@@ -26,6 +26,15 @@ export async function extractSimplifiedDom(page: Page): Promise<string> {
         if (a.name === "style") continue;
         attrs.push(`${a.name}="${a.value.slice(0, 80)}"`);
       }
+      // Form controls carry their live state in the value PROPERTY, not an
+      // attribute — surface it so the model can see which fields it has
+      // already filled (otherwise a filled page looks identical to a fresh
+      // one and the agent loops on the first field forever).
+      if (tag === "INPUT" || tag === "TEXTAREA") {
+        const inp = el as HTMLInputElement | HTMLTextAreaElement;
+        if (inp.value) attrs.push(`value="${inp.value.slice(0, 80)}"`);
+        if (tag === "INPUT" && (el as HTMLInputElement).checked) attrs.push("checked");
+      }
 
       const text = el.children.length === 0
         ? (el.textContent || "").trim().slice(0, 100)
