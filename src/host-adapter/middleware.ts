@@ -18,6 +18,7 @@ import { deriveProfilePure, hashProfile, type DefenseRecipe } from "../core/prof
 import { correlate, type ObservationSet } from "../core/correlation.js";
 import { decide } from "../core/decision.js";
 import { aggregateTelemetry, type CaptureConfig } from "../telemetry/aggregate.js";
+import { constantTimeTokenEqual } from "../core/tokens.js";
 import type { DefenseProfile } from "../types/profile.js";
 import type {
   HostSessionAdapter,
@@ -25,6 +26,7 @@ import type {
   HostVerificationAdapter,
   HostTelemetryAdapter,
   HostEnforcementAdapter,
+  HostCanaryStore,
 } from "./interface.js";
 
 export interface MiddlewareDeps {
@@ -37,6 +39,18 @@ export interface MiddlewareDeps {
   verification: HostVerificationAdapter;
   telemetry: HostTelemetryAdapter;
   enforcement: HostEnforcementAdapter;
+  /**
+   * P1-AUDIT-2 Phase D (audit item 6): verified canary-hit storage. When
+   * provided, GET <canaryPathPrefix><token> verifies the session's route
+   * token (constant-time) and persists the hit; POST reads verified hits
+   * back into observations.canaryEndpointHit — the same Class-A causal
+   * chain the Worker's /c/:token → canary_hits → submit.ts path produces.
+   * OMITTING the store leaves the host plane without route evidence (the
+   * middleware then behaves as before: no /c/ route exists on the host).
+   */
+  canaryStore?: HostCanaryStore;
+  /** Route prefix the host exposes canary probes under. Default "/c/". */
+  canaryPathPrefix?: string;
   /** Lab mode emits visible markers; production stays inert. */
   labMode?: boolean;
   /**
@@ -48,8 +62,8 @@ export interface MiddlewareDeps {
 }
 
 export interface MiddlewareResult {
-  /** "get" | "admit" | "deny" | "error". */
-  kind: "get" | "admit" | "deny" | "error";
+  /** "get" | "admit" | "deny" | "canary-verified" | "error". */
+  kind: "get" | "admit" | "deny" | "canary-verified" | "error";
   /** The HTML to return on GET (kind === "get"). */
   html?: string;
   /** Set-Cookie header(s) to return. */
@@ -89,8 +103,21 @@ export async function admit(
 ): Promise<MiddlewareResult> {
   const labMode = deps.labMode === true;
 
-  // ── GET: issue session, derive profile, inject, return page ──────────────
+  // ── GET ──────────────────────────────────────────────────────────────────
   if (req.method === "GET") {
+    // P1-AUDIT-2 Phase D (audit item 6): canary probes are ROUTE-AWARE. The
+    // prior middleware routed EVERY GET to signup injection — a probe of the
+    // decoy route minted a FRESH session (and never verified anything), so
+    // Class-A route evidence could not exist on the host plane at all. When
+    // a canary store is wired, GET <prefix><token> is the host counterpart
+    // of the Worker's GET /c/:token: resolve session, reconstruct the
+    // profile, verify constant-time, persist FAIL-CLOSED.
+    const prefix = deps.canaryPathPrefix ?? "/c/";
+    const url = new URL(req.url);
+    if (deps.canaryStore && url.pathname.startsWith(prefix)) {
+      return handleCanaryGet(req, deps, url.pathname.slice(prefix.length));
+    }
+
     try {
       const sessionId = await deps.session.createSession();
       const profile = await deriveProfilePure({
@@ -186,6 +213,15 @@ export async function admit(
         if (metrics.missingInteractionSequence === true) observations.missingInteractionSequence = true;
       }
 
+      // P1-AUDIT-2 Phase D (audit item 6): read back VERIFIED canary hits —
+      // the host counterpart of submit.ts's canary_hits COUNT. A verified
+      // probe of the decoy route before submission is Class-A causal
+      // evidence (CANARY_ROUTE_MATCH, weight 100 → QUARANTINE).
+      if (deps.canaryStore && profile.decoyRoute) {
+        const hit = await deps.canaryStore.readVerified(sessionId);
+        if (hit) observations.canaryEndpointHit = true;
+      }
+
       const evidence = await correlate(profile, observations);
       const decision = decide(evidence);
 
@@ -219,6 +255,48 @@ export async function admit(
   }
 
   return { kind: "deny", disposition: "METHOD_NOT_ALLOWED" };
+}
+
+/**
+ * P1-AUDIT-2 Phase D (audit item 6): host-side canary probe — the
+ * presentation-neutral counterpart of routes/canary.ts. Same verification
+ * ORDER and the same failure semantics:
+ *   no session        → deny (403-equivalent)
+ *   no decoyRoute     → deny NO_ROUTE (404-equivalent: FR-R6-028 — a
+ *                       DECOY_ROUTE-less session must 404, not fall back)
+ *   wrong token       → deny INVALID_TOKEN (403-equivalent)
+ *   store failure     → deny CANARY_PERSIST_FAILED (FAIL-CLOSED, 500-
+ *                       equivalent: a verified hit lost while returning
+ *                       success would corrupt the causal signal)
+ * Verified hits persist via HostCanaryStore (idempotent replays OK).
+ */
+async function handleCanaryGet(
+  req: Request,
+  deps: MiddlewareDeps,
+  token: string
+): Promise<MiddlewareResult> {
+  const store = deps.canaryStore!;
+  if (!token) return { kind: "deny", disposition: "MISSING_TOKEN" };
+  const sessionId = await deps.session.readSessionId(req);
+  if (!sessionId) return { kind: "deny", disposition: "NO_SESSION" };
+  try {
+    const profile = await deriveProfilePure({
+      secret: deps.secret,
+      version: deps.version,
+      sessionId,
+      mode: deps.labMode === true ? "lab" : "production",
+    }, deps.recipe);
+    if (!profile.decoyRoute) return { kind: "deny", disposition: "NO_ROUTE" };
+    const expected = profile.decoyRoute.endpointToken;
+    if (!constantTimeTokenEqual(token, expected)) {
+      return { kind: "deny", disposition: "INVALID_TOKEN" };
+    }
+    const persisted = await store.record(sessionId, token, expected);
+    if (!persisted) return { kind: "deny", disposition: "CANARY_PERSIST_FAILED" };
+    return { kind: "canary-verified", disposition: "CANARY_VERIFIED" };
+  } catch {
+    return { kind: "deny", disposition: "EVAL_ERROR" };
+  }
 }
 
 /**

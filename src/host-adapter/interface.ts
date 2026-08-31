@@ -124,3 +124,24 @@ export interface HostEnforcementAdapter {
   /** Record a denied submission (never forwarded). */
   deny(sessionId: string, reason: string): void;
 }
+
+/**
+ * P1-AUDIT-2 Phase D (audit item 6) — verified canary-hit storage for the
+ * host plane. The Worker persists verified route hits in D1 (canary_hits,
+ * fail-closed) and submit.ts reads them back as Class-A causal evidence.
+ * A host integration owns no D1, so the middleware needs the same
+ * capability behind a port: persist on a verified GET /c/<token>, read back
+ * at POST correlation time. Fail-closed: `record` returning false is a REAL
+ * storage failure and the middleware must fail the request (never report
+ * attacker success); `readVerified` throwing denies admission.
+ */
+export interface HostCanaryStore {
+  /**
+   * Persist one verified route hit. Idempotent replays MUST return true
+   * (mirrors the Worker's INSERT OR IGNORE). Return false ONLY on a real
+   * storage error — the caller fails the request closed.
+   */
+  record(sessionId: string, token: string, expected: string): Promise<boolean>;
+  /** Whether this session has ≥1 VERIFIED route hit (correlation input). */
+  readVerified(sessionId: string): Promise<boolean>;
+}

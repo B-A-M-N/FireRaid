@@ -30,20 +30,12 @@ async function hashToken(token: string): Promise<string> {
 }
 
 /**
- * Constant-time string comparison. Length difference is folded into the
- * accumulator so timing does not leak token length or match position.
+ * Constant-time token comparison — the CORE primitive (core/tokens.ts),
+ * re-exported for the Worker route's callers. One definition serves both
+ * planes (Worker + host middleware).
  */
-export function constantTimeTokenEqual(token: string, expected: string): boolean {
-  const len = Math.max(token.length, expected.length);
-  let diff = 0;
-  for (let i = 0; i < len; i++) {
-    const x = i < token.length ? token.charCodeAt(i) : 0;
-    const y = i < expected.length ? expected.charCodeAt(i) : 0;
-    diff |= x ^ y;
-  }
-  diff |= token.length ^ expected.length;
-  return diff === 0;
-}
+export { constantTimeTokenEqual } from "../core/tokens.js";
+import { constantTimeTokenEqual } from "../core/tokens.js";
 
 /**
  * P1-AUDIT-2: record a verified canary hit, FAILING CLOSED on persistence

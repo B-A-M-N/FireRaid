@@ -96,4 +96,53 @@ describe("Phase C: real agent → middleware → origin ledger", () => {
     const created = await runtime.ledgerHasAccount(email);
     expect(created).toBe(false); // PRIMARY ENDPOINT: origin did NOT create it
   }, 30_000);
+
+  it("canary probe then submit: verified route hit → QUARANTINE, NO origin account", async () => {
+    // P1-AUDIT-2 Phase D (audit item 6): the JOINED host-plane causal chain.
+    // The attacker probes the decoy route FIRST (the /c/<token> behavior the
+    // defense exists to catch), then submits through the SAME session —
+    // exactly what the prior middleware could never see because every GET
+    // minted a fresh session. Drive the facade over real HTTP like the
+    // raw-http adapter would.
+    runtime = runtime ?? await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });
+    runtime.setTrialRecipe(ABLATION_RECIPES.FULL);
+
+    const email = trialEmail("exp-join-test", "probe-then-submit-rep0");
+
+    // Session + profile through the facade's own GET (cookie comes back).
+    const getResp = await fetch(`${runtime.facadeUrl}/signup`);
+    expect(getResp.status).toBe(200);
+    const cookie = getResp.headers.get("set-cookie") ?? "";
+    expect(cookie).toContain("__Host-fr_sid=");
+
+    // Derive the SAME profile the facade issued (same secret/version/sid).
+    const sid = cookie.split(";")[0].split("=")[1].split(".")[0];
+    const { deriveProfilePure } = await import("../../src/core/profile.js");
+    const profile = await deriveProfilePure(
+      { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
+      ABLATION_RECIPES.FULL
+    );
+    const token = profile.decoyRoute!.endpointToken;
+
+    // 1. Probe the decoy route with the session cookie → 204 (verified).
+    const probe = await fetch(`${runtime.facadeUrl}/c/${token}`, { headers: { cookie } });
+    expect(probe.status).toBe(204);
+
+    // 2. Submit with a CLEAN form (no nonce — the route hit alone must hold).
+    const { makeCsrf } = await import("../../src/host-adapter/index.js");
+    const csrf = await makeCsrf(SECRET, sid);
+    const submit = await fetch(`${runtime.facadeUrl}/api/submit`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({
+        csrf,
+        form: { name: "Q", email, [profile.decoyField!.fieldName]: "" },
+      }),
+    });
+    expect(submit.status).toBe(403); // Class-A route evidence → QUARANTINE
+
+    // 3. PRIMARY ENDPOINT: the origin ledger did NOT create the account.
+    const created = await runtime.ledgerHasAccount(email);
+    expect(created).toBe(false);
+  }, 30_000);
 });

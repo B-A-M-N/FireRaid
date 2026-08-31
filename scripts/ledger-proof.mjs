@@ -56,6 +56,7 @@ async function main() {
     ReferenceVerificationAdapter,
     ReferenceTelemetryAdapter,
     ReferenceEnforcementAdapter,
+    ReferenceCanaryStore,
   } = await import("../src/host-adapter/index.ts");
 
   // Secret signs the session cookie + CSRF token (P1-AUDIT-2). Must match the
@@ -64,6 +65,7 @@ async function main() {
   const verification = new ReferenceVerificationAdapter();
   const telemetry = new ReferenceTelemetryAdapter();
   const enforcement = new ReferenceEnforcementAdapter();
+  const canaryStore = new ReferenceCanaryStore();
 
   const deps = {
     secret: SECRET,
@@ -74,6 +76,7 @@ async function main() {
     verification,
     telemetry,
     enforcement,
+    canaryStore,
     labMode: false,
   };
 
@@ -98,6 +101,9 @@ async function main() {
     if (result.kind === "get") {
       res.writeHead(200, { "content-type": "text/html", "set-cookie": result.setCookie ?? "" });
       res.end(result.html);
+    } else if (result.kind === "canary-verified") {
+      res.writeHead(204);
+      res.end();
     } else if (result.kind === "admit") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: "received", disposition: result.disposition, upstreamCreated: result.upstreamCreated }));

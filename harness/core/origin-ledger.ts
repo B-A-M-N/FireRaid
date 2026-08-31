@@ -21,7 +21,7 @@
  */
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { admit, makeCsrf, ReferenceSessionAdapter, referenceInject, ReferenceVerificationAdapter, ReferenceTelemetryAdapter, type MiddlewareDeps, type HostEnforcementAdapter } from "../../src/host-adapter/index.js";
+import { admit, makeCsrf, ReferenceSessionAdapter, referenceInject, ReferenceVerificationAdapter, ReferenceTelemetryAdapter, ReferenceCanaryStore, type MiddlewareDeps, type HostEnforcementAdapter } from "../../src/host-adapter/index.js";
 import type { DefenseRecipe } from "../../src/core/recipe-schema.js";
 
 // NOT 5060/5061 — those are on the fetch spec's bad-port blocklist
@@ -56,6 +56,8 @@ export interface OriginLedgerRuntime {
   setTrialRecipe(recipe: DefenseRecipe | undefined): void;
   /** Read-only ledger truth for a synthetic email. null = probe failed. */
   ledgerHasAccount(email: string): Promise<boolean | null>;
+  /** P1-AUDIT-2 Phase D: the middleware's verified canary-hit store. */
+  canaryStore: ReferenceCanaryStore;
   shutdown(): Promise<void>;
 }
 
@@ -89,6 +91,7 @@ export async function startOriginLedgerRuntime(opts: {
   const session = new ReferenceSessionAdapter(opts.secret);
   let trialRecipe: DefenseRecipe | undefined;
   let enforcement = new LedgerEnforcement();
+  const canaryStore = new ReferenceCanaryStore();
 
   const deps = (): MiddlewareDeps => ({
     secret: opts.secret,
@@ -99,6 +102,7 @@ export async function startOriginLedgerRuntime(opts: {
     verification: new ReferenceVerificationAdapter(),
     telemetry: new ReferenceTelemetryAdapter(),
     enforcement,
+    canaryStore,
     labMode: opts.labMode,
     recipe: trialRecipe,
   });
@@ -142,6 +146,13 @@ export async function startOriginLedgerRuntime(opts: {
       res.end(result.html);
       return;
     }
+    if (result.kind === "canary-verified") {
+      // P1-AUDIT-2 Phase D: verified canary probe — 204, no side effects
+      // (mirrors the Worker's noContent()).
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     if (result.kind === "admit") {
       // Perform the forward the middleware authorized.
       const form = enforcement.lastForm ?? {};
@@ -158,6 +169,7 @@ export async function startOriginLedgerRuntime(opts: {
   return {
     facadeUrl: `http://localhost:${FACADE_PORT}`,
     ledgerUrl: `http://localhost:${UPSTREAM_PORT}`,
+    canaryStore,
     setTrialRecipe(recipe) {
       trialRecipe = recipe;
       enforcement = new LedgerEnforcement();

@@ -6,6 +6,7 @@ export {
   ReferenceVerificationAdapter,
   ReferenceTelemetryAdapter,
   ReferenceEnforcementAdapter,
+  ReferenceCanaryStore,
 } from "./reference-adapters.js";
 export { admit, makeCsrf, verifyCsrf } from "./middleware.js";
 export type { MiddlewareDeps, MiddlewareResult } from "./middleware.js";

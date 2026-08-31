@@ -7,6 +7,7 @@ import type {
   HostVerificationAdapter,
   HostTelemetryAdapter,
   HostEnforcementAdapter,
+  HostCanaryStore,
 } from "./interface.js";
 
 const SESSION_COOKIE = "__Host-fr_sid";
@@ -127,5 +128,29 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
 
   deny(_sessionId: string, _reason: string): void {
     // Reference upstream keeps no denial log; production persists one.
+  }
+}
+
+/**
+ * P1-AUDIT-2 Phase D (audit item 6) — reference canary-hit store.
+ *
+ * In-memory set of (sessionId) verified hits, mirroring the Worker's
+ * canary_hits semantics: idempotent replays succeed; only `failStore` (a
+ * test/diagnostics hook) simulates a real storage failure. Hosts with real
+ * persistence implement HostCanaryStore over their own store.
+ */
+export class ReferenceCanaryStore implements HostCanaryStore {
+  private readonly hits = new Set<string>();
+  /** When true, record() fails (simulates a real storage outage). */
+  failStore = false;
+
+  async record(sessionId: string, _token: string, _expected: string): Promise<boolean> {
+    if (this.failStore) return false;
+    this.hits.add(sessionId);
+    return true;
+  }
+
+  async readVerified(sessionId: string): Promise<boolean> {
+    return this.hits.has(sessionId);
   }
 }
