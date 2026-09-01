@@ -171,8 +171,15 @@ export async function admit(
 
   // ── POST: evaluate, strip, forward only when admission allows ────────────
   if (req.method === "POST") {
-    const sessionId = await deps.session.readSessionId(req);
+    // P1-1: resolve the VERIFIED session context — the envelope's own
+    // profileVersion (pv), not the deployment default. Deriving with
+    // deps.version here would silently re-derive a DIFFERENT profile for an
+    // in-flight session after a key/version bump (the exact rotation hazard
+    // FR-P1-19 closed on the Worker; host parity means the same closure).
+    const session = await deps.session.resolveSession(req);
+    const sessionId = session?.id ?? null;
     if (!sessionId) return { kind: "deny", disposition: "NO_SESSION", sessionId: undefined };
+    const deriveVersion = session?.profileVersion ?? deps.version;
 
     // P1-AUDIT-2 (P1-14): the REAL client (public/signup.js) persists its
     // queue via POST /api/events ({events: [...]} → {received, acceptedThrough})
@@ -265,7 +272,9 @@ export async function admit(
     try {
       const profile = await deriveProfilePure({
         secret: deps.secret,
-        version: deps.version,
+        // P1-1: the ENVELOPE's pv — the session keeps the treatment it was
+        // issued, even after the deployment default version moves on.
+        version: deriveVersion,
         sessionId,
         mode: labMode ? "lab" : "production",
       }, deps.recipe);
@@ -426,12 +435,15 @@ async function handleCanaryGet(
 ): Promise<MiddlewareResult> {
   const store = deps.canaryStore!;
   if (!token) return { kind: "deny", disposition: "MISSING_TOKEN" };
-  const sessionId = await deps.session.readSessionId(req);
+  // P1-1: the canary path derives under the ENVELOPE's pv too — the route
+  // token was issued under that version and must verify against it.
+  const session = await deps.session.resolveSession(req);
+  const sessionId = session?.id ?? null;
   if (!sessionId) return { kind: "deny", disposition: "NO_SESSION" };
   try {
     const profile = await deriveProfilePure({
       secret: deps.secret,
-      version: deps.version,
+      version: session?.profileVersion ?? deps.version,
       sessionId,
       mode: deps.labMode === true ? "lab" : "production",
     }, deps.recipe);

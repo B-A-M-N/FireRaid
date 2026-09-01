@@ -16,7 +16,7 @@ import {
 } from "../core/session-envelope.js";
 import type { ProfileKeyRing } from "../core/session.js";
 import { validateTelemetryBatch, type ValidatedEvent } from "../security/request-validation.js";
-import type { HostTelemetryIngest } from "./interface.js";
+import type { HostTelemetryIngest, HostSessionContext } from "./interface.js";
 import type { DefenseProfile } from "../types/profile.js";
 import { getPolicyOrThrow, type ScoringPolicy } from "../core/decision.js";
 
@@ -78,6 +78,25 @@ export class ReferenceSessionAdapter implements HostSessionAdapter {
     if (!raw) return null;
     const payload = await this.verifiedPayload(raw);
     return payload ? payload.sid : null;
+  }
+
+  /**
+   * P1-1: the VERIFIED context — the envelope's own pv/kid/iat, not the
+   * deployment defaults. Middleware derives the session's profile with
+   * THIS pv so a mid-session key/version bump cannot silently re-derive a
+   * different treatment for an in-flight session.
+   */
+  async resolveSession(req: Request): Promise<HostSessionContext | null> {
+    const raw = this.rawCookieValue(req);
+    if (!raw) return null;
+    const payload = await this.verifiedPayload(raw);
+    if (!payload) return null;
+    return {
+      id: payload.sid,
+      profileVersion: payload.pv,
+      keyId: payload.kid,
+      issuedAt: payload.iat,
+    };
   }
 
   private rawCookieValue(req: Request): string | null {

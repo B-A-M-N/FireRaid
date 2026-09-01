@@ -46,6 +46,28 @@ export interface HostSessionAdapter {
    * missing OR TAMPERED session — admission must be denied, never forwarded.
    */
   readSessionId(req: Request): Promise<string | null>;
+  /**
+   * P1-AUDIT-2 response (P1-1): the VERIFIED session context — the envelope's
+   * own claims, not the deployment defaults. The signed cookie carries the
+   * issuing profile version (pv) and key id (kid); middleware must derive
+   * the session's profile with THE ENVELOPE'S pv, so a v7 session keeps its
+   * v7 treatment after the deployment default moves to v8 (the FR-P1-19
+   * rotation hazard on the Worker; parity here means same hazard closed).
+   * Adapters without a signed envelope return the sid with pv/kid from
+   * their own issuance state.
+   */
+  resolveSession(req: Request): Promise<HostSessionContext | null>;
+}
+
+/** The verified session context a host adapter returns (P1-1). */
+export interface HostSessionContext {
+  id: string;
+  /** The profile version the session was ISSUED under (envelope pv). */
+  profileVersion: number;
+  /** The signing key id that verified the envelope (envelope kid). */
+  keyId: string;
+  /** Issued-at (epoch ms) when the carrier carries it. */
+  issuedAt?: number;
 }
 
 /**

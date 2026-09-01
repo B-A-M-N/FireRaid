@@ -497,6 +497,67 @@ describe("metrics watermark reconciliation (P1-AUDIT-2)", () => {
     expect(still!.lastSeq).toBe(2);
   });
 
+  it("ABSENT metrics row with raw rows and capture supplied is REBUILT complete (P1-2)", async () => {
+    const { loadSessionMetrics } = await import("../../src/telemetry/aggregate.js");
+    const { loadMetricsState } = await import("../../src/telemetry/state.js");
+    const db = makeFullDb();
+    const w = makeWrappers(db);
+
+    // Session accepted through watermark 10; raw 1..10 persisted in two
+    // batches. NO session_metrics row exists (every prior fold failed or
+    // never ran — e.g. the D1 metrics write errored while the raw log went
+    // in through the same batch()).
+    db.prepare(`INSERT INTO sessions (id, last_event_seq) VALUES ('s3', 10)`).run();
+    const mk = (seq: number, dt: number, kind: string, target?: string): ValidatedEvent =>
+      ({ seq, dt, kind, ...(target ? { target } : {}) }) as ValidatedEvent;
+    db.prepare(
+      `INSERT INTO event_batches (session_id, first_seq, last_seq, payload_json) VALUES ('s3', 1, 5, ?)`
+    ).run(JSON.stringify([
+      mk(1, 0, "page_ready"),
+      mk(2, 100, "focus", "name"),
+      mk(3, 200, "input", "name"),
+      mk(4, 300, "key", "name"),
+      mk(5, 400, "pointer", "form"),
+    ]));
+    db.prepare(
+      `INSERT INTO event_batches (session_id, first_seq, last_seq, payload_json) VALUES ('s3', 6, 10, ?)`
+    ).run(JSON.stringify([
+      mk(6, 500, "focus", "email"),
+      mk(7, 600, "input", "email"),
+      mk(8, 700, "blur", "email"),
+      mk(9, 800, "input", "org"),
+      mk(10, 900, "submit_attempt", "form"),
+    ]));
+
+    // P1-2: WITHOUT the capture mask, catch-up's row-CREATE path cannot
+    // create the row, so the read falls to the "incomplete" branch (known
+    // truncation) even though the raw log is fully recoverable.
+    const noCapture = await loadSessionMetrics(w, "s3");
+    expect(noCapture.status).toBe("incomplete");
+    expect(noCapture.expectedThrough).toBe(10);
+    expect(noCapture.actualThrough).toBe(-1);
+
+    // WITH the profile's capture mask (what submit.ts now supplies), the
+    // absent row is rebuilt from raw 1..10 and the run read is COMPLETE —
+    // the caller gets behavioral evidence, not a silent truncation.
+    const rebuilt = await loadSessionMetrics(w, "s3", { capturePointer: true, captureKey: true });
+    expect(rebuilt.status).toBe("complete");
+    expect(rebuilt.metrics).not.toBeNull();
+    expect(rebuilt.metrics!.pointerCount).toBe(1);         // seq 5 only
+    expect(rebuilt.metrics!.focusTransitions).toBe(2);     // seq 2 + seq 6
+    expect(rebuilt.metrics!.keyCount).toBe(1);             // seq 4 only
+    // seq 7/9: input on "email"/"org" while NOT focused (email blurred at
+    // seq 8; org never focused) → direct-fill pattern present.
+    expect(rebuilt.metrics!.directFill).toBe(true);
+    // The rebuilt row persists (a second read is complete without needing
+    // the mask again — the row carries its own capture).
+    const persisted = await loadMetricsState(w as unknown as D1Database, "s3");
+    expect(persisted!.lastSeq).toBe(10);
+    const second = await loadSessionMetrics(w, "s3");
+    expect(second.status).toBe("complete");
+    expect(second.metrics!.keyCount).toBe(1);
+  });
+
   it("complete stream reports complete; empty session reports absent (P0-7)", async () => {
     const { loadSessionMetrics } = await import("../../src/telemetry/aggregate.js");
     const { saveMetricsState } = await import("../../src/telemetry/state.js");

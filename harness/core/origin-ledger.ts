@@ -199,7 +199,11 @@ export async function startOriginLedgerRuntime(opts: {
   //    events drained through /api/events were discarded before the submit
   //    request's store saw an empty stream (the interaction plane measured
   //    nothing). Session and canary store were already per-runtime.
-  const session = new ReferenceSessionAdapter(opts.secret);
+  //    P1-1: the session adapter carries the experiment's PROFILE VERSION —
+  //    the prior bare construction signed pv=1 into every envelope even
+  //    when the manifest declared v7, so the middleware could never derive
+  //    the assigned version (and a version bump re-derived treatments).
+  const session = new ReferenceSessionAdapter(opts.secret, { version: opts.version });
   let trialRecipe: DefenseRecipe | undefined;
   let enforcement = new LedgerEnforcement(`http://localhost:${upstreamPort}/api/register`);
   const canaryStore = new ReferenceCanaryStore();

@@ -319,13 +319,19 @@ export interface SessionMetricsRead {
 
 export async function loadSessionMetrics(
   db: D1Database,
-  sessionId: string
+  sessionId: string,
+  capture?: CaptureConfig
 ): Promise<SessionMetricsRead> {
   const { loadMetricsState, toMetrics, catchUpSessionMetrics } = await import("./state.js");
 
   // Reconcile FIRST (CAS fold of any persisted-but-unfolded raw suffix), so
   // the compact row never silently lags the accepted stream.
-  await catchUpSessionMetrics(db, sessionId);
+  // P1-AUDIT-2 (P1-2): forward the caller's capture mask so the row-CREATE
+  // path of catch-up can fold an absent row from raw (without it, an absent
+  // row stays absent and the caller judges integrity on a row that could
+  // have been rebuilt). The mask is only consulted on CREATE — existing rows
+  // carry their own persisted capture (foldSessionMetrics' CAS rule).
+  await catchUpSessionMetrics(db, sessionId, capture);
 
   const state = await loadMetricsState(db, sessionId);
   const sessionWm = await readSessionWatermark(db, sessionId);

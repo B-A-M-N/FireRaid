@@ -36,7 +36,7 @@ import { loadSession } from "../cloudflare/session.js";;
 import { getPolicy } from "../core/decision.js";
 import { reconstructIssuedProfile } from "../core/reconstruct.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
-import { readLabAssignment } from "../core/lab-assignment.js";
+import { readLabAssignment, type LabAssignment } from "../core/lab-assignment.js";
 import { checkCsrf } from "../security/csrf.js";
 import { defaultVerificationProvider } from "../turnstile/verify.js";
 import { correlate, type ObservationSet } from "../core/correlation.js";
@@ -134,27 +134,40 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   // FR-R5-013 + FR-R6-021: the lab run's turnstile_required IS the assigned
   // treatment. Resolution failure fails the trial — it never falls back to
   // global config (that would scramble treatment assignment).
+  // P1-AUDIT-2 (P1-3): ONE lab_runs read serves BOTH consumers (the
+  // Turnstile gate below and the profile reconstruction at step 7). The
+  // prior code issued a bare SELECT here and a second readLabAssignment()
+  // later — two reads of the SAME immutable assignment per lab submit,
+  // which besides the extra D1 round-trip could observe a mid-request
+  // rebind (the reads are not in one transaction) and derive the recipe
+  // from a DIFFERENT row than the gate consulted. The assignment is bound
+  // at signup and never mutates; one read, one truth.
+  let labAssignment: LabAssignment | null = null;
+  if (isLabMode(env)) {
+    const read = await readLabAssignment(env.DB, sessionId);
+    if (!read.ok) {
+      console.error(
+        "submit lab-assignment read failed (failing closed):",
+        `${read.code}: ${read.detail}`
+      );
+      return error(
+        read.code === "assignment_corrupt" ? "session assignment corrupt" : "session assignment unreadable",
+        500
+      );
+    }
+    labAssignment = read.assignment;
+  }
   let turnstileRequired: boolean;
   if (isLabMode(env)) {
-    let run: { turnstile_required: number | null } | null;
-    try {
-      run = await env.DB.prepare(
-        `SELECT turnstile_required FROM lab_runs WHERE session_id = ? AND status IN ('BOUND','COMPLETE') LIMIT 1`
-      )
-        .bind(sessionId)
-        .first<{ turnstile_required: number | null }>();
-    } catch (err) {
-      console.error("lab turnstile condition unreadable:", err);
-      return error("lab condition unavailable", 500);
-    }
-    if (!run) {
+    if (labAssignment === null) {
       // No bound lab run for this session in lab mode: use global config.
       turnstileRequired = Boolean(env.TURNSTILE_SECRET_KEY);
-    } else if (run.turnstile_required === null) {
-      // Bound run with an unresolved condition — refuse to guess.
+    } else if (labAssignment.turnstileRequired === undefined) {
+      // Bound run with an unresolved condition (turnstile_required NULL) —
+      // refuse to guess.
       return error("lab turnstile condition unresolved", 500);
     } else {
-      turnstileRequired = run.turnstile_required === 1;
+      turnstileRequired = labAssignment.turnstileRequired;
     }
   } else {
     turnstileRequired = Boolean(env.TURNSTILE_SECRET_KEY);
@@ -235,39 +248,27 @@ export async function submit(req: Request, env: Env): Promise<Response> {
     let holdoutMode: boolean | undefined;
     // FR-P0-17: the run's verification condition — same treatment-identity
     // rule as holdout_mode (part of the hashed variant id).
-    let turnstileRequired: boolean | undefined;
+    let turnstileRequiredForId: boolean | undefined;
     if (isLabMode(env)) {
       // P1-AUDIT-2: FAIL CLOSED on bound-assignment read errors (shared helper
-      // readLabAssignment, also used by canary.ts). The prior code caught a D1
-      // error and treated it as "unbound", silently reconstructing a RANDOM
-      // profile for a session that was actually bound to a specific lab
-      // condition — corrupting the experiment (an assigned FULL run could be
-      // scored as random). readLabAssignment distinguishes:
+      // readLabAssignment, also used by canary.ts). P1-3: the SAME single
+      // read taken for the Turnstile gate above — the assignment was already
+      // fetched (or the request already failed closed); no second query.
+      // readLabAssignment distinguishes:
       //   - query SUCCEEDS, no lab_runs row  → genuinely unbound → random (legit)
       //   - query THROWS / recipe_json corrupt → infrastructure failure → 500
       // A bound session's immutable treatment is never replaceable by a guess.
-      const read = await readLabAssignment(env.DB, sessionId);
-      if (!read.ok) {
-        console.error(
-          "submit lab-assignment read failed (failing closed):",
-          `${read.code}: ${read.detail}`
-        );
-        return error(
-          read.code === "assignment_corrupt" ? "session assignment corrupt" : "session assignment unreadable",
-          500
-        );
-      }
-      if (read.assignment?.recipe != null) recipe = read.assignment.recipe;
+      if (labAssignment?.recipe != null) recipe = labAssignment.recipe;
       // FR-POST-R6-P5: holdout flag is part of the treatment identity.
-      holdoutMode = read.assignment?.holdoutMode;
+      holdoutMode = labAssignment?.holdoutMode;
       // FR-P0-17: verification condition likewise.
-      turnstileRequired = read.assignment?.turnstileRequired;
+      turnstileRequiredForId = labAssignment?.turnstileRequired;
     }
     const reconstructed = await reconstructIssuedProfile(env, {
       id: sessionId,
       profileVersion: session.profileVersion,
       profileKeyId: session.profileKeyId ?? null,
-    }, recipe, { holdoutMode, turnstileRequired });
+    }, recipe, { holdoutMode, turnstileRequired: turnstileRequiredForId });
     if (!reconstructed.ok) {
       console.error("submit reconstruction failed:", reconstructed.code, reconstructed.detail);
       return error("profile reconstruction failed", 500);
@@ -393,7 +394,10 @@ export async function submit(req: Request, env: Env): Promise<Response> {
     // Lab mode bypasses this entirely: the raw aggregator is the
     // research-authoritative path and raw rows are always retained there.
     let read: SessionMetricsRead | null = !isLabMode(env)
-      ? await loadSessionMetrics(env.DB, sessionId).catch(() => null)
+      ? await loadSessionMetrics(env.DB, sessionId, {
+          capturePointer: profile.telemetry.capturePointer,
+          captureKey: profile.telemetry.captureKey,
+        }).catch(() => null)
       : null;
     if (read && read.status === "incomplete") {
       console.warn(
