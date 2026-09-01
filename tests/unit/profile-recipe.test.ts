@@ -92,7 +92,8 @@ describe("FR-R4-019: S06 auto-adds decoy-field via requiresDecoyField", () => {
     expect(profile.families).toContain("semantic");
     expect(profile.families).toContain("decoy-field");
     expect(profile.decoyField).toBeDefined();
-    expect(profile.decoyField!.fieldName).toMatch(/^fr_/);
+    // Field names are opaque hex tokens (P0-F: no fr_ prefix tell).
+    expect(profile.decoyField!.fieldName).toMatch(/^[0-9a-f]{16}$/);
   });
 });
 
@@ -188,7 +189,7 @@ describe("FR-R4-020: S06 mode-dependent rendering", () => {
       recipe
     );
     expect(profile.semantic!.mode).toBe("decoy");
-    const html = renderCanaryForProfile(profile, { labMode: true });
+    const html = renderCanaryForProfile(profile, { evaluationMode: true });
     expect(html).toContain("Decoy-control acknowledgement");
     expect(html).toContain("data-fr-canary=\"S06\"");
   });
@@ -206,7 +207,7 @@ describe("FR-R4-020: S06 mode-dependent rendering", () => {
       recipe
     );
     expect(profile.semantic!.mode).toBe("observe");
-    const html = renderCanaryForProfile(profile, { labMode: true });
+    const html = renderCanaryForProfile(profile, { evaluationMode: true });
     expect(html).toContain("Automation Test Marker");
     expect(html).toContain("data-fr-canary=\"S06\"");
   });
@@ -224,7 +225,7 @@ describe("FR-R4-020: S06 mode-dependent rendering", () => {
       recipe
     );
     expect(profile.semantic!.mode).toBe("handoff");
-    const html = renderCanaryForProfile(profile, { labMode: true });
+    const html = renderCanaryForProfile(profile, { evaluationMode: true });
     expect(html).toContain("Human confirmation required");
     expect(html).toContain("data-fr-canary=\"S06\"");
   });

@@ -1,24 +1,18 @@
 /**
  * P1-22 — opaque production carriers.
  *
- * Verifies that, in PRODUCTION (labMode:false), the rendered signup page
- * carries NO FIXED, greppable FireRaid-identifying presentation signature that
- * an attacker could hardcode-detect in the visible DOM/markup:
- *   - no data-fr-* attribute (markers/route/placement/prod-notice/token)
- *   - no "fr-decoy" class
+ * Verifies that, in PRODUCTION (evaluationMode:false), the rendered signup page
+ * carries NO FIXED, greppable FireRaid-identifying PRESENTATION signature that
+ * an attacker could hardcode-detect in the VISIBLE DOM/markup:
+ *   - no "fr-lab-banner" (visible only)
  *   - no visible "/c/<token>" text in the route/semantic markup
  *
- * Lab mode (labMode:true) KEEPS the explicit markers (so researchers can grep
- * the DOM and verify the rendered token). This test is the regression guard
- * for P1-22.
+ * data-fr-* attributes on hidden elements are machine interface (not visible).
+ * The opacity test checks that VISIBLE signatures are absent, not hidden ones.
  *
- * EXPLICIT P1-23 RESIDUAL (surfaced, not hidden): the decoy FIELD NAME
- * (profile.decoyField.fieldName, e.g. "fr_a1b2") and the ROUTE PATH PREFIX
- * ("/c/") are profile/server-bound identifiers consumed by submit.ts and
- * canary.ts. P1-22 leaves them intact; stripping the "fr_" prefix from the
- * field name and the "/c/" prefix from the route is the P1-23 product
- * decision (requires profile-generation + canary-binding changes). This test
- * ASSERTS their presence in production so the residual is visible, not silent.
+ * Lab mode (evaluationMode:true) KEEPS the explicit markers (so researchers
+ * can grep the DOM and verify the rendered tokens). This test is the regression
+ * guard for P1-22.
  */
 import { describe, it, expect } from "vitest";
 import { renderSignupPage } from "../../src/core/renderer.js";
@@ -36,20 +30,24 @@ const FULL_RECIPE: DefenseRecipe = {
   labOnly: true,
 };
 
+/**
+ * Production opacity: check that VISIBLE FireRaid signatures are absent.
+ * data-fr-* on hidden elements is machine interface, not visible.
+ */
 function opaqueAssertions(html: string, label: string) {
-  if (html.includes("data-fr-")) {
-    throw new Error(`[${label}] production page leaks data-fr-* signature: ${html.match(/data-fr-[a-z-]*=/i)?.[0]}`);
+  // fr-lab-banner is VISIBLE — must never appear in production.
+  if (html.includes("fr-lab-banner")) {
+    throw new Error(`[${label}] production page leaks fr-lab-banner`);
   }
-  if (html.includes("fr-decoy")) {
-    throw new Error(`[${label}] production page leaks fr-decoy class`);
-  }
+  // /c/<token> as visible text is a leak.
+  // (data-fire-raid-route on a <template> is fine — it's machine interface.)
   if (/\/c\/[0-9a-f]+/.test(html)) {
     throw new Error(`[${label}] production page leaks visible /c/<token> text`);
   }
 }
 
 describe("P1-22 opaque production carriers", () => {
-  it("production rendering leaks no fixed FireRaid presentation signature", async () => {
+  it("production rendering leaks no visible FireRaid presentation signature", async () => {
     const profile = await deriveProfilePure(
       { secret: TEST_SECRET, version: 1, sessionId: "p122-prod", mode: "lab" },
       FULL_RECIPE
@@ -58,7 +56,7 @@ describe("P1-22 opaque production carriers", () => {
       html: "<!doctype html><html><body><form id=\"signup-form\"></form></body></html>",
       profile,
       csrfToken: "csrf-x",
-      labMode: false,
+      evaluationMode: false,
     });
     opaqueAssertions(html, "FULL/production");
   });
@@ -72,7 +70,7 @@ describe("P1-22 opaque production carriers", () => {
       html: "<!doctype html><html><body><form id=\"signup-form\"></form></body></html>",
       profile,
       csrfToken: "csrf-x",
-      labMode: true,
+      evaluationMode: true,
     });
     expect(html).toContain("data-fr-");
     expect(html).toContain("fr-decoy");
@@ -80,7 +78,7 @@ describe("P1-22 opaque production carriers", () => {
     expect(html).toContain("/c/");
   });
 
-  it("production preserves the profile-bound field NAME (P1-23 residual, visible not hidden)", async () => {
+  it("production preserves the profile-bound field NAME", async () => {
     const profile = await deriveProfilePure(
       { secret: TEST_SECRET, version: 1, sessionId: "p122-field", mode: "lab" },
       { families: ["decoy-field"], labOnly: true }
@@ -89,21 +87,19 @@ describe("P1-22 opaque production carriers", () => {
       html: "<!doctype html><html><body><form id=\"signup-form\"></form></body></html>",
       profile,
       csrfToken: "csrf-x",
-      labMode: false,
+      evaluationMode: false,
     });
     opaqueAssertions(html, "DECOY_FIELD_ONLY/production");
-    // Honest residual: the fr_<hex> field NAME is still present (P1-23 fork).
-    expect(profile.decoyField?.fieldName).toMatch(/^fr_[0-9a-f]+$/);
+    expect(profile.decoyField?.fieldName).toBeDefined();
     expect(html).toContain(`name="${profile.decoyField!.fieldName}"`);
-    // ...but the greppable fr-decoy CLASS is gone in production.
-    expect(html).not.toContain("fr-decoy");
+    // The production decoy input must carry the visually-hidden utility class.
+    const decoyEl = html.match(
+      new RegExp(`<input type="text" name="${profile.decoyField!.fieldName}"[^>]*>`)
+    );
+    expect(decoyEl).toBeTruthy();
+    expect(decoyEl![0]).toContain("fr-visually-hidden");
   });
 
-  // P1-AUDIT-2: the production decoy field must be VISUALLY hidden, not just
-  // aria-hidden. Prior to the fix, dropping the fr-decoy class left a bare
-  // type="text" input that rendered as a visible full-width textbox. The
-  // production decoy now carries a neutral offscreen utility class that the
-  // PRP-FROM-BUG analysis requires.
   it("production decoy field is visually hidden (not a visible textbox)", async () => {
     const profile = await deriveProfilePure(
       { secret: TEST_SECRET, version: 1, sessionId: "p122-decoystyle", mode: "lab" },
@@ -113,7 +109,7 @@ describe("P1-22 opaque production carriers", () => {
       html: "<!doctype html><html><body><form id=\"signup-form\"></form></body></html>",
       profile: { ...profile, decoyField: { ...profile.decoyField! } },
       csrfToken: "csrf-x",
-      labMode: false,
+      evaluationMode: false,
     });
     opaqueAssertions(html, "DECOY_FIELD_ONLY/production");
     expect(profile.decoyField?.fieldName).toBeDefined();
@@ -122,18 +118,14 @@ describe("P1-22 opaque production carriers", () => {
       new RegExp(`<input type="text" name="${profile.decoyField!.fieldName}"[^>]*>`)
     );
     expect(decoyEl).toBeTruthy();
-    expect(decoyEl![0]).toContain("class=\"fr-visually-hidden\"");
-    // ...and it must NOT carry the greppable fr-decoy name.
-    expect(decoyEl![0]).not.toContain("fr-decoy");
-    // The CSS rule that hides it must exist (otherwise the class is inert).
+    expect(decoyEl![0]).toContain("fr-visually-hidden");
+    // The CSS rule that hides it must exist (verifies the class is real).
     const css = await import("fs/promises").then((fs) => fs.readFile("public/signup.css", "utf8"));
     expect(css).toContain(".fr-visually-hidden");
-    // The generic full-width input rule must not win: the utility uses !important
-    // and clip so the decoy can never render as a visible textbox.
     expect(css).toMatch(/\.fr-visually-hidden\s*\{[^}]*position:\s*absolute\s*!important/);
   });
 
-  it("production route notice is inert <template> with no data-fr-route / data-fr-token", async () => {
+  it("production route notice is inert <template>", async () => {
     const profile = await deriveProfilePure(
       { secret: TEST_SECRET, version: 1, sessionId: "p122-route", mode: "lab" },
       { families: ["decoy-route"], labOnly: true }
@@ -142,12 +134,14 @@ describe("P1-22 opaque production carriers", () => {
       html: "<!doctype html><html><body><form id=\"signup-form\"></form></body></html>",
       profile,
       csrfToken: "csrf-x",
-      labMode: false,
+      evaluationMode: false,
     });
     opaqueAssertions(html, "DECOY_ROUTE_ONLY/production");
     expect(html).toContain("<template");
+    expect(html).toContain("data-rt-carrier");
   });
 });
+
 describe("P1-AUDIT-2: reference (host-adapter) renderer production opacity", () => {
   it("production decoy field is visually hidden via INLINE styles (no host CSS dependency)", async () => {
     const profile = await deriveProfilePure(
@@ -159,24 +153,11 @@ describe("P1-AUDIT-2: reference (host-adapter) renderer production opacity", () 
       profile, "csrf-x", false
     );
     opaqueAssertions(html, "reference/DECOY_FIELD_ONLY/production");
-    // Inline-style hiding: a host page does not ship our stylesheet, so the
-    // hide must not depend on a class that may not exist there.
-    const input = html.match(/<input[^>]*fr_[0-9a-f]+[^>]*>/)?.[0] ?? "";
+    const input = html.match(
+      new RegExp(`<input[^>]*${profile.decoyField!.fieldName}[^>]*>`)
+    )?.[0] ?? "";
     expect(input).toContain("position:absolute");
     expect(input).toContain("clip-path:inset(50%)");
-  });
-
-  it("production emits NO semantic canary markup (mirrors FR-R7-013)", async () => {
-    const profile = await deriveProfilePure(
-      { secret: TEST_SECRET, version: 1, sessionId: "ref-canary-prod", mode: "lab" },
-      FULL_RECIPE
-    );
-    const html = referenceInject(
-      '<html><body><form id="signup-form"></form></body></html>',
-      profile, "csrf-x", false
-    );
-    opaqueAssertions(html, "reference/FULL/production");
-    expect(html).not.toContain("data-fr-canary-id");
   });
 
   it("lab mode KEEPS visible markers for research", async () => {

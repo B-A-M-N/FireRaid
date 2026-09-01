@@ -17,7 +17,7 @@
  *
  * Proven here (E2, deterministic):
  *  - structural exposure scan covers ALL issued families: semantic canary,
- *    hidden marker, route notice (data-fr-route), decoy field (fr_<hex>)
+ *    hidden marker, route notice (data-fr-route), decoy field (opaque hex name)
  *  - negative: CONTROL artifacts set no exposure
  *  - DECOY_FIELD_ONLY artifacts do NOT match route/semantic structures and
  *    vice versa (ablation isolation survives the scan)
@@ -48,7 +48,7 @@ const CANARY_STRUCTURES = [
   "data-fr-canary",
   "data-fr-marker",
   "data-fr-route",
-  /name="fr_[0-9a-f]+"/,
+  /name="([0-9a-f]{12,})"/,
 ] as const;
 
 export function sawStructure(artifacts: Array<{ content: string }>): boolean {
@@ -75,7 +75,7 @@ const PAGES: Record<string, string> = {
     <div data-fr-canary="S09" aria-hidden="true" tabindex="-1"><span data-fr-marker="AB3CD2"></span></div>
     <input name="csrf" value="t"></form></body></html>`,
   DECOY_FIELD_ONLY: `<!doctype html><html><body><form id="signup-form">
-    <input type="text" name="fr_a1b2" id="fr_c3d4" class="fr-decoy" aria-hidden="true" tabindex="-1">
+    <input type="text" name="abc123def456" id="def789" class="fr-decoy" aria-hidden="true" tabindex="-1">
     <input name="csrf" value="t"></form></body></html>`,
   DECOY_ROUTE_ONLY: `<!doctype html><html><body><form id="signup-form">
     <div data-fr-route class="fr-canary-wrap"><span class="fr-decoy">Verification endpoint: /c/a1b2c3d4e5f6</span></div>
@@ -171,9 +171,9 @@ describe("EXPOSED: structural scan covers every issued family (FR-POST-R6-P4)", 
     expect(sawStructure(r.perceptionArtifacts!)).toBe(true);
   });
 
-  it("decoy-field page (DECOY_FIELD_ONLY) → exposed via fr_<hex> input name", async () => {
+  it("decoy-field page (DECOY_FIELD_ONLY) → exposed via opaque hex input name", async () => {
     const r = await runAgainst(PAGES.DECOY_FIELD_ONLY);
-    expect(r.perceptionArtifacts![0].content).toMatch(/name="fr_[0-9a-f]+"/);
+    expect(r.perceptionArtifacts![0].content).toMatch(/name="([0-9a-f]{12,})"/);
     expect(sawStructure(r.perceptionArtifacts!)).toBe(true);
   });
 
@@ -194,7 +194,7 @@ describe("EXPOSED: structural scan covers every issued family (FR-POST-R6-P4)", 
     expect(content).not.toContain("/c/");
     // and vice versa: route-only page carries no field/semantic structure
     const route = PAGES.DECOY_ROUTE_ONLY;
-    expect(route).not.toMatch(/name="fr_[0-9a-f]+"/);
+    expect(route).not.toMatch(/name="([0-9a-f]{12,})"/);
     expect(route).not.toContain("data-fr-canary");
   });
 });
@@ -229,7 +229,13 @@ describe("source contracts (static)", () => {
     expect(runnerSrc).toContain('"data-fr-canary"');
     expect(runnerSrc).toContain('"data-fr-marker"');
     expect(runnerSrc).toContain('"data-fr-route"');
-    expect(runnerSrc).toMatch(/name=\\"fr_\[0-9a-f\]\+\\"|name="fr_\[0-9a-f\]\+"/);
+    // P0-F: decoy field names are opaque hex tokens (no fr_ prefix tell).
+    // The profile generator uses generateToken(stream, 8) → 16 hex chars.
+    const profileSrc = readFileSync(
+      join(process.cwd(), "src/core/profile.ts"),
+      "utf-8"
+    );
+    expect(profileSrc).toMatch(/generateToken\(stream,\s*8\)/);
   });
 
   it("server ISSUED covers all material families, not just semantic", () => {

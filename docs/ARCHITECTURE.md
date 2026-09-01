@@ -2,10 +2,11 @@
 
 ## Overview
 
-FireRaid is a research platform for testing automated signup defenses. It is deliberately split into two planes:
+FireRaid is a deterministic, per-session, randomized defense-in-depth middleware
+for autonomous-agent admission control. It is deliberately split into two planes:
 
 - **Defense plane**: deterministic, no LLM, auditable, production-eligible
-- **Attack/research plane**: uses LLMs, intentionally attacks the lab, measures defenses
+- **Evaluation plane**: uses LLMs, intentionally attacks the product, measures defenses
 
 ## Core Primitives
 
@@ -19,13 +20,13 @@ FireRaid is a research platform for testing automated signup defenses. It is del
 
 ### Defense Profile
 - Seed: `HMAC-SHA256(profile_secret, version:session_id)`
-- Deterministic expansion via HKDF-like byte stream
-- Derives: families, template, placement, nonce, decoy field, endpoint token, telemetry mask
-- Immutable per version (FR-INV-011)
+- Deterministic expansion via domain-separated PRF (HKDF-like byte stream)
+- Derives: composition policy, semantic strategy, causal channel, decoy-field strategy, carrier strategy, placement, identifiers, route, nonce, telemetry mask, policy
+- Immutable per version
 
 ### Defense Families
-1. **Semantic canary** — hidden/session-specific instructions
-2. **Decoy field** — session-specific hidden input
+1. **Semantic canary** — machine-safe invisible instruction (production P01–P04 + evaluation S01–S08)
+2. **Decoy field** — session-specific hidden input with opaque hex name
 3. **Decoy route** — session-specific `/c/:token` endpoint
 4. **Interaction telemetry** — coarse event sequencing
 
@@ -40,6 +41,9 @@ FireRaid is a research platform for testing automated signup defenses. It is del
 - Weak only → ACCEPT or REVIEW per policy
 - Turnstile failure → explicit path
 
+FireRaid exports recommendations (risk level + recommended action), not binary decisions.
+The host integrates with its existing application review workflow.
+
 ## Request Lifecycle
 
 ```
@@ -51,4 +55,4 @@ POST /api/events → resolve session → validate batch → persist
 
 ## Invariants (FR-INV-001 through FR-INV-010)
 
-See CONCEPT.md §130 for the full list. These are non-negotiable.
+See [docs/INVARIANTS.md](INVARIANTS.md) for the authoritative full list. These are non-negotiable.

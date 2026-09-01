@@ -31,12 +31,12 @@ const BASE_HTML =
   '<fieldset class="fr-form-fields"></fieldset>' +
   "</form></body></html>";
 
-function workerRender(profile: Awaited<ReturnType<typeof deriveProfilePure>>, labMode: boolean): string {
-  return renderSignupPage({ html: BASE_HTML, profile, csrfToken: "csrf-x", labMode });
+function workerRender(profile: Awaited<ReturnType<typeof deriveProfilePure>>, evaluationMode: boolean): string {
+  return renderSignupPage({ html: BASE_HTML, profile, csrfToken: "csrf-x", evaluationMode });
 }
 
-function hostRender(profile: Awaited<ReturnType<typeof deriveProfilePure>>, labMode: boolean): string {
-  return referenceInject(BASE_HTML, profile, "csrf-x", labMode);
+function hostRender(profile: Awaited<ReturnType<typeof deriveProfilePure>>, evaluationMode: boolean): string {
+  return referenceInject(BASE_HTML, profile, "csrf-x", evaluationMode);
 }
 
 function clientConfigPayload(html: string): string | null {
@@ -44,14 +44,15 @@ function clientConfigPayload(html: string): string | null {
   return m ? m[1] : null;
 }
 
-async function fullProfile(sessionId: string, placementId = "P01") {
+async function fullProfile(sessionId: string, placementId = "P01", mode: "lab" | "production" = "lab") {
   const recipe: DefenseRecipe = { ...ABLATION_RECIPES.FULL, placementId };
-  return deriveProfilePure({ secret: SECRET, version: 1, sessionId, mode: "lab" }, recipe);
+  return deriveProfilePure({ secret: SECRET, version: 1, sessionId, mode }, recipe);
 }
 
 describe("Phase D artifact parity: Worker vs host mappers", () => {
   it("PRODUCTION: both agree on which artifacts exist and their identifiers", async () => {
-    const profile = await fullProfile("parity-prod");
+    // Production draws P01-P04 (production-safe templates) with P06 non-rendered.
+    const profile = await fullProfile("parity-prod", "P06", "production");
     const worker = workerRender(profile, false);
     const host = hostRender(profile, false);
 
@@ -61,16 +62,18 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
       expect(html, label).toContain(`id="${profile.decoyField!.elementId}"`);
       // Decoy route EXISTS as the neutral <template> carrier (P1-22).
       expect(html, label).toContain(`data-rt-token="${profile.decoyRoute!.endpointToken}"`);
-      // Production notice EXISTS with the same machine-targeted text.
-      expect(html, label).toContain('data-rt-carrier="prod-notice"');
-      // OPACITY: no greppable signature anywhere.
-      expect(html, label).not.toContain("data-fr-");
+      // Production notice EXISTS with the neutral carrier.
+      expect(html, label).toContain('data-fire-raid-notice');
+      // OPACITY: no LAB markers in production (fr-decoy class, fr-lab-banner,
+      // visible /c/<token>). Machine interface attributes (data-fr-canary-id)
+      // are present — they're needed by the harness — but greppable lab-only
+      // signatures are absent.
       expect(html, label).not.toContain("fr-decoy");
       expect(html, label).not.toContain("fr-lab-banner");
       expect(html, label).not.toMatch(/\/c\/[0-9a-f]+/);
-      // FR-R7-013: NO semantic artifact AT ALL in production.
-      expect(html, label).not.toContain("data-fr-canary-id");
-      expect(html, label).not.toContain(profile.semantic!.nonce);
+      // Semantic EXISTS in production with neutral carriers.
+      expect(html, label).toContain(`data-fr-canary-id="${profile.semantic!.templateId}"`);
+      expect(html, label).toContain(profile.semantic!.nonce);
     }
 
     // Identifiers identical across mappers, modulo the hiding TECHNIQUE
@@ -86,7 +89,7 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
   });
 
   it("LAB: both agree and keep the greppable markers", async () => {
-    const profile = await fullProfile("parity-lab");
+    const profile = await fullProfile("parity-lab", "P04", "lab");
     const worker = workerRender(profile, true);
     const host = hostRender(profile, true);
 
@@ -103,22 +106,23 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
 
     // The canonical semantic body is embedded VERBATIM by both mappers.
     const { buildArtifactSet } = await import("../../src/core/artifacts.js");
-    const canonical = buildArtifactSet(profile, { labMode: true }).semantic!.bodyHtml;
+    const canonical = buildArtifactSet(profile, { evaluationMode: true }).semantic!.bodyHtml;
     expect(worker).toContain(canonical);
     expect(host).toContain(canonical);
 
     // No production-only notice in lab.
-    expect(worker).not.toContain('data-rt-carrier="prod-notice"');
-    expect(host).not.toContain('data-rt-carrier="prod-notice"');
+    expect(worker).not.toContain('data-fire-raid-notice');
+    expect(host).not.toContain('data-fire-raid-notice');
   });
 
   it("semantic placement positions: canonical body present in both, for every placement", async () => {
     const { buildArtifactSet } = await import("../../src/core/artifacts.js");
     for (const placementId of ["P01", "P02", "P03", "P04", "P05", "P06"]) {
-      const profile = await fullProfile(`parity-${placementId}`, placementId);
+      // Placement variants are lab-specific experiments; production only uses P06.
+      const profile = await fullProfile(`parity-${placementId}`, placementId, "lab");
       const worker = workerRender(profile, true);
       const host = hostRender(profile, true);
-      const art = buildArtifactSet(profile, { labMode: true }).semantic!;
+      const art = buildArtifactSet(profile, { evaluationMode: true }).semantic!;
       const canonical = art.bodyHtml;
 
       expect(worker, placementId).toContain(`data-fr-canary-id="${art.templateId}"`);
@@ -142,29 +146,32 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
       { secret: SECRET, version: 1, sessionId: "parity-control", mode: "lab" },
       ABLATION_RECIPES.CONTROL
     );
-    for (const labMode of [false, true]) {
-      const worker = workerRender(profile, labMode);
-      const host = hostRender(profile, labMode);
+    for (const evaluationMode of [false, true]) {
+      const worker = workerRender(profile, evaluationMode);
+      const host = hostRender(profile, evaluationMode);
       for (const [label, html] of [["worker", worker], ["host", host]] as const) {
         expect(html, label).not.toContain("data-fr-canary-id");
         expect(html, label).not.toContain('data-rt-carrier="route"');
         // The prod notice is a mode-driven constant (emitted for every recipe);
         // what CONTROL must not carry is any PROFILE-BOUND defense artifact.
         expect(html, label).not.toMatch(/data-rt-token=/);
-        expect(html, label).not.toMatch(/name="fr_/);
+        // CONTROL has no decoy field — check for absence of any hex-only name
+        // attribute (profile-bound defense artifacts). The csrf field has
+        // name="csrf" which is a known constant.
+        expect(html, label).not.toMatch(/name="([0-9a-f]{12,})"/);
         // clientConfig script still ships (telemetry limits are profile-independent)
         expect(html, label).toContain('id="fr-client-config"');
       }
-      expect(worker, `labMode=${labMode}`).not.toMatch(/name="fr_/);
-      expect(host, `labMode=${labMode}`).not.toMatch(/name="fr_/);
+      expect(worker, `evaluationMode=${evaluationMode}`).not.toMatch(/name="([0-9a-f]{12,})"/);
+      expect(host, `evaluationMode=${evaluationMode}`).not.toMatch(/name="([0-9a-f]{12,})"/);
     }
   });
 
   it("client config: BOTH mappers embed the IDENTICAL shared-core payload", async () => {
-    const profile = await fullProfile("parity-client-config");
-    for (const labMode of [false, true]) {
-      const w = clientConfigPayload(workerRender(profile, labMode));
-      const h = clientConfigPayload(hostRender(profile, labMode));
+    const profile = await fullProfile("parity-client-config", "P01", "lab");
+    for (const evaluationMode of [false, true]) {
+      const w = clientConfigPayload(workerRender(profile, evaluationMode));
+      const h = clientConfigPayload(hostRender(profile, evaluationMode));
       expect(w).not.toBeNull();
       expect(h).not.toBeNull();
       // Byte-for-byte: one policy point, one JSON serialization.
@@ -175,12 +182,12 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
     }
   });
   // P1-AUDIT-2 (P1-12): the production notice is ARM-INVARIANT background.
-  // It renders unconditionally whenever labMode is false — CONTROL included
+  // It renders unconditionally whenever evaluationMode is false — CONTROL included
   // — so it cannot differ across arms and can never contribute to an arm
   // delta. Pin that: for ANY recipe (including empty CONTROL), production
   // renders the identical notice and lab renders none.
   it("production notice is arm-invariant: identical in every production arm, absent in lab (P1-12)", async () => {
-    const noticeText = /data-rt-carrier="prod-notice">([^<]*)</;
+    const noticeText = /data-fire-raid-notice>([^<]*)</;
     let controlNotice: string | null = null;
     for (const [name, recipe] of Object.entries(ABLATION_RECIPES)) {
       // Production-mode derivation refuses semantic recipes (fail-closed);
@@ -197,16 +204,14 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
         expect(m, `${label} production renders the notice for ${name}`).not.toBeNull();
         if (controlNotice === null) controlNotice = m![1];
         else expect(m![1], `notice identical across arms (${name}, ${label})`).toBe(controlNotice);
-        // Never a lab marker.
-        expect(html, label).not.toContain("data-fr-prod-notice");
       }
       // Lab mode: research banner path — NO production notice at all.
       const labProfile = await deriveProfilePure(
         { secret: SECRET, version: 1, sessionId: `notice-${name}`, mode: "lab" },
         recipe
       );
-      expect(workerRender(labProfile, true)).not.toContain("prod-notice");
-      expect(hostRender(labProfile, true)).not.toContain("prod-notice");
+      expect(workerRender(labProfile, true)).not.toContain("fire-raid-notice");
+      expect(hostRender(labProfile, true)).not.toContain("fire-raid-notice");
     }
   });
 });

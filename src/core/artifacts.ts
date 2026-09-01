@@ -114,9 +114,9 @@ export function escapeHtml(s: string): string {
  */
 export function buildArtifactSet(
   profile: DefenseProfile,
-  opts: { labMode: boolean }
+  opts?: { evaluationMode?: boolean }
 ): DefenseArtifactSet {
-  const { labMode } = opts;
+  const labMode = opts?.evaluationMode === true;
   const presentation: ArtifactPresentation = labMode ? "lab-marked" : "neutral";
 
   // Decoy field: exists iff the family was issued.
@@ -136,14 +136,18 @@ export function buildArtifactSet(
       }
     : null;
 
-  // Semantic canary: FR-R7-013 — S01–S08 are LAB-ONLY instruction templates.
-  // Production returns null (no semantic artifact AT ALL), which is the
-  // policy both renderers previously (inconsistently) re-derived.
+  // Semantic canary: S01–S08 are LAB-ONLY instruction templates (FR-R7-013).
+  // P01–P04 are production-safe traps that render in both modes.
+  // In production (neutral presentation), lab-only templates are silently
+  // dropped from the rendered output — the profile may carry them but
+  // the artifact set returns null semantic.
   let semantic: SemanticArtifact | null = null;
-  if (profile.semantic && labMode) {
+  if (profile.semantic) {
     const template = SEMANTIC_TEMPLATES.find((t) => t.id === profile.semantic!.templateId);
-    const placement = PLACEMENTS.find((p) => p.id === profile.semantic!.placementId);
-    if (template && placement) {
+    // Lab-only templates only render in lab/evaluation mode.
+    if (template && (labMode || !template.labOnly)) {
+      const placement = PLACEMENTS.find((p) => p.id === profile.semantic!.placementId);
+      if (template && placement) {
       const endpoint = profile.decoyRoute
         ? `/c/${profile.decoyRoute.endpointToken}`
         : "/c/<token>";
@@ -159,6 +163,7 @@ export function buildArtifactSet(
           mode: profile.semantic.mode,
         }),
       };
+      }
     }
   }
 

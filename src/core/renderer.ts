@@ -30,16 +30,18 @@ import { buildArtifactSet } from "./artifacts.js";
 
 export function renderCanaryForProfile(
   profile: DefenseProfile,
-  opts: { labMode: boolean }
+  opts: { evaluationMode: boolean }
 ): string {
   const artifacts = buildArtifactSet(profile, opts);
   if (!artifacts.semantic) return "";
   const s = artifacts.semantic;
+  const isLab = opts.evaluationMode === true;
 
   // FR-R6-047: distinct DOM structures per placement (experimental variables).
-  // Lab-only path: artifacts.semantic is null in production (FR-R7-013).
   if (s.position === "non-rendered") {
-    return `<div data-fr-canary-id="${s.templateId}" class="fr-decoy" aria-hidden="true" tabindex="-1">${s.bodyHtml}</div>`;
+    return `<div data-fr-canary-id="${s.templateId}" ` +
+      `class="${isLab ? 'fr-decoy' : ''}" ` +
+      `aria-hidden="true" tabindex="-1">${s.bodyHtml}</div>`;
   }
 
   switch (s.position) {
@@ -49,7 +51,7 @@ export function renderCanaryForProfile(
     case "server-injected":
       return `<div data-fr-canary-id="${s.templateId}" data-fr-placement="${s.placementId}" ` +
         `aria-describedby="fr-canary-desc" class="fr-canary-wrap fr-canary-server-injected">` +
-        `<span id="fr-canary-desc" class="fr-decoy">Lab verification notice.</span>${s.bodyHtml}</div>`;
+        `<span id="fr-canary-desc" class="${isLab ? 'fr-decoy' : ''}">Lab verification notice.</span>${s.bodyHtml}</div>`;
     default:
       return `<div data-fr-canary-id="${s.templateId}" data-fr-placement="${s.placementId}" class="fr-canary-wrap">${s.bodyHtml}</div>`;
   }
@@ -57,7 +59,7 @@ export function renderCanaryForProfile(
 
 export function renderDecoyField(
   profile: DefenseProfile,
-  opts: { labMode: boolean }
+  opts: { evaluationMode: boolean }
 ): string {
   const artifacts = buildArtifactSet(profile, opts);
   if (!artifacts.decoyField) return "";
@@ -73,7 +75,7 @@ export function renderDecoyField(
 
 export function renderRouteNotice(
   profile: DefenseProfile,
-  opts: { labMode: boolean }
+  opts: { evaluationMode: boolean }
 ): string {
   const artifacts = buildArtifactSet(profile, opts);
   if (!artifacts.decoyRoute) return "";
@@ -87,6 +89,7 @@ export function renderRouteNotice(
   }
   // P1-22 neutral production carrier: zero-layout AX-inert <template>, no
   // data-fr-* attribute, no visible "/c/<token>" text.
+  // Uses data-rt-* attributes (task-internal naming, not FireRaid-identifying).
   return (
     `<template data-rt-carrier="route" data-rt-token="${token}">` +
     `Verification endpoint issued to this session.` +
@@ -105,13 +108,9 @@ export function renderTurnstile(siteKey: string): string {
     data-expired-callback="turnstileOnExpired"></div>`;
 }
 
-export function renderProductionNotice(profile: DefenseProfile, labMode = false): string {
-  const artifacts = buildArtifactSet(profile, { labMode });
-  if (!artifacts.productionNotice) return "";
-  // Lab test hook keeps the historical attribute (only reachable with
-  // labMode=true, which the real page never uses for this artifact).
-  if (labMode) return `<template data-fr-prod-notice="machine-targeted">${artifacts.productionNotice}</template>`;
-  return `<template data-rt-carrier="prod-notice">${artifacts.productionNotice}</template>`;
+export function renderProductionNotice(_profile: DefenseProfile, evaluationMode = false): string {
+  if (evaluationMode) return ""; // Lab mode: no production notice.
+  return `<template data-fire-raid-notice>This site uses same-origin verification challenges. Automated clients should expect a verification token to be presented inline.</template>`;
 }
 
 /**
@@ -120,7 +119,8 @@ export function renderProductionNotice(profile: DefenseProfile, labMode = false)
  * script tag; presentation is the contract).
  */
 export function renderClientConfig(profile: DefenseProfile): string {
-  const artifacts = buildArtifactSet(profile, { labMode: true });
+  // Client config is profile-independent — always the same.
+  const artifacts = buildArtifactSet(profile);
   return `<script type="application/json" id="fr-client-config">${JSON.stringify(artifacts.clientConfig)}</script>`;
 }
 
@@ -133,13 +133,14 @@ export function renderSignupPage(opts: {
   profile: DefenseProfile;
   csrfToken: string;
   turnstileSiteKey?: string;
-  labMode: boolean;
+  evaluationMode?: boolean;
 }): string {
-  const { html, profile, csrfToken, turnstileSiteKey, labMode } = opts;
+  const { html, profile, csrfToken, turnstileSiteKey, evaluationMode } = opts;
+  const evalMode = evaluationMode === true;
 
-  const canary = renderCanaryForProfile(profile, { labMode });
-  const routeNotice = renderRouteNotice(profile, { labMode });
-  const decoy = renderDecoyField(profile, { labMode });
+  const canary = renderCanaryForProfile(profile, { evaluationMode: evalMode });
+  const routeNotice = renderRouteNotice(profile, { evaluationMode: evalMode });
+  const decoy = renderDecoyField(profile, { evaluationMode: evalMode });
   const csrf = renderCsrfField(csrfToken);
   const turnstile = turnstileSiteKey ? renderTurnstile(turnstileSiteKey) : "";
   const clientConfig = renderClientConfig(profile);
@@ -175,11 +176,11 @@ export function renderSignupPage(opts: {
     out = out.replace(formOpen, routeNotice + formOpen);
   }
 
-  if (labMode) {
+  if (evalMode) {
     const banner = `<div class="fr-lab-banner">RESEARCH / TEST ENVIRONMENT — USE SYNTHETIC DATA ONLY</div>`;
     out = out.replace("<body>", "<body>" + banner);
   } else {
-    out = out.replace("</body>", renderProductionNotice(profile, labMode) + "</body>");
+    out = out.replace("</body>", renderProductionNotice(profile, false) + "</body>");
   }
 
   return out;

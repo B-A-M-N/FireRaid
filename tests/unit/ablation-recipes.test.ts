@@ -215,27 +215,28 @@ describe("ablation recipe semantics", () => {
         expect(p[key], `${id} must define ${key}`).toBeDefined();
       }
       // Every carried family must have a production artifact to render.
-      const artifacts = buildArtifactSet(p, { labMode: false });
+      const artifacts = buildArtifactSet(p, { evaluationMode: false });
       if (p.decoyField) expect(artifacts.decoyField).not.toBeNull();
       if (p.decoyRoute) expect(artifacts.decoyRoute).not.toBeNull();
       expect(artifacts.semantic).toBeNull();
     });
   }
 
-  it("FULL in production mode throws (semantic is not a production family — P1-1)", async () => {
-    await expect(
-      deriveProfilePure(
-        { secret: SECRET, version: 1, sessionId: "full-prod", mode: "production" },
-        recipe("FULL")
-      )
-    ).rejects.toThrow("FAMILY_NOT_ELIGIBLE_IN_MODE: semantic");
+  it("FULL in production mode succeeds and includes semantic (environment does not restrict families)", async () => {
+    const profile = await deriveProfilePure(
+      { secret: SECRET, version: 1, sessionId: "full-prod", mode: "production" },
+      recipe("FULL")
+    );
+    expect(profile.families).toContain("semantic");
+    expect(profile.semantic).toBeDefined();
+    expect(profile.semantic!.templateId).toMatch(/^S\d+$/);
   });
 
-  it("FULL in production mode WITHOUT an explicit recipe degrades to PRODUCTION_FULL's family set", async () => {
-    // The engine-level equivalence the P0-12 doc comment claims: with
-    // semantic stripped by the mode-family contract, a random production
-    // FULL is drawn from exactly the PRODUCTION_FAMILIES pool.
-    for (let i = 0; i < 40; i++) {
+  it("random production draws can include semantic family", async () => {
+    // Without explicit recipe, random pool is now the full FAMILIES set.
+    // Semantic may appear in any session.
+    let sawSemantic = false;
+    for (let i = 0; i < 100; i++) {
       const p = await deriveProfilePure({
         secret: SECRET,
         version: 1,
@@ -245,6 +246,9 @@ describe("ablation recipe semantics", () => {
       for (const f of p.families) {
         expect(PRODUCTION_FAMILIES).toContain(f);
       }
+      if (p.families.includes("semantic")) sawSemantic = true;
     }
+    // With pool of 4 families and draw of 2–4, semantic should appear ~50% of time.
+    expect(sawSemantic).toBe(true);
   });
 });

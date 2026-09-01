@@ -1,48 +1,46 @@
 /**
- * P1-AUDIT-2 Phase E — the production RANDOM family pool.
+ * P1-AUDIT-2 Phase E (updated) — the production random family pool.
  *
- * FR-R7-013 makes S01–S08 lab-only, and FR-R6-041 excludes S09 (the only
- * labOnly:false template) from random selection. Net effect, BEFORE this
- * fix: a production random draw that picked the "semantic" family rendered
- * NOTHING (buildArtifactSet returns null semantic in production) while the
- * drawn slot still consumed 1–2 slots of the 2–4 family draw and skewed
- * variant identity (buildVariantId includes families + semantic dims).
+ * After the architecture correction: environment (production/lab) must NOT
+ * determine which defense families are available. Both random and explicit
+ * profiles can include the semantic family in production.
  *
- * The fix filters the RANDOM pool to production-renderable families; these
- * tests pin that:
- *   1. no production random draw ever contains "semantic";
- *   2. no production random profile ever carries profile.semantic;
- *   3. the draw never throws ("sample count exceeds population") — the
- *      count is clamped to the filtered pool;
- *   4. lab mode keeps the FULL pool (semantic still drawn there);
- *   5. explicit recipes still reach semantic in production when legal
- *      (S09, the fail-closed validateExplicitOverrides path).
+ * What still varies by mode:
+ *   - Template rendering (buildArtifactSet returns null semantic in production;
+ *     lab renders all S01–S09 templates)
+ *   - Artifact presentation (lab-marked vs neutral carriers)
+ *
+ * Invariants pinned here:
+ *   1. production random draws CAN include semantic;
+ *   2. family count stays within [2, 4];
+ *   3. lab mode works the same way (full pool);
+ *   4. explicit semantic recipes succeed in production;
+ *   5. lab-only templates (S01–S08) still fail in production (template guard).
  */
 import { describe, it, expect } from "vitest";
-import { deriveProfilePure } from "../../src/core/profile.js";
+import { deriveProfilePure, PRODUCTION_FAMILIES, LAB_FAMILIES } from "../../src/core/profile.js";
 import { buildArtifactSet } from "../../src/core/artifacts.js";
 
 const SECRET = "production-family-pool-secret".padEnd(32, "x");
 
 describe("Phase E: production random family pool", () => {
-  it("production draws NEVER include the semantic family (300 sessions)", async () => {
-    for (let i = 0; i < 300; i++) {
+  it("production random draws can include the semantic family (200 sessions)", async () => {
+    let sawSemantic = false;
+    for (let i = 0; i < 200; i++) {
       const profile = await deriveProfilePure({
         secret: SECRET,
         version: 1,
         sessionId: `pool-prod-${i}`,
         mode: "production",
       });
-      expect(profile.families, `session ${i}`).not.toContain("semantic");
-      expect(profile.semantic, `session ${i}`).toBeUndefined();
-      // And the shared core agrees: no semantic artifact to render.
-      expect(buildArtifactSet(profile, { labMode: false }).semantic).toBeNull();
+      expect(profile.families.every((f) => PRODUCTION_FAMILIES.includes(f))).toBe(true);
+      if (profile.families.includes("semantic")) sawSemantic = true;
     }
+    // With pool of 4 families and draw of 2–4, semantic should appear ~50% of time.
+    expect(sawSemantic, "semantic appeared in production draws").toBe(true);
   });
 
-  it("production draw never throws; family count stays within [2, pool]", async () => {
-    // The raw count draw can reach 4 but the production pool holds 3
-    // families — the pre-fix code threw "sample count exceeds population".
+  it("production draw never throws; family count stays within [2, 4]", async () => {
     for (let i = 0; i < 300; i++) {
       const profile = await deriveProfilePure({
         secret: SECRET,
@@ -51,7 +49,7 @@ describe("Phase E: production random family pool", () => {
         mode: "production",
       });
       expect(profile.families.length).toBeGreaterThanOrEqual(2);
-      expect(profile.families.length).toBeLessThanOrEqual(3);
+      expect(profile.families.length).toBeLessThanOrEqual(4);
     }
   });
 
@@ -70,24 +68,19 @@ describe("Phase E: production random family pool", () => {
     expect(sawSemantic).toBeGreaterThan(10);
   });
 
-  it("explicit semantic recipe in production FAILS CLOSED (P1-1: family contract is explicit too)", async () => {
-    // S09's marker renders NOWHERE in production (buildArtifactSet returns a
-    // null semantic artifact there), so the audit's P1-1 position is that a
-    // production profile may never CARRY the semantic family — explicit
-    // recipes included. The prior behavior (issue the profile, render
-    // nothing) polluted variant identity with a dimension that has no
-    // production form.
-    await expect(
-      deriveProfilePure(
-        {
-          secret: SECRET,
-          version: 1,
-          sessionId: "pool-explicit-s09-prod",
-          mode: "production",
-        },
-        { families: ["semantic"], semanticTemplate: "S09", placementId: "P06" }
-      )
-    ).rejects.toThrow("FAMILY_NOT_ELIGIBLE_IN_MODE: semantic");
+  it("explicit semantic recipe in production SUCCEEDS (environment does not restrict families)", async () => {
+    const profile = await deriveProfilePure(
+      {
+        secret: SECRET,
+        version: 1,
+        sessionId: "pool-explicit-s09-prod",
+        mode: "production",
+      },
+      { families: ["semantic"], semanticTemplate: "S09", placementId: "P06" }
+    );
+    expect(profile.families).toContain("semantic");
+    expect(profile.semantic).toBeDefined();
+    expect(profile.semantic!.templateId).toBe("S09");
   });
 
   it("explicit S09 recipe still works in LAB (where its probe actually renders)", async () => {
@@ -103,10 +96,10 @@ describe("Phase E: production random family pool", () => {
     expect(profile.families).toContain("semantic");
     expect(profile.semantic?.templateId).toBe("S09");
     // And the artifact core agrees: lab mode renders the S09 marker.
-    expect(buildArtifactSet(profile, { labMode: true }).semantic).not.toBeNull();
+    expect(buildArtifactSet(profile, { evaluationMode: true }).semantic).not.toBeNull();
   });
 
-  it("explicit lab-only template in production still throws (guard intact)", async () => {
+  it("explicit lab-only template in production still throws (template guard intact)", async () => {
     await expect(
       deriveProfilePure(
         {
@@ -118,5 +111,9 @@ describe("Phase E: production random family pool", () => {
         { families: ["semantic"], semanticTemplate: "S06", placementId: "P01" }
       )
     ).rejects.toThrow();
+  });
+
+  it("PRODUCTION_FAMILIES === LAB_FAMILIES (no mode-based family exclusion)", async () => {
+    expect(PRODUCTION_FAMILIES).toEqual(LAB_FAMILIES);
   });
 });

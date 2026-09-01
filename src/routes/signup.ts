@@ -197,7 +197,7 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
     profile,
     csrfToken,
     turnstileSiteKey: env.TURNSTILE_SITE_KEY,
-    labMode: isLabMode(env),
+    evaluationMode: isLabMode(env),
   });
 
   const resp = html(page);

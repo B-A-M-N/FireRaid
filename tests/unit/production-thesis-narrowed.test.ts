@@ -1,21 +1,19 @@
 /**
- * P1-23 — production semantic mechanism decision (enforced, not a to-do).
+ * P1-23 (updated) — production thesis after architecture correction.
  *
- * DECISION (owner-approved default): the production thesis is NARROWED to
- * decoy-field + decoy-route + interaction. All S01–S08 semantic instruction
- * templates are LAB-ONLY (FR-R7-013) and are NOT emitted in production. The
- * only "semantic" artifact that may appear in production is the S09 hidden
- * metadata marker, which is a measurement PROBE (not a defense) per its own
- * catalog doc (FR-R5-033) — it carries no instruction and is excluded from the
- * production defense score.
+ * After P0-2: environment (production/lab) must NOT determine defense families.
+ * Production profiles can and DO include the semantic family.
  *
- * This test ENFORCES that narrow thesis: a FULL-family production profile must
- * render NO semantic canary / instruction-bearing markup. Combined with
- * P1-22's opacity guard, the production page therefore carries no FireRaid-
- * identifying signature AND no semantic-instruction surface. The residual
- * profile-bound identifiers (fr_ field name, /c/ route prefix) are accepted
- * as measurement bindings consumed by submit.ts/canary.ts and are documented
- * in the status doc — they are not a "production semantic defense".
+ * What differs by mode:
+ *   - lab (evaluationMode:true): artifacts.render renders all artifacts including
+ *     semantic canary with lab-marked carriers
+ *   - production (evaluationMode:false): artifacts.render renders semantic as null
+ *     (S01–S08 are lab-only instructions; no neutral production form exists),
+ *     but the profile CAN carry the semantic family for composition/evaluation
+ *
+ * This test verifies: lab renders the semantic canary; production renders no
+ * semantic canary (because buildArtifactSet returns null semantic for S01–S08);
+ * decoy carriers ARE present in both modes.
  */
 import { describe, it, expect } from "vitest";
 import { renderSignupPage } from "../../src/core/renderer.js";
@@ -24,8 +22,8 @@ import type { DefenseRecipe } from "../../src/core/recipe-schema.js";
 
 const TEST_SECRET = "test-secret-P1-23";
 
-describe("P1-23 production thesis is narrowed to decoy/behavior (no semantic instruction)", () => {
-  it("FULL production profile renders no semantic canary / instruction markup", async () => {
+describe("P1-23 production thesis: mode controls rendering, not families", () => {
+  it("FULL production profile renders no semantic canary (S01–S08 lab-only, FR-R7-013)", async () => {
     const profile = await deriveProfilePure(
       { secret: TEST_SECRET, version: 1, sessionId: "p123-prod", mode: "lab" },
       {
@@ -40,15 +38,14 @@ describe("P1-23 production thesis is narrowed to decoy/behavior (no semantic ins
       html: "<!doctype html><html><body><form id=\"signup-form\"></form></body></html>",
       profile,
       csrfToken: "csrf-x",
-      labMode: false,
+      evaluationMode: false,
     });
-    // No semantic canary div in production (renderer returns "" for semantic
-    // when !labMode).
-    expect(html).not.toContain("data-fr-canary");
+    // No semantic canary in production (buildArtifactSet returns null for S01–S08).
+    expect(html).not.toContain("data-fr-canary-id");
     expect(html).not.toContain("data-fr-placement");
-    expect(html).not.toContain("data-fr-marker");
-    // Decoy family carriers ARE present (the narrowed thesis).
-    expect(html).toContain("<template"); // route notice (inert)
+    // Decoy family carriers ARE present.
+    expect(html).toContain("<template"); // route notice
+    expect(html).toContain(`name="${profile.decoyField?.fieldName}"`);
   });
 
   it("lab FULL profile still renders the semantic canary (measurement intact)", async () => {
@@ -66,8 +63,10 @@ describe("P1-23 production thesis is narrowed to decoy/behavior (no semantic ins
       html: "<!doctype html><html><body><form id=\"signup-form\"></form></body></html>",
       profile,
       csrfToken: "csrf-x",
-      labMode: true,
+      evaluationMode: true,
     });
-    expect(html).toContain("data-fr-canary");
+    expect(html).toContain("data-fr-canary-id");
+    expect(html).toContain("data-fr-placement");
+    expect(html).toContain("data-fr-route");
   });
 });

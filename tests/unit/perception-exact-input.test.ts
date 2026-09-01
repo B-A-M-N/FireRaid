@@ -69,8 +69,8 @@ describe("P1-AUDIT-2: exact-material exposure uses ISSUED material", () => {
 
   it("issued decoy field name present → exposed", () => {
     expect(exactMaterialInArtifacts(
-      [{ content: '<input name="fr_a1b2c3d4">' }],
-      { decoy_field_name: "fr_a1b2c3d4" }
+      [{ content: '<input name="a1b2c3d4e5f6">' }],
+      { decoy_field_name: "a1b2c3d4e5f6" }
     )).toBe(true);
   });
 

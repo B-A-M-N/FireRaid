@@ -31,7 +31,7 @@ export function referenceInject(
   labMode: boolean
 ): string {
   // THE shared core — same source the Worker renderer consumes.
-  const artifacts = buildArtifactSet(profile, { labMode });
+  const artifacts = buildArtifactSet(profile, { evaluationMode: labMode });
 
   let out = html;
 
@@ -53,12 +53,12 @@ export function referenceInject(
     out += injection;
   }
 
-  // --- Semantic canary (lab-only; artifacts.semantic is null in prod) ----
+  // --- Semantic canary (lab-marked carriers in lab, neutral in production) ---
   if (artifacts.semantic) {
     const s = artifacts.semantic;
     const carrier =
       s.position === "non-rendered"
-        ? `<div data-fr-canary-id="${s.templateId}" class="fr-decoy" aria-hidden="true" tabindex="-1">${s.bodyHtml}</div>`
+        ? `<div data-fr-canary-id="${s.templateId}" class="${labMode ? 'fr-decoy' : ''}" aria-hidden="true" tabindex="-1">${s.bodyHtml}</div>`
         : `<div data-fr-canary-id="${s.templateId}" data-fr-placement="${s.placementId}" class="fr-canary-wrap">${s.bodyHtml}</div>`;
     if (s.position === "submit-adjacent") {
       out = out.replace("</form>", carrier + "</form>");
@@ -103,7 +103,7 @@ export function referenceInject(
   } else if (artifacts.productionNotice) {
     out = out.replace(
       "</body>",
-      `<template data-rt-carrier="prod-notice">${artifacts.productionNotice}</template></body>`
+      `<template data-fire-raid-notice>${artifacts.productionNotice}</template></body>`
     );
   }
 

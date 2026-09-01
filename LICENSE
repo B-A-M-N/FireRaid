@@ -24,7 +24,8 @@ SOFTWARE.
 
 ---
 
-**Research Use Notice**: FireRaid is designed for studying autonomous-agent
-admission defense in a laboratory setting. It is not intended as a production
-bot detection system. Users are responsible for ensuring their use complies
+**Use Notice**: FireRaid is a deterministic agent-admission defense middleware
+designed for studying autonomous-agent behavior and for production deployment
+behind existing application review workflows. It is not a universal bot
+detection system. Users are responsible for ensuring their use complies
 with applicable laws, regulations, and platform terms of service.

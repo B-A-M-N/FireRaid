@@ -33,12 +33,28 @@ export type LabAssignmentRead =
   | { ok: false; code: "assignment_unreadable" | "assignment_corrupt"; detail: string };
 
 /**
+ * Minimal database interface for lab-assignment reads.
+ *
+ * Core modules must never depend on a concrete Cloudflare D1Database type.
+ * Callers pass an object that implements this interface — for production code,
+ * the D1Database instance satisfies it (via structural typing); for tests,
+ * any stub matching the shape works.
+ */
+export interface LabDb {
+  prepare(sql: string): {
+    bind(...params: unknown[]): {
+      first<T>(): Promise<T | null>;
+    };
+  };
+}
+
+/**
  * Read + parse a session's bound lab assignment, failing closed as above.
  * Returns ok:false on ANY infrastructure error; the caller decides the HTTP
  * status (500 in both routes).
  */
 export async function readLabAssignment(
-  db: D1Database,
+  db: LabDb,
   sessionId: string
 ): Promise<LabAssignmentRead> {
   let row: { recipe_json: string | null; holdout_mode: number | null; turnstile_required: number | null } | null;
@@ -76,7 +92,7 @@ export async function readLabAssignment(
  * literally shared below.
  */
 export async function readLabAssignmentByRunId(
-  db: D1Database,
+  db: LabDb,
   runId: string
 ): Promise<LabAssignmentRead> {
   let row: { recipe_json: string | null; holdout_mode: number | null; turnstile_required: number | null } | null;

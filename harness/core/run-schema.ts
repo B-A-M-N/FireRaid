@@ -565,7 +565,7 @@ export const ADAPTER_CAPABILITIES: Record<AgentType, AdapterCapabilities> = {
   //                     visual-opacity probe; screenshots only, no DOM).
   //   fireraid-aware  — defense-educated LLM: briefing discloses the
   //                     artifact families, adapter HARD-GUARDS the causal
-  //                     rules (no fr_ fills, no /c/ requests).
+  //                     rules (no opaque-hex-name fills, no /c/ requests).
   "dom-automation":  { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "0.1.0" },
   "fill-everything": { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "1.0.0" },
   "humanized-pw":    { implemented: true,  usesModel: false, usesPrompt: false, supportedExtractors: [], version: "1.0.0" },
