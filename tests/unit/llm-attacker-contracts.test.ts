@@ -71,8 +71,11 @@ describe("vision-only: badge-ref protocol contract", () => {
       "utf-8"
     );
     expect(src).toMatch(/R01, R02/); // the badge format
-    expect(src).toMatch(/Use the badge label as the/);
+    expect(src).toMatch(/Use the badge label\s+as the/); // (line-wrap tolerant)
     expect(src).toMatch(/data-vr-ref/); // the DOM marking mechanism
+    // P0-10: the stamping is visibility-gated and name-free.
+    expect(src).toMatch(/visuallyInteractive/);
+    expect(src).not.toMatch(/r\.ref=\$\{r\.name\}/);
   });
 
   it("the runner maps vision-only → screenshot-model-input and fireraid-aware → simplified-dom", async () => {

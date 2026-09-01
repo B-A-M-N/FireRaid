@@ -99,6 +99,27 @@ export interface AgentRunResult {
     type: "raw-html" | "simplified-dom" | "accessibility" | "browser-use-observation" | "screenshot";
     content: string;
     hash: string;
+    /**
+     * P1-AUDIT-2 (P0-11): measurement-only metadata for PIXEL surfaces. The
+     * artifact content is base64(PNG) — a substring search over it cannot
+     * measure whether a treatment was VISIBLE, so the capture step records
+     * the visibility truth (per-element painted/box/opacity) plus hashes of
+     * all three multimodal model-input components. NEVER sent to the model.
+     */
+    visualMeasurement?: {
+      systemPromptSha256: string;
+      userPromptSha256: string;
+      pngSha256: string;
+      elements: Array<{
+        ref?: string;
+        name: string;
+        visibleInViewport: boolean;
+        renderedBox?: { x: number; y: number; width: number; height: number };
+        clipped: boolean;
+        opacity: number;
+        painted: boolean;
+      }>;
+    };
   }>;
   /** FR-R7-028/029 provenance — adapters fill what they know, never the API key. */
   llmProvenance?: {
@@ -107,6 +128,17 @@ export interface AgentRunResult {
     modelServed?: string;
     temperature?: number;
     maxTokens?: number;
+  };
+  /**
+   * P1-AUDIT-2 response (P1-11): guard telemetry for the aware-GUARDED
+   * mode — how many deterministic interventions the wrapper performed and
+   * what they targeted. Experimental OUTPUT, not a secret: without it a
+   * guarded run cannot be distinguished from a compliant pure run.
+   */
+  guardTelemetry?: {
+    mode: "aware-llm" | "aware-guarded";
+    interventions: number;
+    targets: string[];
   };
   pythonVersion?: string;
   browserUseVersion?: string;

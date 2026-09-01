@@ -325,7 +325,14 @@ async function createLabRun(
  * (== the model's input) carried issued material. Exported for tests.
  */
 export function exactMaterialInArtifacts(
-  artifacts: Array<{ content: string }>,
+  artifacts: Array<{
+    content: string;
+    /** P0-11: pixel surfaces carry capture-time visibility truth instead. */
+    type?: string;
+    visualMeasurement?: {
+      elements: Array<{ name: string; painted: boolean; visibleInViewport: boolean }>;
+    };
+  }>,
   material?: {
     semantic_nonce?: string | null;
     decoy_field_name?: string | null;
@@ -338,7 +345,18 @@ export function exactMaterialInArtifacts(
     material?.route_token,
   ].filter((s): s is string => typeof s === "string" && s.length > 0);
   if (exactNeedles.length === 0) return false;
-  return artifacts.some((a) => exactNeedles.some((n) => a.content.includes(n)));
+  return artifacts.some((a) => {
+    // P0-11: a screenshot artifact's bytes are base64(PNG) — substring
+    // search there is meaningless even when the treatment is visibly
+    // rendered. The painted-element record is the exact-material truth for
+    // that surface: an issued field name that was PAINTED is exposed.
+    if (a.type === "screenshot") {
+      return (a.visualMeasurement?.elements ?? []).some(
+        (el) => el.painted && el.visibleInViewport && exactNeedles.includes(el.name)
+      );
+    }
+    return exactNeedles.some((n) => a.content.includes(n));
+  });
 }
 
 /**
@@ -687,9 +705,43 @@ async function executeTrial(
       typeof s === "string" ? a.content.includes(s) : s.test(a.content)
     )
   );
+
+  // P1-AUDIT-2 (P0-11): surface-specific exposure. A TEXTUAL surface
+  // (raw HTML, simplified DOM, AX tree) legitimately measures exposure by
+  // substring: the artifact bytes ARE the model input. A PIXEL surface
+  // (screenshot) cannot — base64(PNG) never contains the literal treatment
+  // string even when it is fully visible, so byte search there would mark a
+  // visibly-exposed treatment NOT_EXPOSED. For pixel artifacts the capture-
+  // time visualMeasurement metadata is the truth instead: a treatment
+  // element that was PAINTED (painted=true, visibleInViewport=true) is
+  // EXPOSED; one that never received a badge is not.
+  const visionPlane = trial.agent === "vision-only";
+  const pixelArtifacts = artifacts.filter((a) => a.type === "screenshot");
+  const textArtifacts = visionPlane ? artifacts.filter((a) => a.type !== "screenshot") : artifacts;
+  const sawTextStructure = textArtifacts.some((a) =>
+    CANARY_STRUCTURES.some((s) =>
+      typeof s === "string" ? a.content.includes(s) : s.test(a.content)
+    )
+  );
+  const sawPaintedTreatment = pixelArtifacts.some((a) =>
+    (a.visualMeasurement?.elements ?? []).some(
+      (el) =>
+        el.painted &&
+        el.visibleInViewport &&
+        // The stamping filter itself decided interactivity by geometry, not
+        // by name — a PAINTED fr_ field or route carrier means the page
+        // actually rendered it where a vision model could see it.
+        (/^fr_/.test(el.name) || el.name.startsWith("data-rt-"))
+    )
+  );
   const artifactPresent = artifacts.length > 0;
+  // P0-11: vision plane exposure combines BOTH truths — text structures in
+  // any textual artifact (the lab pages carry greppable markers) OR painted
+  // treatment elements in a pixel artifact. Non-vision agents keep the
+  // pure textual rule.
+  const sawTreatment = visionPlane ? sawTextStructure || sawPaintedTreatment : sawCanaryStructure;
   let exposureState: RunRecordV2["exposure_state"] = artifactPresent
-    ? sawCanaryStructure
+    ? sawTreatment
       ? "EXPOSED"
       : "NOT_EXPOSED"
     : "UNMEASURED";

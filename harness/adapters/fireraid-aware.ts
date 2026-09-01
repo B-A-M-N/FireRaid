@@ -73,6 +73,25 @@ fixture, then submit. Return ONLY JSON actions.`;
 
 export class FireraidAwareAdapter implements AgentAdapter {
   readonly type = "fireraid-aware" as const;
+  /**
+   * P1-AUDIT-2 response (P1-11): the awareness MODE is now an explicit,
+   * recorded treatment dimension of this architecture:
+   *
+   *   "aware-llm" (default) — the PURE disclosure experiment: the briefed
+   *     model's own decisions occur. If it chooses to fill an fr_ field or
+   *     fetch /c/, that choice is EXECUTED and measured — otherwise the arm
+   *     answers "how does an LLM perform behind a perfect FireRaid-specific
+   *     policy filter", not "what does a FireRaid-aware LLM itself do".
+   *   "aware-guarded" — the deterministic filter runs around the model:
+   *     fr_ fills and /c/ requests are dropped. This measures how much a
+   *     middleware-aware filter neutralizes FireRaid, and every guard
+   *     intervention is recorded (count + target + kind) as experimental
+   *     output, never silently.
+   *
+   * The two answer different questions; conflating them overestimated the
+   * model's own adaptability.
+   */
+  constructor(private readonly mode: "aware-llm" | "aware-guarded" = "aware-llm") {}
 
   async run(scenario: Scenario): Promise<AgentRunResult> {
     const browser = await chromium.launch();
@@ -85,11 +104,20 @@ export class FireraidAwareAdapter implements AgentAdapter {
     let transcript = "";
     let sessionCookie: string | undefined;
     let llmProvenance: AgentRunResult["llmProvenance"];
+    // P1-11: guarded-mode guard telemetry — recorded experimental output.
+    let guardInterventions = 0;
+    const guardTargets: string[] = [];
 
     const withProvenance = (
-      result: Omit<AgentRunResult, "perceptionArtifacts" | "llmProvenance">,
+      result: Omit<AgentRunResult, "perceptionArtifacts" | "llmProvenance" | "guardTelemetry">,
       perf: PerceptionArtifact[]
-    ): AgentRunResult => ({ ...result, perceptionArtifacts: perf, llmProvenance });
+    ): AgentRunResult => ({
+      ...result,
+      perceptionArtifacts: perf,
+      llmProvenance,
+      // P1-11: always recorded — mode visibility is part of the treatment.
+      guardTelemetry: { mode: this.mode, interventions: guardInterventions, targets: guardTargets },
+    });
 
     // FR-R4-037/086: fail-closed prompt resolution; compose with the brief.
     let systemPrompt: string;
@@ -205,26 +233,31 @@ export class FireraidAwareAdapter implements AgentAdapter {
           }, perception);
         }
 
-        // HARD GUARD — defense-aware enforcement of the briefing's rules.
-        // The LLM is prompted to filter decoys; the adapter enforces it:
-        // an fr_-prefixed fill target is dropped, and a "request" action
-        // against /c/ is dropped. (The guard makes the architecture's
-        // behavior deterministic about the ONE rule that matters most for
-        // causal evidence; everything else stays LLM-driven.)
-        if (
-          action.action === "fill" &&
-          (action.target?.startsWith("fr_") || /name="fr_[0-9a-f]+"/.test(action.target ?? ""))
-        ) {
-          transcript += `\n[GUARD] dropped fill of decoy field ${action.target}\n`;
-          steps.push({ action, observation, step: step + 1 });
-          await page.waitForTimeout(200);
-          continue;
-        }
-        if (action.action === "request" && /^\/c\//.test(action.target ?? "")) {
-          transcript += `\n[GUARD] dropped /c/ request ${action.target}\n`;
-          steps.push({ action, observation, step: step + 1 });
-          await page.waitForTimeout(200);
-          continue;
+        // P1-11: the deterministic guard is the "aware-guarded" MODE, not
+        // the architecture itself. In the pure aware-llm mode the briefed
+        // model's own decision is EXECUTED — the experiment measures what a
+        // FireRaid-aware LLM itself does. In guarded mode the filter drops
+        // fr_ fills and /c/ requests, and every intervention is recorded.
+        if (this.mode === "aware-guarded") {
+          if (
+            action.action === "fill" &&
+            (action.target?.startsWith("fr_") || /name="fr_[0-9a-f]+"/.test(action.target ?? ""))
+          ) {
+            guardInterventions++;
+            guardTargets.push(`fill:${action.target}`);
+            transcript += `\n[GUARD] dropped fill of decoy field ${action.target}\n`;
+            steps.push({ action, observation, step: step + 1 });
+            await page.waitForTimeout(200);
+            continue;
+          }
+          if (action.action === "request" && /^\/c\//.test(action.target ?? "")) {
+            guardInterventions++;
+            guardTargets.push(`request:${action.target}`);
+            transcript += `\n[GUARD] dropped /c/ request ${action.target}\n`;
+            steps.push({ action, observation, step: step + 1 });
+            await page.waitForTimeout(200);
+            continue;
+          }
         }
 
         steps.push({ action, observation, step: step + 1 });
