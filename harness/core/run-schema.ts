@@ -419,78 +419,91 @@ export function parseRunRecord(raw: unknown): ParseRunRecordResult {
 // ExperimentManifest — validated with Zod (FR-R3-093)
 // ---------------------------------------------------------------------------
 
-export const ExperimentManifestSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  seed: z.string().min(1),
-  target: z.object({
-    url: z.string().url(),
-    /**
-     * P1-AUDIT-2 Phase C (audit item 2): which plane the trial drives.
-     *   "fireraid-worker" (default) — the FireRaid Worker; `submitted` is
-     *     the best available endpoint.
-     *   "origin-ledger" — the host-neutral admit() middleware in front of
-     *     the ordinary upstream ledger app. `origin_account_created` (read
-     *     from the origin's own ledger) is the PRIMARY endpoint.
-     *
-     *     P1-AUDIT-2 response (P1-9): origin-ledger mode is structurally
-     *     distinct — the runner substitutes the local facade for target.url
-     *     and there is NO separately-addressable ledger endpoint (the
-     *     runtime owns the upstream). The unused `ledgerUrl` field is
-     *     REMOVED: unused experimental configuration makes operators think
-     *     they are targeting something they are not.
-     */
-    mode: z.enum(["fireraid-worker", "origin-ledger"]).default("fireraid-worker"),
-  }),
-  repetitions: z.number().int().positive(),
-  timeout_ms: z.number().int().positive(),
-  fixture: z.string().default("default"),
-  profile_version: z.number().int().positive().default(1),
+export const ExperimentManifestSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    seed: z.string().min(1),
+    target: z
+      .object({
+        url: z.string().url(),
+        /**
+         * P1-AUDIT-2 Phase C (audit item 2): which plane the trial drives.
+         *   "fireraid-worker" (default) — the FireRaid Worker; `submitted` is
+         *     the best available endpoint.
+         *   "origin-ledger" — the host-neutral admit() middleware in front of
+         *     the ordinary upstream ledger app. `origin_account_created` (read
+         *     from the origin's own ledger) is the PRIMARY endpoint.
+         *
+         *     P1-AUDIT-2 response (P1-9): origin-ledger mode is structurally
+         *     distinct — the runner substitutes the local facade for target.url
+         *     and there is NO separately-addressable ledger endpoint (the
+         *     runtime owns the upstream). The unused `ledgerUrl` field is
+         *     REMOVED: unused experimental configuration makes operators think
+         *     they are targeting something they are not.
+         */
+        mode: z.enum(["fireraid-worker", "origin-ledger"]).default("fireraid-worker"),
+      })
+      .strict(),
+    repetitions: z.number().int().positive(),
+    timeout_ms: z.number().int().positive(),
+    fixture: z.string().default("default"),
+    profile_version: z.number().int().positive().default(1),
 
-  // Matrix
-  agents: z.array(AgentType),
-  models: z.array(z.string().min(1)),
-  prompts: z.array(z.string().min(1)),
-  extractors: z.array(ExtractorType).optional(),
+    // Matrix
+    agents: z.array(AgentType),
+    models: z.array(z.string().min(1)),
+    prompts: z.array(z.string().min(1)),
+    extractors: z.array(ExtractorType).optional(),
 
-  // --- Control parameters (FR-R4-039) ---
-  max_steps: z.number().int().positive().default(20),
+    // --- Control parameters (FR-R4-039) ---
+    max_steps: z.number().int().positive().default(20),
 
-  // --- Model configuration (FR-R4-041) ---
-  model_config: z
-    .object({
-      temperature: z.number().min(0).max(2).optional(),
-      max_tokens: z.number().int().positive().optional(),
-    })
-    .default({}),
+    // --- Model configuration (FR-R4-041) ---
+    model_config: z
+      .object({
+        temperature: z.number().min(0).max(2).optional(),
+        max_tokens: z.number().int().positive().optional(),
+      })
+      .strict()
+      .default({}),
 
-  // --- Retry policy (FR-R4-085) ---
-  retry_failed: z.boolean().default(false),
+    // --- Retry policy (FR-R4-085) ---
+    retry_failed: z.boolean().default(false),
 
-  // FR-R6-009: manifest conditions use the CANONICAL treatment abstractions,
-  // not a second hand-written partial recipe schema:
-  //   recipe_id — named condition (CONTROL, FULL, SEMANTIC_ONLY, ...),
-  //               resolved server-side against ABLATION_RECIPES.
-  //   turnstile_required — per-run Turnstile experimental condition.
-  //   holdout_mode — restrict semantic templates to the holdout partition.
-  // recipe_id XOR recipe: one treatment identity per run (FR-R6-010).
-  // P1-20: `conditions` is the INTERLEAVED superset — a manifest lists every
-  //   ablation condition it wants in ONE experiment; expandManifest emits one
-  //   trial per condition×dimension and a seeded shuffle interleaves the
-  //   conditions WITHIN each repetition block so CONTROL/defended comparisons
-  //   are contemporaneous (no batch-order confounding). When `conditions` is
-  //   absent, the single `recipe_id` is used (backward compatible).
-  recipe_id: RecipeIdSchema.optional(),
-  conditions: z.array(RecipeIdSchema).optional(),
-  turnstile_required: z.boolean().optional(),
-  holdout_mode: z.boolean().default(false),
+    // FR-R6-009: manifest conditions use the CANONICAL treatment abstractions,
+    // not a second hand-written partial recipe schema:
+    //   recipe_id — named condition (CONTROL, FULL, SEMANTIC_ONLY, ...),
+    //               resolved server-side against ABLATION_RECIPES.
+    //   turnstile_required — per-run Turnstile experimental condition.
+    //   holdout_mode — restrict semantic templates to the holdout partition.
+    // recipe_id XOR recipe: one treatment identity per run (FR-R6-010).
+    // P1-20: `conditions` is the INTERLEAVED superset — a manifest lists every
+    //   ablation condition it wants in ONE experiment; expandManifest emits one
+    //   trial per condition×dimension and a seeded shuffle interleaves the
+    //   conditions WITHIN each repetition block so CONTROL/defended comparisons
+    //   are contemporaneous (no batch-order confounding). When `conditions` is
+    //   absent, the single `recipe_id` is used (backward compatible).
+    recipe_id: RecipeIdSchema.optional(),
+    conditions: z.array(RecipeIdSchema).optional(),
+    turnstile_required: z.boolean().optional(),
+    holdout_mode: z.boolean().default(false),
 
-  // FR-R7-006: human-agent false-positive trial variants — legitimate-user
-  // runs under defended profiles; applies to the "human" agent only.
-  control_variants: z
-    .array(z.enum(["normal", "keyboard", "autofill"]))
-    .default(["normal"]),
-});
+    // FR-R7-006: human-agent false-positive trial variants — legitimate-user
+    // runs under defended profiles; applies to the "human" agent only.
+    control_variants: z
+      .array(z.enum(["normal", "keyboard", "autofill"]))
+      .default(["normal"]),
+  })
+  /**
+   * P1-AUDIT-2 response (P1-4): STRICT. A typo'd key — `recpie_id`,
+   * `recipe` where only `recipe_id` exists, `condition` — previously passed
+   * schema (unknown keys are stripped) and silently dropped the intended
+   * treatment: the experiment ran CONTROL believing it ran FULL, and the
+   * manifest on disk looked authoritative. Unknown keys now FAIL validation;
+   * cross-field rules (XOR, uniqueness, min-1) live in validateManifest.
+   */
+  .strict();
 export type ExperimentManifest = z.infer<typeof ExperimentManifestSchema>;
 
 /**
@@ -581,6 +594,79 @@ export function validateManifest(raw: unknown): {
 
   const manifest = result.data;
   const errors: string[] = [];
+
+  /**
+   * P1-AUDIT-2 response (P1-4/P1-5): cross-field identity rules. The schema
+   * is strict about UNKNOWN keys; these rules govern KNOWN ones.
+   *
+   * recipe_id XOR conditions: expandManifest resolves
+   * `conditions ?? [recipe_id ?? "CONTROL"]` — declaring BOTH is ambiguous
+   * (the conditions list silently wins) and a declared-but-ignored field on
+   * an experiment identity is never acceptable.
+   */
+  if (manifest.recipe_id !== undefined && manifest.conditions !== undefined) {
+    errors.push(
+      "recipe_id and conditions are mutually exclusive: declare conditions for a multi-arm experiment, or recipe_id for a single-arm one — never both (conditions would silently win)."
+    );
+  }
+
+  /**
+   * P1-5: DUPLICATE conditions are a self-inflicted confound — expandManifest
+   * emits one trial per list entry, so ["FULL","FULL","CONTROL"] would run
+   * FULL twice per cell and double-count it in every paired analysis.
+   */
+  if (manifest.conditions) {
+    const seen = new Set<string>();
+    for (const c of manifest.conditions) {
+      if (seen.has(c)) {
+        errors.push(
+          `duplicate condition "${c}" in conditions: each condition must appear exactly once (duplicates double-count the arm in paired analyses).`
+        );
+      }
+      seen.add(c);
+    }
+  }
+
+  // P1-4: min-1 matrix dimensions — an empty array would expand to ZERO
+  // trials (an experiment that runs nothing and "succeeds").
+  for (const [field, arr] of [
+    ["agents", manifest.agents],
+    ["models", manifest.models],
+    ["prompts", manifest.prompts],
+  ] as const) {
+    if (arr.length === 0) {
+      errors.push(`${field} must contain at least one entry (an empty matrix expands to zero trials).`);
+    }
+  }
+  const seenAgents = new Set<string>();
+  for (const a of manifest.agents) {
+    if (seenAgents.has(a)) errors.push(`duplicate agent "${a}" in agents.`);
+    seenAgents.add(a);
+  }
+  const seenModels = new Set<string>();
+  for (const m of manifest.models) {
+    if (seenModels.has(m)) errors.push(`duplicate model "${m}" in models.`);
+    seenModels.add(m);
+  }
+  const seenPrompts = new Set<string>();
+  for (const p of manifest.prompts) {
+    if (seenPrompts.has(p)) errors.push(`duplicate prompt "${p}" in prompts.`);
+    seenPrompts.add(p);
+  }
+  if (manifest.control_variants) {
+    const seenCv = new Set<string>();
+    for (const cv of manifest.control_variants) {
+      if (seenCv.has(cv)) errors.push(`duplicate control variant "${cv}" in control_variants.`);
+      seenCv.add(cv);
+    }
+  }
+  if (manifest.extractors) {
+    const seenEx = new Set<string>();
+    for (const e of manifest.extractors) {
+      if (seenEx.has(e)) errors.push(`duplicate extractor "${e}" in extractors.`);
+      seenEx.add(e);
+    }
+  }
 
   /**
    * P1-AUDIT-2 (P0-8/P0-9): origin-ledger mode is PRODUCTION rendering —
@@ -737,7 +823,15 @@ export function expandManifest(manifest: ExperimentManifest): TrialDescriptor[] 
     }
   }
 
-  return allTrials;
+  // P1-AUDIT-2 response (P1-6): trial_index IS THE EXECUTION ORDER. The
+  // pre-shuffle `index` (assigned during expansion) survived the per-cell
+  // reordering above, so trial_index recorded EXPANSION order while the
+  // runner executed the array order — analysis joining on trial_index (or
+  // eyeballing "trial 14 ran before trial 15") read a sequence that never
+  // happened. Re-index the final assembly: position in the returned array
+  // == the index the runner iterates. Resume keys are dimension-derived
+  // (trialKey), so a re-index cannot corrupt resume state.
+  return allTrials.map((t, executionIndex) => ({ ...t, index: executionIndex }));
 }
 
 /**
