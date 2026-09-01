@@ -33,6 +33,13 @@ The project intentionally separates deterministic production defense logic from 
 > ledger is the ground truth for whether a synthetic account was created. Semantic
 > canaries are a lab measurement mechanism, not a deployed production defense. The
 > production thesis is narrowed to decoy-field + decoy-route + interaction (P1-23).
+>
+> **Route-mechanism claim (P1-13).** The decoy-route family has no completed
+> production-plane measurement yet: the ledger proof exercises the field and
+> interaction mechanisms end-to-end, and the route arm awaits the blocked-randomized
+> production-faithful trial. A positive PRODUCTION_ROUTE result will establish that
+> production route carriers catch agents; a null result means drop or redesign the
+> route mechanism — no efficacy claim is made for it in advance.
 
 ## Architecture
 

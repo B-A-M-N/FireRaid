@@ -78,6 +78,22 @@ export interface DefenseArtifactSet {
   productionNotice: string | null;
 }
 
+/**
+ * P1-AUDIT-2 (P1-12) — DECIDED: the production notice is ARM-INVARIANT
+ * BACKGROUND, not a treatment and not a defense family.
+ *
+ * buildArtifactSet emits it unconditionally whenever labMode is false, so
+ * every production arm — CONTROL included — renders the identical notice.
+ * A component that cannot differ across arms cannot contribute to an arm
+ * delta, so experiments never attribute anything to it and it is never
+ * scored, measured, or named in a recipe. It stays because it is the
+ * machine-targeted honesty surface (R7-013 lineage): automated clients are
+ * told a verification token may be presented inline. Promoting it to a
+ * family would be wrong (it detects nothing); removing it would trade
+ * disclosure for nothing measurable. Any FUTURE change that gates the
+ * notice on a profile field would make it a treatment — that change must
+ * come with a family name, a recipe, and experiment coverage.
+ */
 const PRODUCTION_NOTICE_TEXT =
   "This site uses same-origin verification challenges. " +
   "Automated clients should expect a verification token to be presented inline.";

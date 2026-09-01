@@ -1,5 +1,13 @@
 # FireRaid — Post-FR-R6 Execution Status
 
+> **P1-AUDIT-2 (P1-15) — HISTORICAL DOCUMENT.** Everything below describes
+> the state of the repo at the post-R6 execution mission (2026-08-30, HEAD
+> `eb545d9`). Retained for archaeology, not as a statement of current
+> behavior or claims — later rounds (FR-R7, P1-AUDIT-2) superseded several
+> findings here (gate counts, pilot interpretation, exposure semantics).
+> Where this document and current code disagree, CURRENT CODE AND ITS TESTS
+> WIN; for the live experimental contract see `docs/EXPERIMENTS.md`.
+
 **Date:** 2026-08-30 · **HEAD:** `eb545d9` (clean tree, all gates green)
 **Baseline checkpoint:** `595c087` (FR-R6) → this document covers Phases 0–10 of the Post-FR-R6 Execution Mission.
 

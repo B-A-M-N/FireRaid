@@ -174,4 +174,39 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
       expect(parsed.limits).toHaveProperty("maxEventsPerBatch");
     }
   });
+  // P1-AUDIT-2 (P1-12): the production notice is ARM-INVARIANT background.
+  // It renders unconditionally whenever labMode is false — CONTROL included
+  // — so it cannot differ across arms and can never contribute to an arm
+  // delta. Pin that: for ANY recipe (including empty CONTROL), production
+  // renders the identical notice and lab renders none.
+  it("production notice is arm-invariant: identical in every production arm, absent in lab (P1-12)", async () => {
+    const noticeText = /data-rt-carrier="prod-notice">([^<]*)</;
+    let controlNotice: string | null = null;
+    for (const [name, recipe] of Object.entries(ABLATION_RECIPES)) {
+      // Production-mode derivation refuses semantic recipes (fail-closed);
+      // draw the comparison from the production-faithful set + CONTROL.
+      if (name === "SEMANTIC_ONLY" || name === "SEMANTIC_ROUTE" || name === "FULL") continue;
+      const profile = await deriveProfilePure(
+        { secret: SECRET, version: 1, sessionId: `notice-${name}`, mode: "production" },
+        recipe
+      );
+      const worker = workerRender(profile, false);
+      const host = hostRender(profile, false);
+      for (const [label, html] of [["worker", worker], ["host", host]] as const) {
+        const m = html.match(noticeText);
+        expect(m, `${label} production renders the notice for ${name}`).not.toBeNull();
+        if (controlNotice === null) controlNotice = m![1];
+        else expect(m![1], `notice identical across arms (${name}, ${label})`).toBe(controlNotice);
+        // Never a lab marker.
+        expect(html, label).not.toContain("data-fr-prod-notice");
+      }
+      // Lab mode: research banner path — NO production notice at all.
+      const labProfile = await deriveProfilePure(
+        { secret: SECRET, version: 1, sessionId: `notice-${name}`, mode: "lab" },
+        recipe
+      );
+      expect(workerRender(labProfile, true)).not.toContain("prod-notice");
+      expect(hostRender(labProfile, true)).not.toContain("prod-notice");
+    }
+  });
 });

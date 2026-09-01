@@ -166,9 +166,11 @@ export async function runRawHttpAgent(config: RawHttpConfig): Promise<RawHttpRes
  * Raw-HTTP adapter implementing AgentAdapter.
  * FR-R4-035: class-based adapter so harness wiring is trivial.
  *
- * The underlying ADAPTER_CAPABILITIES marks raw-http as implemented:false.
- * This is intentional — the TS runner isn't wiring this adapter yet.
- * The class is provided here so wiring later is just a registry update.
+ * IMPLEMENTED (FR-POST-R6-P1): ADAPTER_CAPABILITIES marks raw-http
+ * implemented:true (no model/prompt/extractor — a scripted protocol
+ * client), the runner preflights and wires it, and it ran the 40-trial
+ * pilot. (This comment previously said "not wired yet" — stale since
+ * integration; kept accurate by this note.)
  */
 export class RawHttpAdapter implements AgentAdapter {
   readonly type = "raw-http" as const;

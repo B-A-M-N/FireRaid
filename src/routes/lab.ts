@@ -680,6 +680,13 @@ export async function ingestLabRuns(req: Request, env: Env): Promise<Response> {
     const errorCode = typeof r.error_code === "string" ? r.error_code : null;
     const submitted = r.submitted === true ? 1 : 0;
     const serverReconciled = r.server_reconciled === true ? 1 : 0;
+    // P1-AUDIT-2 (P1-14): origin truth survives the ingest — absent/undefined
+    // → NULL (not measured); a tri-state boolean (true/false), never
+    // collapsed into submitted.
+    const originAccountCreated =
+      r.origin_account_created === true ? 1 : r.origin_account_created === false ? 0 : null;
+    const originReconciled =
+      r.origin_reconciled === true ? 1 : r.origin_reconciled === false ? 0 : null;
     const disposition = typeof r.disposition === "string" ? r.disposition : null;
     const recipeId = typeof r.recipe_id === "string" ? r.recipe_id : null;
     const profileVariantId = typeof r.profile_variant_id === "string" ? r.profile_variant_id : null;
@@ -707,8 +714,9 @@ export async function ingestLabRuns(req: Request, env: Env): Promise<Response> {
         `INSERT INTO harness_runs
            (id, run_id, experiment_id, session_id, created_at, agent, model, prompt_variant,
             outcome, submitted, disposition, recipe_id, profile_variant_id, canary_referenced,
-            canary_verified, elapsed_ms, action_count, error_code, server_reconciled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            canary_verified, elapsed_ms, action_count, error_code, server_reconciled,
+            origin_account_created, origin_reconciled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            session_id = excluded.session_id,
            outcome = excluded.outcome,
@@ -721,11 +729,14 @@ export async function ingestLabRuns(req: Request, env: Env): Promise<Response> {
            elapsed_ms = excluded.elapsed_ms,
            action_count = excluded.action_count,
            error_code = excluded.error_code,
-           server_reconciled = excluded.server_reconciled`
+           server_reconciled = excluded.server_reconciled,
+           origin_account_created = excluded.origin_account_created,
+           origin_reconciled = excluded.origin_reconciled`
       ).bind(
         runId, runId, experimentId, sessionId, createdAt, agent, model, promptVariant,
         outcome, submitted, disposition, recipeId, profileVariantId, canaryReferenced,
-        canaryVerified, elapsedMs, actionCount, errorCode, serverReconciled
+        canaryVerified, elapsedMs, actionCount, errorCode, serverReconciled,
+        originAccountCreated, originReconciled
       )
     );
     ingested++;

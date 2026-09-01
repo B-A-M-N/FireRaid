@@ -73,4 +73,36 @@ describe("canonical run metrics (P1-28)", () => {
     expect(m.submissionRate).toBe(0);
     expect(m.errorRate).toBe(0);
   });
+
+  // P1-AUDIT-2 (P1-14): the rate must be LABELED — on the origin plane
+  // submissionRate is a PROXY (the primary endpoint is origin account
+  // creation); the label vocabulary mirrors analyze.py's endpoint_basis.
+  it("endpointBasis is submission_proxy for worker-mode runs (no origin truth)", () => {
+    const m = experimentMetrics([
+      { server_reconciled: 1, outcome: "submitted", submitted: 1 },
+      { server_reconciled: 1, outcome: "stopped", submitted: 0 },
+    ]);
+    expect(m.endpointBasis).toBe("submission_proxy");
+    expect(m.proxyForPrimary).toBe(false);
+  });
+
+  it("any origin-truth column flips the label — admin never renders the proxy as the endpoint (P1-14)", () => {
+    const m = experimentMetrics([
+      { server_reconciled: 1, outcome: "submitted", submitted: 1, origin_account_created: 0, origin_reconciled: 1 },
+      { server_reconciled: 1, outcome: "stopped", submitted: 0, origin_account_created: 0, origin_reconciled: 1 },
+    ]);
+    expect(m.endpointBasis).toBe("origin_account_creation");
+    expect(m.proxyForPrimary).toBe(true);
+    // origin_reconciled alone (probe succeeded, per-run created not ingested)
+    // is still an origin-plane experiment.
+    const m2 = experimentMetrics([
+      { server_reconciled: 1, outcome: "submitted", submitted: 1, origin_reconciled: 1 },
+    ]);
+    expect(m2.endpointBasis).toBe("origin_account_creation");
+    // boolean ingests count too.
+    const m3 = experimentMetrics([
+      { server_reconciled: 1, outcome: "submitted", submitted: 1, origin_account_created: true },
+    ]);
+    expect(m3.endpointBasis).toBe("origin_account_creation");
+  });
 });

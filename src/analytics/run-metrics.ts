@@ -26,6 +26,15 @@ export interface RunMetricsRow {
   error_code?: string | null;
   /** QUARANTINE rate denominator/numerator (terminal disposition). */
   disposition?: string | null;
+  /**
+   * P1-AUDIT-2 (P1-14): origin truth columns (origin-ledger ingest). When
+   * ANY run carries one, the experiment measured the origin plane and
+   * `submissionRate` must be labeled a PROXY — the primary endpoint there
+   * is origin account creation, which lives in the harness record set, not
+   * in this admin ingest.
+   */
+  origin_account_created?: number | boolean | null;
+  origin_reconciled?: number | boolean | null;
 }
 
 /** Mirror of analyze.py:is_valid_run — server reconciled AND a terminal
@@ -55,7 +64,15 @@ export function isCanaryReferenced(r: RunMetricsRow): boolean {
 }
 
 /** The aggregate block adminExperimentDetail returns. Definitions identical
- * to analyze.py's per-group rates (valid = isValidRun, denominators there). */
+ * to analyze.py's per-group rates (valid = isValidRun, denominators there).
+ *
+ * P1-AUDIT-2 (P1-14): `endpointBasis` labels what `submissionRate` IS —
+ * the same vocabulary analyze.py prints ("origin_account_creation" vs
+ * "submission_proxy"). On the origin plane the primary endpoint is origin
+ * account creation and this admin rate is a SUBMISSION PROXY (FireRaid's
+ * own claim); an unlabeled rate invited reading the proxy as the endpoint.
+ * The admin ingest does not carry origin_account_created today, so a
+ * presence of the origin columns still flips the label (fail-truthful). */
 export function experimentMetrics(runs: RunMetricsRow[]): {
   totalRuns: number;
   validRuns: number;
@@ -64,6 +81,13 @@ export function experimentMetrics(runs: RunMetricsRow[]): {
   canaryVerifiedRate: number;
   canaryReferencedRate: number;
   errorRate: number;
+  /** "origin_account_creation" when the run set measured the origin plane;
+   * "submission_proxy" when FireRaid's own submitted flag is the best
+   * available truth (worker mode). Mirrors analyze.py's endpoint_basis. */
+  endpointBasis: "origin_account_creation" | "submission_proxy";
+  /** When endpointBasis is the proxy: the primary endpoint is measured
+   * elsewhere (the harness record set) — admin must not treat this as it. */
+  proxyForPrimary: boolean;
 } {
   const totalRuns = runs.length;
   const valid = runs.filter(isValidRun);
@@ -73,6 +97,11 @@ export function experimentMetrics(runs: RunMetricsRow[]): {
   const verified = valid.filter(isCanaryVerified).length;
   const referenced = valid.filter(isCanaryReferenced).length;
   const errored = runs.filter((r) => !!r.error_code).length;
+  const usingOrigin = runs.some(
+    (r) =>
+      r.origin_account_created === 1 || r.origin_account_created === true ||
+      r.origin_reconciled === 1 || r.origin_reconciled === true
+  );
   return {
     totalRuns,
     validRuns: n,
@@ -81,5 +110,7 @@ export function experimentMetrics(runs: RunMetricsRow[]): {
     canaryVerifiedRate: n > 0 ? verified / n : 0,
     canaryReferencedRate: n > 0 ? referenced / n : 0,
     errorRate: totalRuns > 0 ? errored / totalRuns : 0,
+    endpointBasis: usingOrigin ? "origin_account_creation" : "submission_proxy",
+    proxyForPrimary: usingOrigin,
   };
 }

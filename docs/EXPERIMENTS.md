@@ -2,26 +2,63 @@
 
 ## Experiment Manifest Format
 
+Single-arm manifests carry `recipe_id`; multi-arm manifests (the normal
+case) carry the `conditions` array — the two are mutually exclusive
+(P1-4). Unknown keys are rejected by the strict schema (P1-4), and the
+matrix arrays must be non-empty and duplicate-free (P1-5).
+
+Lab (worker, semantic) example:
+
 ```json
 {
-  "id": "exp-001",
-  "name": "FireRaid smoke experiment",
-  "seed": "experiment-seed-001",
+  "id": "exp-lab-semantic",
+  "name": "Lab semantic ablation",
+  "seed": "lab-seed-001",
   "target": {
     "url": "http://localhost:8787",
-    "mode": "origin-ledger"
+    "mode": "fireraid-worker"
   },
   "agents": ["human", "raw-dom"],
-  "models": ["model-a"],
+  "models": ["FIRERAID_LLM_MODEL"],
   "prompts": ["baseline"],
-  "extractors": ["simplified-dom"],
-  "conditions": ["CONTROL", "PRODUCTION_FULL"],
+  "extractors": ["raw-html"],
+  "conditions": ["CONTROL", "FULL"],
   "profile_version": 1,
   "repetitions": 20,
   "timeout_ms": 120000,
   "fixture": "applicant-001"
 }
 ```
+
+**Production-faithful origin example** (the audit's required trial shape —
+production conditions only, blocked-randomized per repetition):
+
+```json
+{
+  "id": "exp-origin-production",
+  "name": "Production-faithful origin trial",
+  "seed": "origin-seed-001",
+  "target": {
+    "url": "http://localhost:8787",
+    "mode": "origin-ledger"
+  },
+  "agents": ["human", "raw-http", "raw-dom"],
+  "models": ["FIRERAID_LLM_MODEL"],
+  "prompts": ["baseline"],
+  "extractors": ["raw-html", "simplified-dom"],
+  "conditions": ["CONTROL", "PRODUCTION_FIELD", "PRODUCTION_ROUTE", "PRODUCTION_INTERACTION", "PRODUCTION_FULL"],
+  "profile_version": 1,
+  "repetitions": 20,
+  "timeout_ms": 120000,
+  "fixture": "applicant-001"
+}
+```
+
+In origin-ledger mode the origin account-creation rate (read from the
+upstream's own ledger) is the PRIMARY endpoint; FireRaid's `submitted` is
+reported as the labeled submission proxy and per-arm origin measurement
+coverage is printed with the rates (a declared origin experiment with
+incomplete coverage invalidates its endpoint).
 
 Agent architecture names (harness agent taxonomy): `human`, `raw-dom`,
 `browser-use`, `ax-snapshot`, `raw-http`, `dom-automation`,
@@ -47,6 +84,15 @@ Agent architecture names (harness agent taxonomy): `human`, `raw-dom`,
   (`target.mode: "fireraid-worker"`, lab deployment). `turnstile_required`
   is likewise untestable in origin-ledger mode (no real verification
   provider there) and is rejected.
+- **Route decision gate (P1-13).** The decoy-route family is measured, not
+  assumed: the PRODUCTION_ROUTE arm of the blocked-randomized
+  production-faithful trial is the decision gate. A positive result
+  establishes "production route carriers catch agents"; a null result means
+  drop or redesign the route mechanism — it does NOT stay in the production
+  thesis on the strength of the semantic-lab runs. Until that gate is run,
+  no docs or code comment may claim route efficacy on the production plane
+  (the ledger proof currently exercises the field and interaction
+  mechanisms end-to-end).
 - Model-backed agents (`vision-only`, `fireraid-aware`, LLM-driven
   `raw-dom`) need `FIRERAID_LLM_BASE_URL` / `FIRERAID_LLM_API_KEY` in
   `harness/.env`; they fail closed (`llm_not_configured`), never silently

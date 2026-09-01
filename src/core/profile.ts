@@ -87,9 +87,13 @@ export const ABLATION_RECIPES: Record<string, DefenseRecipe> = {
   // means drop or redesign the route mechanism rather than crediting it
   // from semantic-lab runs. These recipes are lab-run ASSIGNMENTS (the
   // experiment assigns them; subjects see production markup) — they are
-  // NOT derivable in production mode alongside a semantic family, and
-  // FULL ≡ PRODUCTION_FULL on the production plane because the engine
-  // strips semantic there.
+  // NOT derivable in production mode alongside a semantic family (FULL in
+  // production mode throws FAMILY_NOT_ELIGIBLE_IN_MODE), so the two never
+  // share a plane: FULL is a lab-plane arm, PRODUCTION_FULL is the
+  // production-faithful arm. Their RENDERED artifact composition on the
+  // production plane is equivalent (semantic stripped / never issued; the
+  // remaining families render identically) but their variant identity is
+  // deliberately different — the record must say which arm ran.
   PRODUCTION_FIELD: { families: ["decoy-field"] },
   PRODUCTION_ROUTE: { families: ["decoy-route"] },
   PRODUCTION_INTERACTION: { families: ["interaction"] },

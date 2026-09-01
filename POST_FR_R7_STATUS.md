@@ -1,5 +1,13 @@
 # FireRaid — Post-FR-R7 Execution Status
 
+> **P1-AUDIT-2 (P1-15) — HISTORICAL DOCUMENT.** Everything below describes
+> the state of the repo at the FR-R7 response (2026-08-30). It is retained
+> for archaeology, not as a statement of current behavior or current claims:
+> claims made here have since been superseded by the P1-AUDIT-2 response
+> (see `docs/EXPERIMENTS.md` for the live experimental contract and
+> `README.md` "Scope of proof" for the current claim surface). Where this
+> document and current code disagree, CURRENT CODE AND ITS TESTS WIN.
+
 **Date:** 2026-08-30 · **HEAD:** see `git rev-parse HEAD`
 **Baseline checkpoint:** `9c6c8b4` (POST_FR_R6_STATUS.md) → this document covers the FR-R7 audit response.
 
