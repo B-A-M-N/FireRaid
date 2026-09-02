@@ -6,11 +6,13 @@
  * Worker renderer (core/renderer.ts) and the host reference renderer
  * (host-adapter/reference-render.ts) must AGREE on every semantic invariant
  * for the same profile + mode:
- *   1. WHICH artifacts exist (decoy field / decoy route / semantic / notice).
+ *   1. WHICH artifacts exist (decoy field / decoy route / semantic).
+ *      REMOVED: production notice (audit item 7: fingerprintable disclosure).
  *   2. WHAT identifiers they carry (field name, element id, route token,
  *      canary template id, canonical semantic body).
  *   3. Their OPACITY POSTURE (production = neutral carriers, no data-fr-*,
- *      no fr-decoy class, no visible /c/<token>; lab = greppable markers).
+ *      no fr-decoy class, no fr-client-config id, no data-fire-raid-notice;
+ *      lab = greppable markers).
  *
  * Exact DOM is intentionally NOT pinned (that is legitimate per-host
  * presentation: stylesheet classes vs inline styles). Divergence in the
@@ -39,9 +41,13 @@ function hostRender(profile: Awaited<ReturnType<typeof deriveProfilePure>>, eval
   return referenceInject(BASE_HTML, profile, "csrf-x", evaluationMode);
 }
 
+/**
+ * Extract client config JSON from rendered HTML.
+ * Production uses id="app-runtime-config", lab uses id="fr-client-config".
+ */
 function clientConfigPayload(html: string): string | null {
-  const m = html.match(/<script type="application\/json" id="fr-client-config">(.*)<\/script>/);
-  return m ? m[1] : null;
+  const m = html.match(/<script type="application\/json" id="(fr-client-config|app-runtime-config)">(.*)<\/script>/);
+  return m ? m[2] : null;
 }
 
 async function fullProfile(sessionId: string, placementId = "P01", mode: "lab" | "production" = "lab") {
@@ -60,20 +66,30 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
       // Decoy field EXISTS with the profile-bound name; hidden posture.
       expect(html, label).toContain(`name="${profile.decoyField!.fieldName}"`);
       expect(html, label).toContain(`id="${profile.decoyField!.elementId}"`);
-      // Decoy route EXISTS as the neutral <template> carrier (P1-22).
-      expect(html, label).toContain(`data-rt-token="${profile.decoyRoute!.endpointToken}"`);
-      // Production notice EXISTS with the neutral carrier.
-      expect(html, label).toContain('data-fire-raid-notice');
-      // OPACITY: no LAB markers in production (fr-decoy class, fr-lab-banner,
-      // visible /c/<token>). Machine interface attributes (data-fr-canary-id)
-      // are present — they're needed by the harness — but greppable lab-only
-      // signatures are absent.
+      // Decoy route: NO route-naming attribute exists (P1 — the token
+      // travels only inside the semantic FULL-ACTION instruction text);
+      // but the route URL itself is carried in the instruction.
+      expect(html, label).not.toContain("data-rt-");
+      expect(html, label).not.toContain("data-fr-");
+      // REMOVED (audit item 7): no production notice template.
+      expect(html, label).not.toContain('data-fire-raid-notice');
+      // Client config uses the neutral island id in production.
+      expect(html, label).toContain('id="app-runtime-config"');
+      // OPACITY: no LAB markers, no neutral-carrier vocabulary, no
+      // strategy IDs in production.
       expect(html, label).not.toContain("fr-decoy");
       expect(html, label).not.toContain("fr-lab-banner");
-      expect(html, label).not.toMatch(/\/c\/[0-9a-f]+/);
-      // Semantic EXISTS in production with neutral carriers.
-      expect(html, label).toContain(`data-fr-canary-id="${profile.semantic!.templateId}"`);
+      expect(html, label).not.toContain("data-fire-raid-notice");
+      expect(html, label).not.toMatch(/data-rt-token=|fr-hidden-neutral/);
+      expect(html, label).not.toMatch(/\b(P0[1-4]|S0[1-9])\b/);
+      // Semantic EXISTS in production with BARE inert template carriers
+      // carrying real instruction text (P1-22, updated).
       expect(html, label).toContain(profile.semantic!.nonce);
+      const templates = html.match(/<template>[^<]*<\/template>/g) ?? [];
+      expect(templates.length, label).toBeGreaterThanOrEqual(1);
+      for (const t of templates) {
+        expect(t.length, label).toBeGreaterThan("<template></template>".length);
+      }
     }
 
     // Identifiers identical across mappers, modulo the hiding TECHNIQUE
@@ -83,6 +99,7 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
       html
         .replace(/style="[^"]*"/g, "")
         .replace(/fr-visually-hidden/g, "")
+        .replace(/fr-hidden-neutral/g, "")
         .replace(/class=""/g, "")
         .replace(/ +/g, " ");
     expect(normalize(worker)).toBe(normalize(host));
@@ -102,6 +119,8 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
       expect(html, label).toContain("fr-decoy");
       expect(html, label).toContain(`/c/${profile.decoyRoute!.endpointToken}`);
       expect(html, label).toContain("fr-lab-banner");
+      // Lab uses fr-client-config.
+      expect(html, label).toContain('id="fr-client-config"');
     }
 
     // The canonical semantic body is embedded VERBATIM by both mappers.
@@ -109,10 +128,6 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
     const canonical = buildArtifactSet(profile, { evaluationMode: true }).semantic!.bodyHtml;
     expect(worker).toContain(canonical);
     expect(host).toContain(canonical);
-
-    // No production-only notice in lab.
-    expect(worker).not.toContain('data-fire-raid-notice');
-    expect(host).not.toContain('data-fire-raid-notice');
   });
 
   it("semantic placement positions: canonical body present in both, for every placement", async () => {
@@ -153,14 +168,19 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
         expect(html, label).not.toContain("data-fr-canary-id");
         expect(html, label).not.toContain('data-rt-carrier="route"');
         // The prod notice is a mode-driven constant (emitted for every recipe);
-        // what CONTROL must not carry is any PROFILE-BOUND defense artifact.
-        expect(html, label).not.toMatch(/data-rt-token=/);
+        // what CONTROL must not carry is any PROFILE-BOUND defense artifact —
+        // no neutral-carrier vocabulary either (P1 signature stripping).
+        expect(html, label).not.toMatch(/data-rt-/);
         // CONTROL has no decoy field — check for absence of any hex-only name
         // attribute (profile-bound defense artifacts). The csrf field has
         // name="csrf" which is a known constant.
         expect(html, label).not.toMatch(/name="([0-9a-f]{12,})"/);
         // clientConfig script still ships (telemetry limits are profile-independent)
-        expect(html, label).toContain('id="fr-client-config"');
+        if (evaluationMode) {
+          expect(html, label).toContain('id="fr-client-config"');
+        } else {
+          expect(html, label).toContain('id="app-runtime-config"');
+        }
       }
       expect(worker, `evaluationMode=${evaluationMode}`).not.toMatch(/name="([0-9a-f]{12,})"/);
       expect(host, `evaluationMode=${evaluationMode}`).not.toMatch(/name="([0-9a-f]{12,})"/);
@@ -181,17 +201,9 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
       expect(parsed.limits).toHaveProperty("maxEventsPerBatch");
     }
   });
-  // P1-AUDIT-2 (P1-12): the production notice is ARM-INVARIANT background.
-  // It renders unconditionally whenever evaluationMode is false — CONTROL included
-  // — so it cannot differ across arms and can never contribute to an arm
-  // delta. Pin that: for ANY recipe (including empty CONTROL), production
-  // renders the identical notice and lab renders none.
-  it("production notice is arm-invariant: identical in every production arm, absent in lab (P1-12)", async () => {
-    const noticeText = /data-fire-raid-notice>([^<]*)</;
-    let controlNotice: string | null = null;
+
+  it("production notice REMOVED: neither mapper emits data-fire-raid-notice in any mode", async () => {
     for (const [name, recipe] of Object.entries(ABLATION_RECIPES)) {
-      // Production-mode derivation refuses semantic recipes (fail-closed);
-      // draw the comparison from the production-faithful set + CONTROL.
       if (name === "SEMANTIC_ONLY" || name === "SEMANTIC_ROUTE" || name === "FULL") continue;
       const profile = await deriveProfilePure(
         { secret: SECRET, version: 1, sessionId: `notice-${name}`, mode: "production" },
@@ -199,13 +211,10 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
       );
       const worker = workerRender(profile, false);
       const host = hostRender(profile, false);
-      for (const [label, html] of [["worker", worker], ["host", host]] as const) {
-        const m = html.match(noticeText);
-        expect(m, `${label} production renders the notice for ${name}`).not.toBeNull();
-        if (controlNotice === null) controlNotice = m![1];
-        else expect(m![1], `notice identical across arms (${name}, ${label})`).toBe(controlNotice);
-      }
-      // Lab mode: research banner path — NO production notice at all.
+      // Production notice completely removed (audit item 7).
+      expect(worker).not.toContain("fire-raid-notice");
+      expect(host).not.toContain("fire-raid-notice");
+      // Lab too.
       const labProfile = await deriveProfilePure(
         { secret: SECRET, version: 1, sessionId: `notice-${name}`, mode: "lab" },
         recipe

@@ -19,7 +19,7 @@ import {
   resolveProfileKey,
   type ProfileKeyRing,
 } from "./session.js";
-import { deriveProfilePure, type DeriveProfileOptions } from "./profile.js";
+import { deriveProfilePure } from "./profile.js";
 import type { DefenseRecipe } from "./recipe-schema.js";
 import type { DefenseProfile } from "../types/profile.js";
 
@@ -99,11 +99,11 @@ export async function reconstructIssuedProfile(
   // same value the issuing render saw or a holdout session reconstructs a
   // different profile (the same drift class the canary.ts recipe fix
   // addressed). Persisted per lab run; callers pass what the run stored.
-  const opts: DeriveProfileOptions = {
+  const opts = {
     secret,
     version,
     sessionId: session.id,
-    mode: isLabMode(env) ? "lab" : "production",
+    mode: isLabMode(env) ? ("lab" as const) : ("production" as const),
     holdoutMode: options?.holdoutMode === true,
     // FR-P0-17: same condition issuance hashed in.
     turnstileRequired: options?.turnstileRequired === true,

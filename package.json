@@ -3,18 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "FireRaid — deterministic per-session admission defense lab against autonomous browser agents.",
+  "description": "FireRaid — deterministic per-session admission defense middleware. Embeds per-session causal traps (decoy fields, decoy routes, semantic instructions) that distinguish human applicants from autonomous agents server-side; runs on any origin, no Cloudflare required.",
   "scripts": {
     "dev": "wrangler dev --env dev",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
+    "build:product": "tsc -p tsconfig.product.json --noEmit",
+    "check:boundary": "node scripts/check-product-boundary.mjs",
+    "test:product": "npm run build:product && npm run check:boundary",
+    "dev:origin": "tsx examples/origin-server.mjs",
+    "test:origin-budget": "node --import tsx scripts/origin-budget.mjs",
     "test:integration": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.integration.config.ts",
     "test:llm-smoke": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.llm-smoke.config.ts",
     "test:envelope": "node scripts/test-worker.mjs --suite test-envelope --port 8799 --wrangler-env production -- vitest run --config vitest.envelope.config.ts",
-    "test:budget": "node scripts/budget-harness.mjs",
+    "test:budget": "node --import tsx scripts/budget-harness.mjs",
+    "test:worker-isolation": "node scripts/test-worker-isolation.spec.mjs",
     "test:ledger-proof": "node --import tsx scripts/ledger-proof.mjs",
     "test:e2e": "playwright test",
+    "test:e2e:production": "playwright install chromium firefox webkit && playwright test --config=playwright.production.config.ts",
     "test:a11y": "playwright test --config=playwright.a11y.config.ts",
     "lint": "eslint \"src/**/*.ts\" \"harness/**/*.ts\" \"tests/**/*.ts\" --max-warnings 0",
     "test:e2e:ci": "playwright install chromium firefox webkit && playwright test",
@@ -22,7 +29,8 @@
     "deploy:lab": "wrangler deploy --env public-lab",
     "deploy:production": "wrangler deploy --env production",
     "experiment": "tsx harness/core/runner.ts",
-    "analyze": "python3 harness/analysis/analyze.py"
+    "analyze": "python3 harness/analysis/analyze.py",
+    "release:verify": "node scripts/release-verify.mjs"
   },
   "dependencies": {
     "zod": "^3.23.8"

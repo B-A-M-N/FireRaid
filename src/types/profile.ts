@@ -17,6 +17,25 @@ export interface SemanticConfig {
   placementId: string;
   nonce: string;
   mode: SemanticMode;
+  /**
+   * Multi-spot injection (defense-in-depth widening): how many hidden
+   * carriers the semantic trap renders into, and WHICH seed-chosen anchors
+   * (from core/artifacts.ts SPOT_ANCHORS). Drawn per session from the
+   * profile PRF — deterministic once issued, unpredictable to an attacker
+   * without the secret. Empty for visible placements (P01–P05 are
+   * single-carrier placement experiments); populated for non-rendered
+   * placements (P06), which is the production plane.
+   */
+  spotCount: number;
+  spots: string[];
+  /**
+   * Rereview item 27: deterministic intra-strategy presentation variant —
+   * which reviewed static fragments composed this session's instruction
+   * text (sentence set, ordering, code-reference style). Semantics are
+   * FIXED per strategy; only reviewed-surface composition varies. Drawn
+   * from its own PRF domain ("semantic-form"), reconstruction-stable.
+   */
+  formVariant: number;
 }
 
 export interface DecoyFieldConfig {

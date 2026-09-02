@@ -71,20 +71,39 @@ function record(over: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-function runAnalyzer(recordsDir: string): string {
+function runAnalyzer(recordsDir: string, extraArgs: string[] = []): string {
   return execFileSync(
     "python3",
-    [ANALYZER, "exp-analyze-origin", "--endpoints", "--records-dir", recordsDir],
+    [ANALYZER, "exp-analyze-origin", "--endpoints", "--records-dir", recordsDir, ...extraArgs],
     { encoding: "utf-8", timeout: 60_000 }
   );
 }
 
-function makeDataset(records: Record<string, unknown>[]): string {
+function makeDataset(
+  records: Record<string, unknown>[],
+  declaration?: Record<string, unknown>
+): string {
   const tmp = mkdtempSync(join(tmpdir(), "fr-analyze-"));
   tmpRoots.push(tmp);
   const dir = join(tmp, "exp-analyze-origin");
   mkdirSync(dir, { recursive: true });
   records.forEach((r, i) => writeFileSync(join(dir, `run-${i}.json`), JSON.stringify(r)));
+  // P0-AUDIT-3 (P0-2): datasets modeling FINISHED experiments declare so.
+  // No declaration (or status RUNNING) → the analyzer withholds headline
+  // efficacy — its own behavior, pinned by dedicated tests below.
+  writeFileSync(
+    join(dir, "experiment.json"),
+    JSON.stringify(
+      declaration ?? {
+        experiment_id: "exp-analyze-origin",
+        target_mode: "origin-ledger",
+        manifest_hash: "test-hash",
+        status: "COMPLETE",
+        records_expected: records.length,
+        records_present: records.length,
+      }
+    )
+  );
   return dir;
 }
 
@@ -95,10 +114,10 @@ describe("P0-5/P0-6: analyzer origin-endpoint truth", () => {
     const dir = makeDataset([
       // CONTROL: submitted + created (the baseline flow works).
       record({ recipe_id: "CONTROL", submitted: true, origin_account_created: true }),
-      // PRODUCTION_FULL: submitted=true (middleware forwarded) but the
+      // PRODUCTION_NONSEMANTIC_FULL: submitted=true (middleware forwarded) but the
       // origin ledger shows NO account — the exact case where `submitted`
       // lies about creation.
-      record({ recipe_id: "PRODUCTION_FULL", submitted: true, origin_account_created: false, defense_families: ["decoy-field", "decoy-route", "interaction"] }),
+      record({ recipe_id: "PRODUCTION_NONSEMANTIC_FULL", submitted: true, origin_account_created: false, defense_families: ["decoy-field", "decoy-route", "interaction"] }),
     ]);
 
     const out = runAnalyzer(dir);
@@ -109,7 +128,7 @@ describe("P0-5/P0-6: analyzer origin-endpoint truth", () => {
     // Divergence must be VISIBLE: proxy prints next to the origin rate.
     expect(out).toMatch(/submission proxy \(secondary, for divergence\): 100\.0%/);
     // The defended arm's origin rate is 0% — a 100% ARR against CONTROL.
-    expect(out).toMatch(/PRODUCTION_FULL\s+0\.0%\s+100\.0%/);
+    expect(out).toMatch(/PRODUCTION_NONSEMANTIC_FULL\s+0\.0%\s+100\.0%/);
     // Endpoint basis is the origin, never unlabeled proxy.
     expect(out).toMatch(/endpoint basis: origin_account_creation/);
   });
@@ -150,7 +169,7 @@ describe("P0-5/P0-6: analyzer origin-endpoint truth", () => {
         submitted: true,
       }),
       record({
-        recipe_id: "PRODUCTION_FULL",
+        recipe_id: "PRODUCTION_NONSEMANTIC_FULL",
         origin_reconciled: undefined,
         origin_account_created: undefined,
         origin_ledger_mode: undefined,
@@ -170,7 +189,7 @@ describe("P0-5/P0-6: analyzer origin-endpoint truth", () => {
     const dir = makeDataset([
       record({ recipe_id: "CONTROL", submitted: true, origin_account_created: true }),
       record({
-        recipe_id: "PRODUCTION_FULL",
+        recipe_id: "PRODUCTION_NONSEMANTIC_FULL",
         // Assignable (no infra failure) but origin truth absent — a probe
         // gap the protocol does not excuse for a declared origin experiment.
         origin_reconciled: undefined,
@@ -184,10 +203,104 @@ describe("P0-5/P0-6: analyzer origin-endpoint truth", () => {
       experiment_id: "exp-analyze-origin",
       target_mode: "origin-ledger",
       manifest_hash: "test-hash",
+      status: "COMPLETE",
+      records_expected: 2,
+      records_present: 2,
     }));
 
     const out = runAnalyzer(dir);
     expect(out).toMatch(/ORIGIN ENDPOINT INVALID/);
     expect(out).toMatch(/1\/2\s+assignable/);
+  });
+});
+
+describe("P0-AUDIT-3 (P0-2): analyzer refuses efficacy from incomplete datasets", () => {
+  const baseRecord = () => record({ recipe_id: "CONTROL", submitted: true, origin_account_created: true });
+
+  it("a RUNNING (interrupted) experiment gets the operational summary, NOT an ARR/RRR table", () => {
+    const dir = makeDataset(
+      [baseRecord(), record({ recipe_id: "PRODUCTION_NONSEMANTIC_FULL", submitted: false, origin_account_created: false })],
+      {
+        experiment_id: "exp-analyze-origin",
+        target_mode: "origin-ledger",
+        manifest_hash: "test-hash",
+        status: "RUNNING",
+        planned_trials: 85,
+      }
+    );
+    const out = runAnalyzer(dir);
+    expect(out).toMatch(/INCOMPLETE EXPERIMENT — NOT AN EFFICACY ESTIMATE/);
+    expect(out).toMatch(/status is "RUNNING"/);
+    expect(out).toMatch(/planned_trials=85/);
+    expect(out).toMatch(/Headline ARR\/RRR withheld/);
+    // The efficacy table itself must NOT appear.
+    expect(out).not.toMatch(/ARR 95% CI/);
+    // The operational summary does.
+    expect(out).toMatch(/Attacker-architecture mix/);
+  });
+
+  it("a record-count mismatch against a COMPLETE declaration withholds efficacy", () => {
+    const dir = makeDataset([baseRecord()], {
+      experiment_id: "exp-analyze-origin",
+      target_mode: "origin-ledger",
+      manifest_hash: "test-hash",
+      status: "COMPLETE",
+      records_expected: 85,
+      records_present: 1,
+    });
+    const out = runAnalyzer(dir);
+    expect(out).toMatch(/INCOMPLETE EXPERIMENT — NOT AN EFFICACY ESTIMATE/);
+    expect(out).toMatch(/record count mismatch: expected 85, present 1/);
+    expect(out).not.toMatch(/ARR 95% CI/);
+  });
+
+  it("--allow-incomplete-diagnostics prints the table, still watermarked", () => {
+    const dir = makeDataset(
+      [
+        baseRecord(),
+        record({ recipe_id: "PRODUCTION_NONSEMANTIC_FULL", submitted: false, origin_account_created: false, agent: "raw-http", model: "none", prompt_variant: "baseline", repetition: 0 }),
+      ],
+      {
+        experiment_id: "exp-analyze-origin",
+        target_mode: "origin-ledger",
+        manifest_hash: "test-hash",
+        status: "RUNNING",
+        planned_trials: 85,
+      }
+    );
+    const out = runAnalyzer(dir, ["--allow-incomplete-diagnostics"]);
+    expect(out).toMatch(/INCOMPLETE EXPERIMENT — NOT AN EFFICACY ESTIMATE/);
+    expect(out).toMatch(/STILL NOT AN EFFICACY ESTIMATE/);
+    // The table renders (watermarked) — but matched-cells note is visible
+    // because the fixture records lack cell twins.
+    expect(out).toMatch(/ARR 95% CI/);
+  });
+
+  it("defended cells without a CONTROL twin are excluded from ARR/RRR", () => {
+    // CONTROL ran agent raw-http only; the defended arm also ran raw-dom.
+    // The raw-dom cell has no control twin → excluded, and noted.
+    const dir = makeDataset([
+      record({ recipe_id: "CONTROL", submitted: true, origin_account_created: true, agent: "raw-http", model: "none", prompt_variant: "baseline", repetition: 0 }),
+      record({ recipe_id: "PRODUCTION_NONSEMANTIC_FULL", submitted: false, origin_account_created: false, agent: "raw-http", model: "none", prompt_variant: "baseline", repetition: 0 }),
+      record({ recipe_id: "PRODUCTION_NONSEMANTIC_FULL", submitted: false, origin_account_created: false, agent: "raw-dom", model: "test-model", prompt_variant: "baseline", repetition: 0 }),
+    ]);
+    const out = runAnalyzer(dir);
+    expect(out).toMatch(/1 cell\(s\) have no CONTROL twin/);
+    expect(out).toMatch(/matched n=1/);
+    // The matched ARR is computed on the twin cell: control created (100%),
+    // defended not created (0%) → 100.0% ARR.
+    expect(out).toMatch(/PRODUCTION_NONSEMANTIC_FULL\s+0\.0%\s+100\.0%/);
+  });
+
+  it("a legacy dataset with NO declaration withholds efficacy (fail closed)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "fr-analyze-"));
+    tmpRoots.push(tmp);
+    const dir = join(tmp, "exp-analyze-origin");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "run-0.json"), JSON.stringify(baseRecord()));
+    const out = runAnalyzer(dir);
+    expect(out).toMatch(/INCOMPLETE EXPERIMENT — NOT AN EFFICACY ESTIMATE/);
+    expect(out).toMatch(/no experiment\.json declaration/);
+    expect(out).not.toMatch(/ARR 95% CI/);
   });
 });

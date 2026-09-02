@@ -7,9 +7,21 @@
  * The runner (not adapters) owns serialization.
  */
 import { z } from "zod";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 // FR-R6-009: the manifest uses the CANONICAL recipe identifiers — the same
 // RecipeId enum the lab API and the profile engine resolve server-side.
 import { RecipeIdSchema } from "../../src/core/recipe-schema.js";
+// P2-ATTACKS / P2-TRAFFIC: objective corpus + persona pool live with the
+// adapters/fixtures they describe; the schema owns their validation.
+import { ATTACK_OBJECTIVES } from "../adapters/objectives.js";
+import { PERSONAS } from "../fixtures/personas.js";
+
+const KNOWN_PERSONA_IDS = {
+  first: PERSONAS[0].id,
+  last: PERSONAS[PERSONAS.length - 1].id,
+  has: (id: string) => PERSONAS.some((p) => p.id === id),
+};
 
 // ---------------------------------------------------------------------------
 // Shared primitives
@@ -56,6 +68,13 @@ export const ScenarioSchema = z.object({
   targetUrl: z.string().url(),
   fixture: z.record(z.string()),
   promptVariant: z.string(),
+  /** P2-ATTACKS: attack-objective id the adapter composes into its system
+   * prompt (adapters/objectives.ts). Always present — expansion pins
+   * "honest" for model-agnostic agents. */
+  objective: z.string(),
+  /** P2-TRAFFIC: the persona identity this trial submits as (fixture id
+   * provenance; the fixture VALUES carry the identity). */
+  fixtureId: z.string(),
   model: z.string(),
   maxSteps: z.number().int().positive(),
   timeoutMs: z.number().int().positive(),
@@ -126,6 +145,8 @@ export interface AgentRunResult {
     providerOrigin?: string;
     modelRequested?: string;
     modelServed?: string;
+    /** P1-POOL: pool provider id when a pool candidate served. */
+    poolProvider?: string;
     temperature?: number;
     maxTokens?: number;
   };
@@ -140,6 +161,11 @@ export interface AgentRunResult {
     interventions: number;
     targets: string[];
   };
+  /** P2-ATTACKS: the adapter implemented the objective's post-submit
+   * persistence loop (a second action round fed the submit outcome).
+   * Absent = single-shot agent — analysis must not credit it with
+   * retry-survival. */
+  persistenceAttempted?: boolean;
   pythonVersion?: string;
   browserUseVersion?: string;
   browserEngine?: string;
@@ -174,6 +200,14 @@ export const RunRecordV1Schema = z.object({
   agent: AgentType,
   model: z.string(),
   prompt_variant: z.string(),
+  /** P2-ATTACKS: attack-objective id for this run (adapters/objectives.ts). */
+  objective: z.string().optional(),
+  /** P2-TRAFFIC: persona/fixture identity provenance for this run. */
+  fixture_id: z.string().optional(),
+  /** P2-ATTACKS: adapters that implement post-submit continuation report
+   * whether the objective's persistence loop was actually available —
+   * analysis must never count single-shot agents as retry-survivors. */
+  persistence_attempted: z.boolean().optional(),
   extractor: ExtractorType.optional(),
 
   // --- Defense config ---
@@ -309,12 +343,46 @@ export const RunRecordV2Schema = RunRecordV1Schema.extend({
   llm_provider_origin: z.string().optional(),
   llm_model_requested: z.string().optional(),
   llm_model_served: z.string().optional(),
+  /** P1-POOL: pool provider id when a pool candidate served the call
+   * (absent = the primary FIRERAID_LLM_* triple served). */
+  llm_pool_provider: z.string().optional(),
+  /** P1-POOL: pool posture for this run — mirrors poolMode() so the
+   * analyzer can identify substitute-mode runs even when provenance
+   * fields are absent (legacy records). */
+  pool_mode: z.enum(["off", "same-model", "substitute"]).optional(),
   python_version: z.string().optional(),
   browser_use_version: z.string().optional(),
   browser_engine: z.string().optional(),
   browser_engine_version: z.string().optional(),
 });
 export type RunRecordV2 = z.infer<typeof RunRecordV2Schema>;
+
+// ---------------------------------------------------------------------------
+// Substituted-run detection (audit item 12b)
+// ---------------------------------------------------------------------------
+
+/**
+ * Audit item 12b: determine whether a run served a model different from
+ * the requested official model — i.e. the run was DEGRADED by substitution
+ * or pool fallback. Substituted runs must NOT count toward headline efficacy
+ * estimates; they are reported in a separate bucket.
+ *
+ * A run is substituted when:
+ *   (a) both llm_model_served and llm_model_requested are set AND differ, OR
+ *   (b) llm_pool_provider is set AND pool_mode is "substitute"
+ */
+export function isSubstitutedRun(r: Pick<RunRecordV2, "llm_model_served" | "llm_model_requested" | "llm_pool_provider" | "pool_mode">): boolean {
+  const { llm_model_served, llm_model_requested, llm_pool_provider, pool_mode } = r;
+  // Condition (a): explicit served-vs-requested mismatch.
+  if (typeof llm_model_served === "string" && typeof llm_model_requested === "string" && llm_model_served !== llm_model_requested) {
+    return true;
+  }
+  // Condition (b): pool provider served AND we are in substitute mode.
+  if (typeof llm_pool_provider === "string" && llm_pool_provider.length > 0 && pool_mode === "substitute") {
+    return true;
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // v1 → v2 migration normalizer (heuristic — not a re-measurement)
@@ -447,14 +515,25 @@ export const ExperimentManifestSchema = z
       .strict(),
     repetitions: z.number().int().positive(),
     timeout_ms: z.number().int().positive(),
-    fixture: z.string().default("default"),
-    profile_version: z.number().int().positive().default(1),
 
     // Matrix
     agents: z.array(AgentType),
     models: z.array(z.string().min(1)),
     prompts: z.array(z.string().min(1)),
     extractors: z.array(ExtractorType).optional(),
+
+    // P2-ATTACKS: attack-objective dimension (adapters/prompts.ts sibling).
+    // Defaults to ["honest"] — the historical implicit objective — so every
+    // existing manifest validates unchanged.
+    objectives: z.array(z.string().min(1)).default(["honest"]),
+
+    // P2-TRAFFIC: persona-identity dimension. "pool" (default) assigns one
+    // of the 20 synthetic personas per trial, deterministically seeded by
+    // (manifest.seed, trialKey). A specific persona-NN id pins every trial
+    // to that identity; "default" keeps the single historical fixture.
+    fixture: z.string().default("default"),
+
+    profile_version: z.number().int().positive().default(1),
 
     // --- Control parameters (FR-R4-039) ---
     max_steps: z.number().int().positive().default(20),
@@ -520,6 +599,13 @@ export interface TrialDescriptor {
   recipeId?: string;
   /** FR-R7-006: false-positive trial variant for the human agent. */
   controlVariant?: "normal" | "keyboard" | "autofill";
+  /** P2-ATTACKS: attack-objective id for this trial (model-consuming
+   * agents vary over it; model-agnostic agents get "honest"). */
+  objective: string;
+  /** P2-TRAFFIC: resolved persona id for this trial — "pool" mode pins a
+   * concrete persona AT EXPANSION TIME so resume + analysis see a stable
+   * assignment; "default" keeps the historical fixture. */
+  personaId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +754,32 @@ export function validateManifest(raw: unknown): {
     }
   }
 
+  // P2-ATTACKS: the objectives dimension follows the same fail-closed /
+  // no-duplicates discipline as prompts — an unknown or duplicated
+  // objective id is a manifest authoring error, never a silent subset.
+  {
+    const known = new Set(ATTACK_OBJECTIVES.map((o) => o.id));
+    const seenObj = new Set<string>();
+    for (const o of manifest.objectives ?? []) {
+      if (!known.has(o)) errors.push(`unknown objective "${o}" in objectives. Allowed: ${[...known].join(", ")}`);
+      if (seenObj.has(o)) errors.push(`duplicate objective "${o}" in objectives.`);
+      seenObj.add(o);
+    }
+  }
+
+  // P2-TRAFFIC: fixture dimension — "pool", "default", a persona id, or a
+  // legacy file-backed fixture that exists must all resolve BEFORE any
+  // trial runs. Unknown ids fail validation, not trial 1 of 1000.
+  {
+    const f = manifest.fixture ?? "default";
+    if (f !== "pool" && f !== "default" && !KNOWN_PERSONA_IDS.has(f)) {
+      const fixturePath = join(process.cwd(), "harness", "fixtures", `${f}.json`);
+      if (!existsSync(fixturePath)) {
+        errors.push(`unknown fixture "${f}" — use "pool", "default", a persona id (${KNOWN_PERSONA_IDS.first}…${KNOWN_PERSONA_IDS.last}), or a file in harness/fixtures/`);
+      }
+    }
+  }
+
   /**
    * P1-AUDIT-2 (P0-8/P0-9): origin-ledger mode is PRODUCTION rendering —
    * the runtime derives every profile in production mode. Conditions that
@@ -687,7 +799,7 @@ export function validateManifest(raw: unknown): {
     );
     if (semanticConditions.length > 0) {
       errors.push(
-        `target.mode=origin-ledger renders in PRODUCTION; lab-only semantic conditions are not expressible there: ${semanticConditions.join(", ")} (use PRODUCTION_FIELD/PRODUCTION_ROUTE/PRODUCTION_INTERACTION/PRODUCTION_FULL, or run a separate lab-mode experiment)`
+        `target.mode=origin-ledger renders in PRODUCTION; lab-only semantic conditions are not expressible there: ${semanticConditions.join(", ")} (use PRODUCTION_DEFAULT/PRODUCTION_FIELD/PRODUCTION_ROUTE/PRODUCTION_INTERACTION/PRODUCTION_NONSEMANTIC_FULL, or run a separate lab-mode experiment)`
       );
     }
     if (manifest.turnstile_required !== undefined) {
@@ -768,13 +880,18 @@ export function expandManifest(manifest: ExperimentManifest): TrialDescriptor[] 
         // FR-R4-039: only vary models/prompts if the adapter uses them
         const models = caps.usesModel ? manifest.models : [manifest.models[0]];
         const prompts = caps.usesPrompt ? manifest.prompts : [manifest.prompts[0]];
+        // P2-ATTACKS: the objective dimension, like model/prompt, is an
+        // LLM-agent dimension — model-agnostic agents always run "honest"
+        // (they have no prompt to compose an objective into).
+        const objectives = caps.usesModel ? (manifest.objectives ?? ["honest"]) : ["honest"];
 
         // FR-R4-039: extractors = intersection with agent-supported, or first default if manifest didn't list them
         const effectiveExtractors = getEffectiveExtractors(manifest, caps);
 
         for (const model of models) {
           for (const prompt of prompts) {
-            for (const extractor of effectiveExtractors) {
+            for (const objective of objectives) {
+              for (const extractor of effectiveExtractors) {
               // FR-R7-006: human agent expands across control variants
               const controlVariants =
                 agent === "human" ? (manifest.control_variants ?? ["normal"]) : [undefined];
@@ -785,6 +902,7 @@ export function expandManifest(manifest: ExperimentManifest): TrialDescriptor[] 
                   agent,
                   model,
                   prompt,
+                  objective,
                   extractor,
                   // FR-R6-008: named treatment identity for provenance.
                   recipeId,
@@ -796,6 +914,7 @@ export function expandManifest(manifest: ExperimentManifest): TrialDescriptor[] 
           }
         }
       }
+    }
     }
 
     // P1-AUDIT-2 (audit item 13): TRUE BLOCKED RANDOMIZATION. The prior
@@ -810,7 +929,7 @@ export function expandManifest(manifest: ExperimentManifest): TrialDescriptor[] 
     if (manifest.conditions) {
       const byCell = new Map<string, TrialDescriptor[]>();
       for (const t of block) {
-        const cell = `${t.agent}|${t.model}|${t.prompt}|${t.extractor ?? "-"}|${t.controlVariant ?? "-"}`;
+        const cell = `${t.agent}|${t.model}|${t.prompt}|${t.objective}|${t.extractor ?? "-"}|${t.controlVariant ?? "-"}`;
         if (!byCell.has(cell)) byCell.set(cell, []);
         byCell.get(cell)!.push(t);
       }

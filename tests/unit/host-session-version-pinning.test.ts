@@ -17,15 +17,18 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  admit,
   makeCsrf,
   ReferenceSessionAdapter,
   referenceInject,
   ReferenceVerificationAdapter,
   ReferenceTelemetryAdapter,
-  type MiddlewareDeps,
   type HostEnforcementAdapter,
+  ReferenceCanaryStore,
 } from "../../src/host-adapter/index.js";
+import {
+  admitEvaluation,
+  type EvaluationMiddlewareDeps,
+} from "../../src/eval/evaluation-middleware.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
 
 const SECRET = "k".repeat(64);
@@ -39,7 +42,7 @@ class NullEnforcement implements HostEnforcementAdapter {
   deny(): void {}
 }
 
-function deps(version: number, over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
+function deps(version: number, over: Partial<EvaluationMiddlewareDeps> = {}): EvaluationMiddlewareDeps {
   return {
     secret: SECRET,
     version,
@@ -49,7 +52,10 @@ function deps(version: number, over: Partial<MiddlewareDeps> = {}): MiddlewareDe
     verification: new ReferenceVerificationAdapter(),
     telemetry: new ReferenceTelemetryAdapter(),
     enforcement: new NullEnforcement(),
+    canaryStore: new ReferenceCanaryStore(),
     labMode: false,
+    // Fail-closed assertions (non-ACCEPT denies) — enforcement posture.
+    enforcementMode: "enforcement",
     ...over,
   };
 }
@@ -91,7 +97,7 @@ describe("P1-1: middleware consumes the envelope's pv (version pinning)", () => 
         form: { name: "A", email: "a@b.c", [v7Profile.decoyField!.fieldName]: "decoy-hit" },
       }),
     });
-    const res = await admit(req, d, async () => HTML);
+    const res = await admitEvaluation(req, d, async () => HTML);
 
     // The v7 decoy field must have been STRIPPED from the forward (the
     // middleware reconstructed the v7 profile — the v8 field name would
@@ -131,7 +137,7 @@ describe("P1-1: middleware consumes the envelope's pv (version pinning)", () => 
     const probe = new Request(`http://mw/c/${v7Profile.decoyRoute!.endpointToken}`, {
       headers: { cookie },
     });
-    const res = await admit(probe, d, async () => HTML);
+    const res = await admitEvaluation(probe, d, async () => HTML);
     // Verified under the ENVELOPE's version — 204, not an INVALID_TOKEN deny
     // from re-deriving the v8 token.
     expect(res.kind).toBe("canary-verified");

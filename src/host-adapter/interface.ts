@@ -29,6 +29,89 @@ import type { ValidatedEvent } from "../security/request-validation.js";
 export type { DefenseProfile };
 
 /**
+ * Explicit route configuration for the middleware admit() dispatcher.
+ * When provided, admit() dispatches STRICTLY by path — unknown GET/POST
+ * paths are returned as "not-handled" so the host serves them untouched.
+ */
+export interface MiddlewareRouteConfig {
+  /** The single application page FireRaid injects on GET. */
+  applicationPage: string;
+  /** The endpoint FireRaid evaluates application POSTs on. */
+  applicationSubmit: string;
+  /** Telemetry drain carrier path. Default "/api/events". */
+  telemetry?: string;
+  /** Canary route prefix. Default "/c/". */
+  canaryPrefix?: string;
+  /**
+   * How the browser client reaches the form + endpoints. When omitted the
+   * middleware derives defaults from the route config (#signup-form /
+   * applicationSubmit / telemetry). All client routing comes from THIS
+   * config — the shipped client script carries no path literals.
+   */
+  client?: MiddlewareClientConfig;
+  /**
+   * Rereview item 24 — the Cloudflare trust boundary, declared by the
+   * deployment that actually owns its ingress:
+   *   - "cloudflare": requests reach this middleware ONLY through the
+   *     trusted Cloudflare edge, which overwrites CF-Connecting-IP on every
+   *     hop. The header is then a trustworthy client-IP source for
+   *     verification providers.
+   *   - "direct" (default, fail-closed): no trusted edge is asserted.
+   *     CF-Connecting-IP is CLIENT-CONTROLLED and is never read — a forged
+   *     header cannot inject an IP into any admission decision.
+   * Origin-bypass protection (Internet must not reach the origin directly)
+   * is enforced by network policy at the FI deployment, not by this flag.
+   */
+  trustedIngress?: "cloudflare" | "direct";
+}
+
+/**
+ * Client-routing block of the route configuration — serialized verbatim
+ * into the server-generated client config artifact. The production client
+ * script has NO path literals; everything it fetches comes from here.
+ */
+export interface MiddlewareClientConfig {
+  /** Selector for the application form the client binds to. Default "#signup-form". */
+  formSelector?: string;
+  /** Overrides routes.applicationSubmit as the client's submit endpoint. */
+  submitEndpoint?: string;
+  /** Overrides routes.telemetry as the client's telemetry drain endpoint. */
+  telemetryEndpoint?: string;
+}
+
+/**
+ * The ONE canonical resolved route table. createFireRaidMiddleware resolves
+ * MiddlewareRouteConfig (+ legacy top-level fields) into this EXACTLY ONCE;
+ * dispatch, artifact generation (semantic prompt URLs), canary parsing, and
+ * the client config artifact all consume the same resolved object — three
+ * subsystems can never disagree about where the canary route lives again.
+ */
+export interface ResolvedFireRaidRoutes {
+  applicationPage: string;
+  applicationSubmit: string;
+  telemetry: string;
+  canaryPrefix: string;
+  client: Required<MiddlewareClientConfig>;
+  /** Rereview item 24: resolved ingress trust (default "direct"). */
+  trustedIngress: "cloudflare" | "direct";
+}
+
+/**
+ * Per-request render options threaded from the resolved route table into
+ * the render adapter, so emitted markup (semantic prompt URLs, client
+ * config endpoints) matches the routes the middleware actually dispatches.
+ */
+export interface RenderInjectOptions {
+  /** The resolved canary prefix (e.g. "/c/" or "/machine-check/"). */
+  canaryPrefix?: string;
+  /**
+   * URL the host serves the FireRaid browser client at. When set, the
+   * renderer emits the script tag loading it. Host-owned path.
+   */
+  clientScriptSrc?: string;
+}
+
+/**
  * Opaque session identity + cookies.
  * The host owns storage; FireRaid only needs a stable opaque id.
  */
@@ -82,12 +165,16 @@ export interface HostRenderAdapter {
    * @param profile     the issued defense profile (carries decoy field, route)
    * @param csrfToken   the CSRF token to embed
    * @param labMode     whether to emit lab-only visible markers
+   * @param opts        optional per-request render options (resolved canary
+   *                    prefix, client script URL) — from the ONE resolved
+   *                    route table, so emitted URLs match dispatch exactly.
    */
   inject(
     html: string,
     profile: DefenseProfile,
     csrfToken: string,
-    labMode: boolean
+    labMode: boolean,
+    opts?: RenderInjectOptions
   ): string;
 }
 
@@ -117,8 +204,23 @@ export interface VerificationInput {
  * Verification adapter — confirm the submission's admission decision is
  * enforceable before forwarding to the upstream. In production this wraps
  * Turnstile; the reference adapter can use a no-op (verification "none").
+ *
+ * The adapter DECLARES its mode so a deployment cannot silently no-op:
+ *   - "host-owned"      — the host already verified the human elsewhere and
+ *                         hands FireRaid the verdict (the FI integration).
+ *   - "provider"        — a real external provider (Turnstile) is wired.
+ *   - "disabled-test"   — explicit no-op, REFUSED by the production factory.
  */
+export type VerificationMode = "host-owned" | "provider" | "disabled-test";
+
 export interface HostVerificationAdapter {
+  /**
+   * Declared posture of this verifier. "disabled-test" is only legal in
+   * explicitly-marked evaluation wiring — createFireRaidMiddleware throws
+   * on it, so a production deployment can never ship the reference no-op
+   * unknowingly.
+   */
+  readonly verificationMode: VerificationMode;
   /**
    * @param input the canonical verification input extracted from the
    *   already-parsed, already-CONSUMED request body + headers. The
@@ -210,8 +312,30 @@ export interface HostEnforcementAdapter {
     form: Record<string, string>,
     cookies: string
   ): Promise<boolean>;
-  /** Record a denied submission (never forwarded). */
-  deny(sessionId: string, reason: string): void;
+  /**
+   * Record a denied submission (never forwarded).
+   * The annotation carries FireRaid's risk projection so a host queue can
+   * surface it to reviewers even when admission was automatic.
+   */
+  deny(sessionId: string, reason: string, annotation?: RiskAnnotation): void;
+}
+
+/**
+ * Host-facing risk annotation. Reviewer tools consume this; it must never
+ * be serialized to applicants.
+ */
+export interface RiskAnnotation {
+  score: number;
+  tier: string;
+  confidence: string;
+  recommendedAction: string;
+  evidence: Array<{
+    class: "A" | "B" | "C";
+    source: string;
+    weight: number;
+    verified: boolean;
+    description: string;
+  }>;
 }
 
 /**
@@ -233,4 +357,27 @@ export interface HostCanaryStore {
   record(sessionId: string, token: string, expected: string): Promise<boolean>;
   /** Whether this session has ≥1 VERIFIED route hit (correlation input). */
   readVerified(sessionId: string): Promise<boolean>;
+  /**
+   * Lifecycle: the session is finalized (application submitted) or expired
+   * (TTL). Drop all transient state for it. Production stores persist
+   * exactly what their retention policy needs BEFORE clearing.
+   */
+  finalize(sessionId: string): Promise<void>;
+  /** Wall-clock TTL hint (ms) the middleware enforces via finalize(). */
+  readonly ttlMs?: number;
+}
+
+/**
+ * Session-scoped evidence lifecycle — the TTL contract for the reference
+ * in-memory stores (telemetry streams, canary hits). A long-lived origin
+ * process must not accumulate per-session state forever: middleware calls
+ * finalize() after the final application submission, and sweeps on demand.
+ */
+export interface HostSessionEvidenceLifecycle {
+  /** Drop a session's transient evidence (called on submit + TTL sweep). */
+  finalize(sessionId: string): Promise<void> | void;
+  /** Drop EVERY stored session older than ttlMs. Returns sessions evicted. */
+  sweepExpired(): Promise<number> | number;
+  /** Wall-clock TTL hint (ms). */
+  readonly ttlMs?: number;
 }

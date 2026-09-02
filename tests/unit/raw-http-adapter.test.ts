@@ -92,6 +92,8 @@ function startServer(): Promise<void> {
 function makeScenario(overrides: Partial<Scenario> = {}): Scenario {
   return {
     targetUrl: serverUrl,
+    objective: "honest",
+    fixtureId: "raw-http-test",
     fixture: {
       name: "Fixture Person",
       email: "fixture@example.invalid",

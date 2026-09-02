@@ -50,11 +50,14 @@ time never leaks token length.
 ## Production Carrier Opacity
 
 Production rendering carries no FIXED greppable FireRaid presentation
-signature (no `data-fr-*` attributes, no `fr-decoy` class, no visible
-`/c/<token>` text; the production notice rides an inert `<template>`).
-Deliberate residuals: the profile-bound `fr_<hex>` decoy field name and the
-`/c/` route prefix are server-bound identifiers — session-specific, but
-recognizable to an adversary who knows FireRaid. Accepted residual (P1-23),
+signature (no `data-fr-*` attributes, no `fr-*` class, no strategy IDs,
+no FireRaid route prefix in markup; instruction carriers are structurally
+inert — bare `<template>`, `<meta name="verification-context">`, HTML
+comments — and decoys hide via inline styles, no stable class).
+Deliberate residuals: decoy field names, element IDs, and route tokens
+are per-session random hex tokens (session-specific, unpredictable, but
+recognizable in SHAPE to an adversary who knows FireRaid), and the canary
+route prefix is operator-configured. Accepted residual (P1-23),
 regression-pinned by `tests/unit/production-carrier-opacity.test.ts`.
 
 ## CSP

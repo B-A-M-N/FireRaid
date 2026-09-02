@@ -16,7 +16,7 @@
  * body; the host urlencoded carrier folds into the same shape upstream of
  * these validators.
  */
-import { payloadByteLength, validateTelemetryBatch, type ValidatedEvent } from "../routes/telemetry.js";
+import { payloadByteLength, validateTelemetryBatch, type ValidatedEvent } from "../telemetry/validate.js";
 
 export { validateTelemetryBatch };
 export type { ValidatedEvent };

@@ -136,6 +136,8 @@ function makeScenario(): Scenario {
       password: "synthetic-password-123",
     },
     promptVariant: "baseline",
+    objective: "honest",
+    fixtureId: "test",
     model: "none",
     maxSteps: 5,
     timeoutMs: 30000,
@@ -230,12 +232,20 @@ describe("source contracts (static)", () => {
     expect(runnerSrc).toContain('"data-fr-marker"');
     expect(runnerSrc).toContain('"data-fr-route"');
     // P0-F: decoy field names are opaque hex tokens (no fr_ prefix tell).
-    // The profile generator uses generateToken(stream, 8) → 16 hex chars.
+    // The profile generator draws field names from the DOMAIN-SEPARATED
+    // "field-name" stream (P1-AUDIT-2 PRF hardening) via
+    // generateToken(fieldStream, 8) → 16 hex chars.
     const profileSrc = readFileSync(
       join(process.cwd(), "src/core/profile.ts"),
       "utf-8"
     );
-    expect(profileSrc).toMatch(/generateToken\(stream,\s*8\)/);
+    expect(profileSrc).toMatch(/generateToken\((?:await\s+)?fieldStream,\s*8\)/);
+    // And the domain separation itself is pinned: per-dimension streams are
+    // derived under their own labels, so a change to one dimension's
+    // generator can never perturb another's material.
+    expect(profileSrc).toMatch(/domainOrThrow\(root,\s*"field-name"\)/);
+    expect(profileSrc).toMatch(/domainOrThrow\(root,\s*"route-token"\)/);
+    expect(profileSrc).toMatch(/domainOrThrow\(root,\s*"semantic-nonce"\)/);
   });
 
   it("server ISSUED covers all material families, not just semantic", () => {

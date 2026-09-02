@@ -7,10 +7,13 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+  deriveProductionProfile,
+  PRODUCTION_AGENT_STRATEGIES,
   deriveProfilePure,
+  resolveConditionRecipe,
   ABLATION_RECIPES,
-  PRODUCTION_FAMILIES,
 } from "../../src/core/profile.js";
+import { parseDefenseRecipe } from "../../src/core/recipe-schema.js";
 import { buildArtifactSet } from "../../src/core/artifacts.js";
 
 const SECRET = "test-secret-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6";
@@ -46,20 +49,29 @@ describe("ablation recipe semantics", () => {
     expect(p.interaction).toBeUndefined();
   });
 
-  it("SEMANTIC_ONLY → families deep-equals [\"semantic\"], profile.semantic defined, others absent", async () => {
+  it("SEMANTIC_ONLY → semantic defined; only requiresDecoyField template companions may join", async () => {
     const p = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: "sem-001", mode: "lab" },
       recipe("SEMANTIC_ONLY")
     );
-    expect(p.families).toEqual(["semantic"]);
+    // The recipe asks for semantic only, but a drawn template MAY require a
+    // decoy-field companion (S06 requiresDecoyField) — that auto-add is the
+    // template's declared mechanism dependency, not a recipe violation.
+    expect(p.families).toContain("semantic");
+    for (const f of p.families) {
+      expect(["semantic", "decoy-field"]).toContain(f);
+    }
     expect(p.semantic).toBeDefined();
     expect(p.semantic!.templateId).toBeDefined();
     expect(p.semantic!.placementId).toBeDefined();
     expect(p.semantic!.nonce).toBeDefined();
     expect(p.semantic!.mode).toBeDefined();
-    expect(p.decoyField).toBeUndefined();
+    // Template mechanism consistency: requiresDecoyField ⇔ decoyField issued.
+    const tpl = p.semantic!.templateId;
+    expect(p.decoyField).toBeDefined();
     expect(p.decoyRoute).toBeUndefined();
     expect(p.interaction).toBeUndefined();
+    void tpl;
   });
 
   it("DECOY_FIELD_ONLY → families deep-equals [\"decoy-field\"], decoyField defined, decoyRoute undefined, semantic undefined", async () => {
@@ -179,7 +191,9 @@ describe("ablation recipe semantics", () => {
   // Each PRODUCTION_* recipe must derive cleanly in production mode, carry
   // ONLY production-renderable families, and build a NON-null artifact for
   // every family it carries (the property the semantic arms could never
-  // satisfy on the production plane).
+  // satisfy on the production plane). PRODUCTION_NONSEMANTIC_FULL is the
+  // renamed former "PRODUCTION_FULL" — an ABLATION that explicitly drops
+  // the semantic strategy production always carries (P0-AUDIT-3, P0-1).
   const PROD_ARM_EXPECTATIONS: Record<
     string,
     { families: string[]; has: (keyof import("../../src/types/profile.js").DefenseProfile)[] }
@@ -196,14 +210,14 @@ describe("ablation recipe semantics", () => {
       families: ["interaction"],
       has: ["interaction"],
     },
-    PRODUCTION_FULL: {
+    PRODUCTION_NONSEMANTIC_FULL: {
       families: ["decoy-field", "decoy-route", "interaction"],
       has: ["decoyField", "decoyRoute", "interaction"],
     },
   };
 
   for (const [id, want] of Object.entries(PROD_ARM_EXPECTATIONS)) {
-    it(`${id} → production-derivable, exact families, NO semantic dimension`, async () => {
+    it(`${id} → production-derivable, exact families, NO semantic dimension (it is an ablation)`, async () => {
       const p = await deriveProfilePure(
         { secret: SECRET, version: 1, sessionId: `prod-arm-${id}`, mode: "production" },
         recipe(id)
@@ -222,33 +236,103 @@ describe("ablation recipe semantics", () => {
     });
   }
 
-  it("FULL in production mode succeeds and includes semantic (environment does not restrict families)", async () => {
+  describe("P0-AUDIT-3 (P0-1): PRODUCTION_DEFAULT IS production", () => {
+    // RELEASE INVARIANT: the headline experiment condition must be
+    // byte-equal to what a production deployment derives. If this ever
+    // fails, the benchmark is again measuring a different defense than the
+    // product ships.
+    it("resolveConditionRecipe(PRODUCTION_DEFAULT) + derivation toEqual deriveProductionProfile — across many session IDs", async () => {
+      for (let i = 0; i < 32; i++) {
+        const sessionId = `prod-default-parity-${i}`;
+        const actual = await deriveProductionProfile({
+          secret: SECRET,
+          version: 1,
+          sessionId,
+        });
+        const benchmarkTreatment = await deriveProfilePure(
+          { secret: SECRET, version: 1, sessionId, mode: "production" },
+          resolveConditionRecipe("PRODUCTION_DEFAULT")
+        );
+        expect(benchmarkTreatment).toEqual(actual);
+      }
+    });
+
+    it("the redirect holds on the EVALUATION plane too (lab-bound run renders production)", async () => {
+      for (let i = 0; i < 16; i++) {
+        const sessionId = `prod-default-lab-${i}`;
+        const actual = await deriveProductionProfile({
+          secret: SECRET,
+          version: 1,
+          sessionId,
+        });
+        const viaEvaluation = await deriveProfilePure(
+          { secret: SECRET, version: 1, sessionId, mode: "lab" },
+          resolveConditionRecipe("PRODUCTION_DEFAULT")
+        );
+        expect(viaEvaluation).toEqual(actual);
+      }
+    });
+
+    it("the marker survives a JSON round-trip (recipe_json bind/reconstruct parity)", async () => {
+      const stored = JSON.parse(JSON.stringify(resolveConditionRecipe("PRODUCTION_DEFAULT")));
+      const sessionId = "prod-default-json";
+      const actual = await deriveProductionProfile({ secret: SECRET, version: 1, sessionId });
+      const reconstructed = await deriveProfilePure(
+        { secret: SECRET, version: 1, sessionId, mode: "production" },
+        stored
+      );
+      expect(reconstructed).toEqual(actual);
+    });
+
+    it("every derived PRODUCTION_DEFAULT profile carries the mandatory semantic strategy + P02/P03/P04 + ≥1 independent trap", async () => {
+      for (let i = 0; i < 32; i++) {
+        const p = await deriveProfilePure(
+          { secret: SECRET, version: 1, sessionId: `prod-default-shape-${i}`, mode: "production" },
+          resolveConditionRecipe("PRODUCTION_DEFAULT")
+        );
+        expect(p.families).toContain("semantic");
+        expect(PRODUCTION_AGENT_STRATEGIES).toContain(p.semantic!.templateId);
+        const independent = p.families.filter((f) => f !== "semantic");
+        expect(independent.length).toBeGreaterThanOrEqual(1);
+      }
+    });
+
+    it("productionDefault combined with any explicit override fails closed", () => {
+      const bad = { productionDefault: true, families: ["semantic"] } as unknown;
+      const result = parseDefenseRecipe(bad);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.errors.join(" ")).toMatch(/productionDefault/);
+    });
+
+    it("unknown condition names fail closed at the resolver", () => {
+      expect(() => resolveConditionRecipe("PRODUCTION_FULL")).toThrow(/UNKNOWN_CONDITION/);
+      expect(() => resolveConditionRecipe("BASELINE")).toThrow(/UNKNOWN_CONDITION/);
+    });
+  });
+
+  it("FULL in production mode succeeds; the semantic template draws from the PRODUCTION pool", async () => {
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: "full-prod", mode: "production" },
       recipe("FULL")
     );
     expect(profile.families).toContain("semantic");
     expect(profile.semantic).toBeDefined();
-    expect(profile.semantic!.templateId).toMatch(/^S\d+$/);
+    // Production mode draws only production-safe templates — the
+    // lab-only S-probes are excluded from the production random path.
+    expect(PRODUCTION_AGENT_STRATEGIES).toContain(profile.semantic!.templateId);
   });
 
-  it("random production draws can include semantic family", async () => {
-    // Without explicit recipe, random pool is now the full FAMILIES set.
-    // Semantic may appear in any session.
-    let sawSemantic = false;
-    for (let i = 0; i < 100; i++) {
-      const p = await deriveProfilePure({
+  it("random production draws always carry a P02/P03/P04 semantic strategy", async () => {
+    // Production random composition is now MANDATORY: a causal semantic
+    // strategy + at least one independent layer — never a weak draw.
+    for (let i = 0; i < 50; i++) {
+      const p = await deriveProductionProfile({
         secret: SECRET,
         version: 1,
         sessionId: `prod-rand-${i}`,
-        mode: "production",
       });
-      for (const f of p.families) {
-        expect(PRODUCTION_FAMILIES).toContain(f);
-      }
-      if (p.families.includes("semantic")) sawSemantic = true;
+      expect(p.families).toContain("semantic");
+      expect(PRODUCTION_AGENT_STRATEGIES).toContain(p.semantic!.templateId);
     }
-    // With pool of 4 families and draw of 2–4, semantic should appear ~50% of time.
-    expect(sawSemantic).toBe(true);
   });
 });

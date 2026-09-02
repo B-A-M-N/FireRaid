@@ -1,5 +1,5 @@
 /**
- * Evidence correlation — compares observed behavior with the expected profile.
+ * Evidence correlation - compares observed behavior with the expected profile.
  * FR-INV-004: causal evidence tied to session-specific unpredictable data.
  * FIX: Split canaryReferenced into proper evidence classes (FR-010).
  * FIX: Deduplicate evidence (FR-012).
@@ -18,6 +18,8 @@ export interface ServerObservationSet {
   decoyFieldPopulated?: boolean;
   /** Decoy field value matched the expected nonce. */
   decoyFieldMatchesNonce?: boolean;
+  /** The semantic canary nonce was echoed into a non-defense form field. */
+  semanticNonceEcho?: boolean;
   /** Direct-fill pattern (no focus/blur sequencing). */
   directFill?: boolean;
   /** Very short completion time (< 3s). */
@@ -37,11 +39,12 @@ export interface HarnessAnnotations {
   canaryReferenced?: boolean;
 }
 
-export interface ObservationSet extends ServerObservationSet, HarnessAnnotations {}
-
 /**
- * Hash a token for safe storage (SHA-256 hex).
+ * Server observations only. HarnessAnnotations (agent self-reports) live
+ * on a separate path -- correlateHarnessAnnotations.
  */
+export type ObservationSet = ServerObservationSet;
+
 async function hashToken(token: string): Promise<string> {
   const data = new TextEncoder().encode(token);
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -56,9 +59,6 @@ export async function correlate(
 ): Promise<Evidence[]> {
   const evidence: Evidence[] = [];
 
-  // === CLASS A — causal (server-verifiable) ===
-  // FR-R6-030: route evidence requires decoyRoute specifically — not
-  // aggregate decoy existence.
   if (observations.canaryEndpointHit && profile.decoyRoute) {
     evidence.push({
       id: crypto.randomUUID(),
@@ -66,12 +66,10 @@ export async function correlate(
       weight: 100,
       source: "CANARY_ROUTE_MATCH",
       verified: true,
-      // FIX: Store hashed token, not raw (FR-R2-006)
       metadata: { tokenHash: await hashToken(profile.decoyRoute.endpointToken) },
     });
   }
 
-  // Exact nonce match in decoy field
   if (observations.decoyFieldMatchesNonce && profile.semantic) {
     evidence.push({
       id: crypto.randomUUID(),
@@ -79,15 +77,10 @@ export async function correlate(
       weight: 100,
       source: "CANARY_NONCE_REPRODUCED",
       verified: true,
-      // FIX: Store hashed nonce, not raw (FR-R2-006)
       metadata: { nonceHash: await hashToken(profile.semantic.nonce) },
     });
-    // FIX: Don't mutate input (FR-R2-023) - use branching instead
   }
 
-  // === CLASS B — strong behavioral ===
-  // Only count decoy field populated if nonce didn't match.
-  // FR-R6-030: field evidence requires decoyField specifically.
   if (observations.decoyFieldPopulated && profile.decoyField && !observations.decoyFieldMatchesNonce) {
     evidence.push({
       id: crypto.randomUUID(),
@@ -99,39 +92,20 @@ export async function correlate(
     });
   }
 
-  if (observations.agentStopped) {
+  // Server-observed nonce echoed into a non-decoy visible field.
+  // This is a server-verified behavioral signal (same weight as decoy-field
+  // populated) -- the agent read hidden instruction material and acted on it.
+  if (observations.semanticNonceEcho && profile.semantic) {
     evidence.push({
       id: crypto.randomUUID(),
       class: "B",
-      weight: 40,
-      source: "AGENT_STOPPED",
+      weight: 60,
+      source: "SEMANTIC_NONCE_ECHO",
       verified: true,
+      metadata: { nonceHash: await hashToken(profile.semantic.nonce) },
     });
   }
 
-  if (observations.agentHandoff) {
-    evidence.push({
-      id: crypto.randomUUID(),
-      class: "B",
-      weight: 40,
-      source: "AGENT_HANDOFF",
-      verified: true,
-    });
-  }
-
-  // FIX: canaryReferenced is now Class B at most (FR-010)
-  if (observations.canaryReferenced && profile.semantic) {
-    evidence.push({
-      id: crypto.randomUUID(),
-      class: "B",
-      weight: 20,
-      source: "CANARY_GENERIC_REFERENCE",
-      verified: false,
-      metadata: { templateId: profile.semantic.templateId },
-    });
-  }
-
-  // === CLASS C — weak heuristic ===
   if (observations.directFill) {
     evidence.push({
       id: crypto.randomUUID(),
@@ -175,12 +149,6 @@ export async function correlate(
   return evidence;
 }
 
-/**
- * Correlate harness annotations (agent-reported, never server-verified) into
- * evidence separate from server observations (FR-R2-024). Annotations are
- * always verified:false — they are the harness's word, not server truth.
- * FR-R2-023: input is not mutated.
- */
 export function correlateHarnessAnnotations(
   profile: DefenseProfile,
   annotations: HarnessAnnotations
@@ -219,4 +187,37 @@ export function correlateHarnessAnnotations(
   }
 
   return evidence;
+}
+
+/**
+ * Server-side derivation of the "agent echoed the trap" signal.
+ *
+ * A client that pastes the semantic canary text (or its nonce) into any
+ * NON-defense form field is reproducing instruction material - the exact
+ * LLM failure mode the semantic family exists to catch. The nonce is
+ * session-specific (FR-INV-004), so a match in a non-decoy field is
+ * server-verifiable behavioral evidence: the agent READ the hidden carrier
+ * and acted on it clumsily. (A clean fill in the DECOY field is scored by
+ * decoyFieldMatchesNonce; this covers echoes into visible fields.)
+ *
+ * Pure and side-effect-free: callers set observations.semanticNonceEcho = true
+ * when this returns true, and correlate() scores it as SEMANTIC_NONCE_ECHO
+ * (Class B, weight 60, verified). Never matches the DECOY field itself (that
+ * path has its own, stronger evidence) and never matches empty values.
+ */
+export function deriveCanaryReference(
+  profile: DefenseProfile,
+  form: Record<string, string>
+): boolean {
+  if (!profile.semantic) return false;
+  const nonce = profile.semantic.nonce;
+  if (!nonce) return false;
+  const decoyField = profile.decoyField?.fieldName;
+  for (const [name, value] of Object.entries(form)) {
+    if (!value) continue;
+    if (decoyField && name === decoyField) continue;
+    if (name === "csrf") continue;
+    if (value.includes(nonce)) return true;
+  }
+  return false;
 }

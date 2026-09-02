@@ -93,15 +93,21 @@ describe("P0-10: vision-only annotates only genuinely visible controls", () => {
     }
   }, 30_000);
 
-  it("the production route <template> gets NO badge (inert content is not annotatable)", async () => {
+  it("route material never becomes an annotatable control (template channels or none)", async () => {
+    // P1 signature stripping removed the data-rt-token template attribute:
+    // route material now travels ONLY inside semantic full-action carriers.
+    // With no semantic family in this profile, NO route carrier exists at
+    // all — the token must be absent from the served DOM outright, so there
+    // is nothing for a vision annotator to badge.
     const { page, browser, profile } = await productionPage();
     try {
       const token = profile.decoyRoute!.endpointToken;
       await stampVisionRefs(page);
-      // The template itself must not carry a ref attribute.
-      expect(
-        await page.$eval(`template[data-rt-token="${token}"]`, (el) => el.getAttribute("data-vr-ref"))
-      ).toBeNull();
+      const served = await page.content();
+      expect(served.includes(token)).toBe(false);
+      // No inert template channels exist to annotate either.
+      const templateCount = await page.$$eval("template", (els) => els.length);
+      expect(templateCount).toBe(0);
     } finally {
       await browser.close();
     }

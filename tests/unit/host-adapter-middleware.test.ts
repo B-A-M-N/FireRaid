@@ -9,15 +9,18 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  admit,
   makeCsrf,
   ReferenceSessionAdapter,
   referenceInject,
   ReferenceVerificationAdapter,
   ReferenceTelemetryAdapter,
-  type MiddlewareDeps,
   type HostEnforcementAdapter,
+  ReferenceCanaryStore,
 } from "../../src/host-adapter/index.js";
+import {
+  admitEvaluation,
+  type EvaluationMiddlewareDeps,
+} from "../../src/eval/evaluation-middleware.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
 import { validateTelemetryBatch } from "../../src/security/request-validation.js";
 
@@ -53,7 +56,7 @@ class FakeEnforcement implements HostEnforcementAdapter {
   }
 }
 
-function deps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
+function deps(over: Partial<EvaluationMiddlewareDeps> = {}): EvaluationMiddlewareDeps {
   return {
     secret: SECRET,
     version: VERSION,
@@ -63,7 +66,11 @@ function deps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
     verification: new ReferenceVerificationAdapter(),
     telemetry: new ReferenceTelemetryAdapter(),
     enforcement: new FakeEnforcement(),
+    canaryStore: new ReferenceCanaryStore(),
     labMode: false,
+    // These tests assert the fail-closed posture (non-ACCEPT never
+    // forwards) — the enforcement mode, not advisory's forward-and-annotate.
+    enforcementMode: "enforcement",
     ...over,
   };
 }
@@ -77,7 +84,7 @@ async function htmlLoader(): Promise<string> {
 describe("host-neutral admission middleware (P1-24/P1-25)", () => {
   it("GET injects artifacts and issues a session cookie", async () => {
     const d = deps();
-    const res = await admit(new Request("http://mw/signup"), d, htmlLoader);
+    const res = await admitEvaluation(new Request("http://mw/signup"), d, htmlLoader);
     expect(res.kind).toBe("get");
     expect(res.setCookie).toContain("__Host-fr_sid=");
     expect(res.html).toContain('name="csrf"');
@@ -89,7 +96,7 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     const sessionId = await d.session.createSession();
     const profile = await deriveProfilePure({ secret: SECRET, version: VERSION, sessionId, mode: "production" });
     const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" } });
-    const res = await admit(req, d, htmlLoader);
+    const res = await admitEvaluation(req, d, htmlLoader);
     expect(res.kind).toBe("admit");
     expect(enforcement.allowed).toBe(1);
     // FireRaid fields are stripped before forwarding — the ordinary ledger
@@ -117,7 +124,7 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     const field = profile.decoyField!.fieldName;
     const nonce = profile.semantic!.nonce;
     const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c", [field]: nonce } });
-    const res = await admit(req, d, htmlLoader);
+    const res = await admitEvaluation(req, d, htmlLoader);
     expect(res.disposition).toBe("QUARANTINE");
     expect(enforcement.allowed).toBe(0);
     expect(enforcement.denied).toBe(1);
@@ -126,7 +133,7 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
   it("fail-closed: missing session is denied, never forwarded", async () => {
     const enforcement = new FakeEnforcement();
     const d = deps({ enforcement });
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request("http://mw/signup", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -143,11 +150,11 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     const enforcement = new FakeEnforcement();
     const d = deps({
       enforcement,
-      verification: { verify: async () => { throw new Error("verifier down"); } },
+      verification: { verificationMode: "host-owned" as const, verify: async () => { throw new Error("verifier down"); } },
     });
     const sessionId = await d.session.createSession();
     const req = await postRequest(sessionId, { form: { name: "A" } });
-    const res = await admit(req, d, htmlLoader);
+    const res = await admitEvaluation(req, d, htmlLoader);
     expect(res.kind).toBe("deny");
     expect(enforcement.allowed).toBe(0);
   });
@@ -157,7 +164,7 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     const d = deps({ enforcement });
     const sessionId = await d.session.createSession();
     // Bare sid — no HMAC signature. Must NOT be accepted as a session.
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request("http://mw/signup", {
         method: "POST",
         headers: { "content-type": "application/json", cookie: `__Host-fr_sid=${sessionId}` },
@@ -175,7 +182,7 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     const d = deps({ enforcement });
     const sessionId = await d.session.createSession();
     const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request("http://mw/signup", {
         method: "POST",
         headers: { "content-type": "application/json", cookie },
@@ -240,7 +247,7 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
       { seq: 3, dt: 200, kind: "submit_attempt" },
     ];
     const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" }, eventBatch: events });
-    const res = await admit(req, d, htmlLoader);
+    const res = await admitEvaluation(req, d, htmlLoader);
     expect(res.kind).toBe("admit");
     expect(enforcement.allowed).toBe(1);
   });
@@ -284,7 +291,7 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
       { seq: 3, dt: 200, kind: "submit_attempt" },
     ];
     const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" }, eventBatch: events });
-    const res = await admit(req, d, htmlLoader);
+    const res = await admitEvaluation(req, d, htmlLoader);
     // The decision here depends on the FULL recipe's correlation: a captured
     // no-pointer stream is real interaction evidence, so it must NOT be
     // QUARANTINE on that basis alone — but critically the decision cannot
@@ -310,7 +317,7 @@ describe("P1-AUDIT-2 (P1-14): telemetry-drain carrier on the host plane", () => 
         ],
       }),
     });
-    const res = await admit(req, d, htmlLoader);
+    const res = await admitEvaluation(req, d, htmlLoader);
     expect(res.kind).toBe("ingest");
     expect(res.received).toBe(3);
     expect(res.acceptedThrough).toBe(3);
@@ -334,7 +341,7 @@ describe("P1-AUDIT-2 (P1-14): telemetry-drain carrier on the host plane", () => 
         ],
       }),
     });
-    const res = await admit(req, d, htmlLoader);
+    const res = await admitEvaluation(req, d, htmlLoader);
     expect(res.kind).toBe("deny");
     expect(res.disposition).toBe("INVALID_TELEMETRY");
     expect(enforcement.allowed).toBe(0);
@@ -347,7 +354,7 @@ describe("P1-AUDIT-2 (P1-14): telemetry-drain carrier on the host plane", () => 
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ events: [{ seq: 1, dt: 0, kind: "page_ready" }] }),
     });
-    const res = await admit(req, d, htmlLoader);
+    const res = await admitEvaluation(req, d, htmlLoader);
     expect(res.kind).toBe("deny");
     expect(res.disposition).toBe("NO_SESSION");
   });
@@ -363,7 +370,7 @@ describe("P1-AUDIT-2 (P1-14): telemetry-drain carrier on the host plane", () => 
     });
     // Falls through to the submit branch: no csrf → CSRF_FAILED deny
     // (NOT an ingest result).
-    const res = await admit(req, d, htmlLoader);
+    const res = await admitEvaluation(req, d, htmlLoader);
     expect(res.kind).toBe("deny");
     expect(res.disposition).toBe("CSRF_FAILED");
   });

@@ -24,9 +24,13 @@
  * canary, long telemetry session, agent stop, pagehide.
  *
  * Usage:
- *   node scripts/budget-harness.mjs                     # run all scenarios
- *   node scripts/budget-harness.mjs --scenario normal   # one scenario
- *   node scripts/budget-harness.mjs --json out.json     # machine report
+ *   node --import tsx scripts/budget-harness.mjs        # run all scenarios
+ *   node --import tsx scripts/budget-harness.mjs --scenario normal
+ *   node --import tsx scripts/budget-harness.mjs --json out.json
+ *
+ * (P0-AUDIT-3: the verified-canary scenario imports the REAL TS derivation
+ * through tsx — node alone cannot load it. `npm run test:budget` carries
+ * the flag.)
  *
  * Exit code: 0 = all budgets honored, 1 = breach or harness failure.
  */
@@ -269,14 +273,89 @@ async function signup() {
   const resp = await fetch(`${BASE}/signup`);
   if (resp.status !== 200) throw new Error(`signup -> ${resp.status}`);
   const setCookie = resp.headers.get("set-cookie") || "";
-  const sid = setCookie
+  // P0-AUDIT-3 (P0-3): the raw cookie VALUE is the session identity on the
+  // wire — in production mode it is the signed envelope. Keep both: `sid`
+  // (the bare id, decoded from the verified envelope when needed) and
+  // `cookieValue` (what requests must send back).
+  const cookieValue = setCookie
     .split(",")
     .map((c) => c.split(";")[0].trim())
     .filter((c) => c.startsWith("__Host-fr_sid="))
     .map((c) => c.split("=").slice(1).join("="))[0];
   const html = await resp.text();
   const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1] ?? "";
-  return { sid, csrf, html };
+  return { sid: cookieValue, cookieValue, csrf, html };
+}
+
+// ── P0-AUDIT-3 (P0-3): server-derived treatment truth ─────────────────────
+// The worker signs session envelopes with FIRERAID_TEST_PROFILE_SECRET — a
+// secret THIS harness controls (it spawns the worker). Verifying the
+// envelope harness-side and re-deriving the profile with the SAME
+// derivation the middleware uses gives the harness the issued treatment
+// without reading a single byte of presentation. Runs the TS derivation
+// through tsx so there is no parallel implementation to drift.
+
+let _derivationMod = null;
+async function derivationModule() {
+  if (!_derivationMod) {
+    const profileUrl = new URL("../src/core/profile.ts", import.meta.url).href;
+    _derivationMod = await import("tsx/esm/api").then((tsx) =>
+      tsx.tsImport(profileUrl, import.meta.url).then((m) => m.default ?? m)
+    );
+  }
+  return _derivationMod;
+}
+
+/** The profile secret the harness itself handed the worker (test-worker.mjs). */
+function workerProfileSecret() {
+  return (
+    process.env.FIRERAID_TEST_PROFILE_SECRET ??
+    "test-profile-secret-0123456789abcdef0123456789abcdef"
+  );
+}
+
+/**
+ * Verify the production session envelope and re-derive the issued profile
+ * the way the middleware does: secret (by kid) + version (payload.pv) +
+ * bare sid → deriveProductionProfile. Returns null on ANY verification
+ * failure (the harness must never act on an unverified envelope).
+ */
+async function deriveProfileFromEnvelope(cookieValue) {
+  try {
+    const parts = cookieValue.split(".");
+    if (parts.length !== 3 || parts[0] !== "fr1") return null;
+    const [, bodyB64, sigB64] = parts;
+    const b64urlDecode = (s) =>
+      Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+    const body = b64urlDecode(bodyB64);
+    const sig = b64urlDecode(sigB64);
+    if (sig.length !== 32) return null;
+    const secret = workerProfileSecret();
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+    const ok = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      sig,
+      new TextEncoder().encode(`fr1.${bodyB64}`)
+    );
+    if (!ok) return null;
+    const payload = JSON.parse(new TextDecoder().decode(body));
+    if (payload.v !== 1 || typeof payload.sid !== "string" || !payload.sid) return null;
+    const { deriveProductionProfile } = await derivationModule();
+    return await deriveProductionProfile({
+      secret,
+      version: payload.pv,
+      sessionId: payload.sid,
+    });
+  } catch {
+    return null;
+  }
 }
 
 function filledForm(html, overrides = {}) {
@@ -366,14 +445,23 @@ const SCENARIOS = {
     // reported a PASS for a scenario that measured only /signup. Retry
     // until a route-bearing profile is drawn (bounded), so the budget
     // always covers the materialize + verify + persist path it names.
+    //
+    // P0-AUDIT-3 (P0-3): the token now comes from SERVER-DERIVED TRUTH —
+    // verify the session envelope (HMAC, harness-held key) and re-derive
+    // the profile exactly as the worker does. The old scraper matched
+    // data-rt-token in the HTML, but production INTENTIONALLY stopped
+    // emitting internal markers — the scrape depended on a presentation
+    // signature whose removal is itself a production security feature.
+    // Test infrastructure must learn treatment from authoritative
+    // derivation, never from presentation.
     for (let attempt = 0; attempt < 20; attempt++) {
-      const { sid, html } = await signup();
-      // Production carriers the token in the neutral <template> (P1-22) —
-      // NOT as visible "/c/<token>" text (lab-only). Match the carrier.
-      const token = html.match(/data-rt-token="([a-f0-9]+)"/)?.[1];
+      const { sid, cookieValue } = await signup();
+      const profile = await deriveProfileFromEnvelope(cookieValue);
+      if (!profile) throw new Error("verified-canary: envelope failed harness-side verification");
+      const token = profile.decoyRoute?.endpointToken;
       if (token) {
         const resp = await fetch(`${BASE}/c/${token}`, {
-          headers: { cookie: `__Host-fr_sid=${sid}` },
+          headers: { cookie: `__Host-fr_sid=${cookieValue}` },
         });
         if (resp.status === 403) throw new Error("canary hit rejected the session");
         return;

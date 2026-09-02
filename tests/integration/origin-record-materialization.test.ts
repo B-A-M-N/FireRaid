@@ -42,7 +42,7 @@ const MANIFEST = {
   agents: ["raw-http"],
   models: ["none"],
   prompts: ["baseline"],
-  conditions: ["CONTROL", "PRODUCTION_FULL"],
+  conditions: ["CONTROL", "PRODUCTION_DEFAULT"],
   retry_failed: false,
   model_config: {},
   holdout_mode: false,
@@ -108,13 +108,13 @@ describe("P0-3: origin-ledger records carry assigned treatment identity", () => 
     }
 
     // Two DISTINCT treatment groups — the analyzer's recipe_id branch finds
-    // exactly CONTROL and PRODUCTION_FULL, never a collapsed BASELINE.
-    expect([...byRecipe.keys()].sort()).toEqual(["CONTROL", "PRODUCTION_FULL"]);
+    // exactly CONTROL and PRODUCTION_DEFAULT, never a collapsed BASELINE.
+    expect([...byRecipe.keys()].sort()).toEqual(["CONTROL", "PRODUCTION_DEFAULT"]);
     expect(byRecipe.get("CONTROL")).toHaveLength(1);
-    expect(byRecipe.get("PRODUCTION_FULL")).toHaveLength(1);
+    expect(byRecipe.get("PRODUCTION_DEFAULT")).toHaveLength(1);
 
     // Origin truth was reconciled for both trials (raw-http against the
-    // facade: CONTROL forwards → account created; PRODUCTION_FULL on a
+    // facade: CONTROL forwards → account created; PRODUCTION_DEFAULT on a
     // clean raw-http form may ACCEPT or be flagged — either way the probe
     // must have returned an authoritative boolean).
     for (const r of records) {
@@ -126,7 +126,7 @@ describe("P0-3: origin-ledger records carry assigned treatment identity", () => 
     }
 
     // P0-12: exact issued treatment material landed on the defended record.
-    const full = byRecipe.get("PRODUCTION_FULL")![0];
+    const full = byRecipe.get("PRODUCTION_DEFAULT")![0];
     const tm = full.treatment_material as Record<string, unknown>;
     expect(tm).toBeDefined();
     expect(Object.keys(tm).length).toBeGreaterThan(0);

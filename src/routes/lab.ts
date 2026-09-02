@@ -29,7 +29,7 @@ import {
   loadSession,
 } from "../cloudflare/session.js";;
 import { reconstructFromSessionId } from "../core/reconstruct.js";
-import { ABLATION_RECIPES } from "../core/profile.js";
+import { resolveConditionRecipe } from "../core/profile.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
 
 // FR-R6-012: POST /api/lab/runs/:id/associate was removed (double-bind). If
@@ -222,14 +222,18 @@ function validateCreateBody(raw: unknown): {
  *
  * FR-R6-010: when recipe_id is present, IGNORE body recipe overrides entirely.
  * recipe_id is the sole treatment identity — the stored recipe_json is exactly
- * ABLATION_RECIPES[recipe_id]. This prevents two different recipes from
+ * the canonical recipe resolved for that id (P0-AUDIT-3: via
+ * resolveConditionRecipe, so PRODUCTION_DEFAULT stores its redirect marker,
+ * not a family list). This prevents two different recipes from
  * claiming the same recipe_id (e.g., CONTROL) while having different fields.
  */
 function buildRecipeJson(recipe?: DefenseRecipe, recipeId?: string): string | null {
-  if (recipeId !== undefined && ABLATION_RECIPES[recipeId]) {
+  if (recipeId !== undefined) {
     // FR-R6-010: recipe_id is authoritative — ignore body recipe overrides.
-    // The stored recipe_json must be exactly the canonical ablation recipe.
-    return JSON.stringify(ABLATION_RECIPES[recipeId]);
+    // The stored recipe_json must be exactly the canonical treatment recipe.
+    // P0-AUDIT-3: resolveConditionRecipe fails closed on unknown ids — the
+    // caller validated the id against the same resolver above.
+    return JSON.stringify(resolveConditionRecipe(recipeId));
   }
   if (recipe) return JSON.stringify(recipe);
   return null;
@@ -261,9 +265,12 @@ export async function createLabRun(req: Request, env: Env): Promise<Response> {
   const validated = validateCreateBody(raw);
   if (validated === null) return error("invalid request body", 400);
 
-  // If recipe_id present, validate it exists in ABLATION_RECIPES
+  // If recipe_id present, validate it resolves to a canonical treatment
+  // (P0-AUDIT-3: includes PRODUCTION_DEFAULT; fail closed on unknown ids).
   if (validated.recipe_id !== undefined) {
-    if (!(validated.recipe_id in ABLATION_RECIPES)) {
+    try {
+      resolveConditionRecipe(validated.recipe_id);
+    } catch {
       return error(`unknown recipe_id: ${validated.recipe_id}`, 400);
     }
   }

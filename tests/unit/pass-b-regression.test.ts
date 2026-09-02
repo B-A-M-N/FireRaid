@@ -217,7 +217,7 @@ describe("FR-R2-023: Correlation does not mutate input", () => {
       mode: "lab",
     });
     profile.decoyRoute = { endpointToken: "abc123" };
-    profile.semantic = { templateId: "S01", placementId: "P01", nonce: "NONCE1", mode: "observe" };
+    profile.semantic = { templateId: "S01", placementId: "P01", nonce: "NONCE1", mode: "observe", spotCount: 1, spots: ["pre-form"], formVariant: 0 };
 
     const observations = {
       canaryEndpointHit: true,
@@ -252,7 +252,7 @@ describe("FR-R2-024: Harness annotations separate from server observations", () 
       sessionId: "test-ref",
       mode: "lab",
     });
-    profile.semantic = { templateId: "S01", placementId: "P01", nonce: "NONCE1", mode: "observe" };
+    profile.semantic = { templateId: "S01", placementId: "P01", nonce: "NONCE1", mode: "observe", spotCount: 1, spots: ["pre-form"], formVariant: 0 };
     const evidence = correlateHarnessAnnotations(profile, { canaryReferenced: true });
     expect(evidence.length).toBe(1);
     expect(evidence[0].source).toBe("CANARY_GENERIC_REFERENCE");

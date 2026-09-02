@@ -252,7 +252,7 @@ describe("session-metrics state persistence (FR-P0-1)", () => {
   }
 
   it("save → load round-trip preserves the state exactly", async () => {
-    const { loadMetricsState, saveMetricsState } = await import("../../src/telemetry/state.js");
+    const { loadMetricsState, saveMetricsState } = await import("../../src/cloudflare/session-metrics.js");
     const db = makeDb();
     const wrappers = makeWrappers(db);
     const capture = { capturePointer: true, captureKey: true };
@@ -323,7 +323,7 @@ describe("session-metrics state persistence (FR-P0-1)", () => {
   });
 
   it("CAS save on a stale base reports conflict and does NOT write (P0-6)", async () => {
-    const { loadMetricsState, saveMetricsState } = await import("../../src/telemetry/state.js");
+    const { loadMetricsState, saveMetricsState } = await import("../../src/cloudflare/session-metrics.js");
     const db = makeDb();
     const wrappers = makeWrappers(db);
     const capture = { capturePointer: true, captureKey: true };
@@ -427,8 +427,8 @@ describe("metrics watermark reconciliation (P1-AUDIT-2)", () => {
   }
 
   it("metrics row behind the session watermark is caught up on read", async () => {
-    const { loadSessionMetrics } = await import("../../src/telemetry/aggregate.js");
-    const { loadMetricsState, saveMetricsState } = await import("../../src/telemetry/state.js");
+    const { loadSessionMetrics } = await import("../../src/cloudflare/session-metrics.js");
+    const { loadMetricsState, saveMetricsState } = await import("../../src/cloudflare/session-metrics.js");
     const db = makeFullDb();
     const w = makeWrappers(db);
 
@@ -470,8 +470,8 @@ describe("metrics watermark reconciliation (P1-AUDIT-2)", () => {
   });
 
   it("behind metrics row with NO recoverable batches (pruned) reports incomplete (P0-7)", async () => {
-    const { loadSessionMetrics } = await import("../../src/telemetry/aggregate.js");
-    const { loadMetricsState, saveMetricsState } = await import("../../src/telemetry/state.js");
+    const { loadSessionMetrics } = await import("../../src/cloudflare/session-metrics.js");
+    const { loadMetricsState, saveMetricsState } = await import("../../src/cloudflare/session-metrics.js");
     const db = makeFullDb();
     const w = makeWrappers(db);
     const capture = { capturePointer: true, captureKey: true };
@@ -498,8 +498,8 @@ describe("metrics watermark reconciliation (P1-AUDIT-2)", () => {
   });
 
   it("ABSENT metrics row with raw rows and capture supplied is REBUILT complete (P1-2)", async () => {
-    const { loadSessionMetrics } = await import("../../src/telemetry/aggregate.js");
-    const { loadMetricsState } = await import("../../src/telemetry/state.js");
+    const { loadSessionMetrics } = await import("../../src/cloudflare/session-metrics.js");
+    const { loadMetricsState } = await import("../../src/cloudflare/session-metrics.js");
     const db = makeFullDb();
     const w = makeWrappers(db);
 
@@ -559,8 +559,8 @@ describe("metrics watermark reconciliation (P1-AUDIT-2)", () => {
   });
 
   it("complete stream reports complete; empty session reports absent (P0-7)", async () => {
-    const { loadSessionMetrics } = await import("../../src/telemetry/aggregate.js");
-    const { saveMetricsState } = await import("../../src/telemetry/state.js");
+    const { loadSessionMetrics } = await import("../../src/cloudflare/session-metrics.js");
+    const { saveMetricsState } = await import("../../src/cloudflare/session-metrics.js");
     const db = makeFullDb();
     const w = makeWrappers(db);
     const capture = { capturePointer: true, captureKey: true };

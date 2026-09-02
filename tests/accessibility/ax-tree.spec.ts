@@ -25,8 +25,14 @@ async function createPinnedRun(
   }
 ) {
   // FR-R5-041: deterministic defaults — bootstrap always sets these.
-  // FIRERAID_TEST_BASE_URL is exported by scripts/test-worker.mjs (https).
-  const labBase = process.env.FIRERAID_TEST_BASE_URL ?? "https://localhost:9998";
+  // FIRERAID_TEST_BASE_URL is exported by scripts/test-worker.mjs to the
+  // SUITE child. The a11y config runs no suite child (Playwright owns the
+  // test process), so fall back to the port override the config itself
+  // reads (FIRERAID_A11Y_PORT) — never a hardcoded port: an unrelated
+  // listener on the fallback would silently answer the lab API (found
+  // live: pinned-bind tests POSTing a stale orphan on the old default).
+  const port = process.env.FIRERAID_A11Y_PORT ?? "9998";
+  const labBase = process.env.FIRERAID_TEST_BASE_URL ?? `https://localhost:${port}`;
   const labSecret = process.env.FIRERAID_TEST_LAB_SECRET ?? "local-lab-secret-do-not-use-in-prod";
   const createResp = await request.post(`${labBase}/api/lab/runs`, {
     headers: { authorization: `Bearer ${labSecret}` },
@@ -74,18 +80,33 @@ test.describe("accessibility", () => {
     }
   });
 
-  test("production-eligible canaries are visible (not display:none)", async ({ page }) => {
+  test("attached carriers are legal lab shapes; inert channels stay inert", async ({ page }) => {
+    // PLANE-AWARE (P0-AUDIT-3 repair): this suite runs the LAB plane, where
+    // a random session may legitimately draw a P01–P05 carrier — an
+    // ATTACHED element whose visible/AX exposure IS the experimental
+    // condition — or an S09/P06-style inert template. Both shapes are
+    // legal; the invariant here is that every carrier is one of the two
+    // KNOWN shapes. The production-plane invariant (ALL carriers inert,
+    // nothing focusable) is enforced by tests/e2e/production-plane.spec.ts
+    // against LAB_MODE=false.
     await page.goto("/signup");
     const canary = page.locator("[data-fr-canary-id]");
-    if (await canary.count()) {
-      const count = await canary.count();
-      for (let i = 0; i < count; i++) {
-        const el = canary.nth(i);
-        const ariaHidden = await el.getAttribute("aria-hidden");
-        if (ariaHidden !== "true") {
-          await expect(el).toBeVisible();
-        }
+    const count = await canary.count();
+    for (let i = 0; i < count; i++) {
+      const el = canary.nth(i);
+      const tag = await el.evaluate((node) => node.tagName);
+      if (tag === "TEMPLATE") {
+        // Inert by spec — nothing to check (fragment never attaches).
+        continue;
       }
+      // Lab probe element: it may be visible (P01–P05) — but it must never
+      // be a focusable control (form inputs, buttons, links are reserved
+      // for the real form).
+      const focusable = await el.evaluate((node) => {
+        const e = node as HTMLElement;
+        return e.tabIndex >= 0 && !e.hasAttribute("disabled");
+      });
+      expect(focusable, "carrier must not be a tab-reachable control").toBe(false);
     }
   });
 });
@@ -152,10 +173,15 @@ function axNormalized(s: string): string {
 }
 
 test.describe("AX tree verification", () => {
-  // FR-R5-042: Random-profile smoke test — renamed to signal that treatment-
-  // sensitive assertions live in the pinned-tests below.  Skip only when no
-  // semantic canary renders (expected when the random profile lacks
-  // the "semantic" family).
+  // FR-R5-042: Random-profile smoke test. PLANE-AWARE: this suite runs the
+  // LAB plane (wrangler env test, LAB_MODE=true), where a random session
+  // may draw a P01–P05 carrier — an ATTACHED element whose AX visibility IS
+  // the experimental condition — or the S09/P06-style inert template. Both
+  // shapes are legal here; what must hold in BOTH is that any nonce marker
+  // material that exists in the markup is either (a) AX-visible lab probe
+  // content (an intended exposure, asserted by the pinned tests below) or
+  // (b) absent from the AX snapshot. The PRODUCTION-plane inertness is
+  // separately enforced in tests/e2e/production-plane.spec.ts.
   test("canary marker exclusion from AX tree (random-profile smoke)", async ({ page }) => {
     await page.goto("/signup");
 
@@ -165,36 +191,33 @@ test.describe("AX tree verification", () => {
     const canaryWrapper = page.locator("[data-fr-canary-id]");
     const canaryCount = await canaryWrapper.count();
 
-    // Case 1: No canary rendered — skip (not a failure)
+    // Case 1: No canary drawn for this session — nothing to assert.
     if (canaryCount === 0) {
       test.skip(true, "no semantic canary in this random session");
     }
 
-    // Case 2: Hidden canary — negative control
-    const hiddenCanary = page.locator("[data-fr-canary-id][aria-hidden='true']");
-    if (await hiddenCanary.count()) {
-      const markerSpan = hiddenCanary.locator("[data-fr-marker]").first();
-      const markerValue = await markerSpan.getAttribute("data-fr-marker");
-      expect(markerValue).toBeTruthy();
-      expect(ax).not.toContain(markerValue!);
-      await expect(hiddenCanary.first()).toHaveAttribute("aria-hidden", "true");
-      await expect(hiddenCanary.first()).toHaveAttribute("tabindex", "-1");
+    // Case 2 (plane-aware carrier shapes): every attached carrier is either
+    // an inert <template> (fragment content never attaches) or a lab-probe
+    // DIV intentionally rendered for AX exposure. Any THIRD shape is a
+    // violation.
+    for (let i = 0; i < canaryCount; i++) {
+      const tag = await canaryWrapper.nth(i).evaluate((node) => node.tagName);
+      expect(
+        tag,
+        "carrier must be an inert <template> or a lab-probe element"
+      ).toMatch(/^(TEMPLATE|DIV|SPAN)$/);
     }
 
-    // Case 3: Visible canary — positive control.
-    // Compare the <strong> heading text only: ariaSnapshot splits inline
-    // content (code/nonce) into separate nodes, so full-paragraph matching
-    // never succeeds against the node-form snapshot.
-    const visibleCanary = page.locator("[data-fr-canary-id]").filter({
-      hasNot: page.locator("[aria-hidden='true']"),
-    });
-    if (await visibleCanary.count()) {
-      const heading = visibleCanary.locator("strong").first();
-      const text = axNormalized((await heading.textContent()) ?? "");
-      expect(text).toBeTruthy();
-      expect(ax).toContain(text);
+    // Case 3 (negative control): nonce markers in NON-RENDERED positions
+    // (data-fr-marker attributes, inert template fragments) must never
+    // reach the AX snapshot. Visible lab-probe TEXT may legitimately be in
+    // the AX tree (that is the P01–P05 experimental condition) but a
+    // data-fr-marker attribute is a hidden-channel marker — its nonce must
+    // stay out of the AX tree in every plane.
+    const nonceMatches = Array.from(dom.matchAll(/data-fr-marker="([^"]+)"/g)).map((m) => m[1]);
+    for (const nonce of nonceMatches) {
+      expect(ax, `marker nonce must not appear in the AX tree`).not.toContain(nonce);
     }
-
     expect(dom).toContain("data-fr-canary-id");
   });
 
@@ -256,29 +279,37 @@ test.describe("deterministic canary controls", () => {
     // Navigate to the pinned session
     await page.goto(bindUrl(run));
 
-    // (1) DOM contains span[data-fr-canary="S09"][data-fr-marker].
-    // S09/P06 is non-rendered by design — assert EXISTENCE in DOM and
-    // hidden-from-viewport, never visibility.
-    const markerSpan = page.locator("span[data-fr-canary='S09'][data-fr-marker]");
-    await expect(markerSpan).toHaveCount(1);
-    await expect(markerSpan).toBeAttached();
-    await expect(markerSpan).toBeHidden();
+    // (1) The non-rendered carrier exists in the served HTML. Multi-spot
+    // fan-out wraps non-rendered lab carriers in an INERT <template> — its
+    // children live in a DocumentFragment, NOT the DOM tree, so they are
+    // un-attached by construction (strictly stronger than aria-hidden).
+    const html = await page.content();
+    expect(html).toContain('data-fr-canary="S09"');
+    expect(html).toMatch(/<template[^>]*>[\s\S]*data-fr-canary="S09"/);
 
-    // (2) wrapper has aria-hidden="true" and tabindex="-1"
-    const wrapper = page.locator("[data-fr-canary-id='S09']");
-    await expect(wrapper).toHaveAttribute("aria-hidden", "true");
-    await expect(wrapper).toHaveAttribute("tabindex", "-1");
+    // (2) Every ATTACHED carrier element is an inert <template>. The
+    // template ELEMENT itself attaches at head/body anchors, but its
+    // content lives in a DocumentFragment — it never participates in
+    // layout, the AX tree, or tab order. A non-template carrier (div/span)
+    // attached to the live DOM would be a real violation.
+    const carriers = page.locator("[data-fr-canary-id='S09']");
+    const carrierCount = await carriers.count();
+    expect(carrierCount, "multi-spot lab carriers present in served HTML").toBeGreaterThanOrEqual(1);
+    for (let i = 0; i < carrierCount; i++) {
+      const tag = await carriers.nth(i).evaluate((el) => el.tagName);
+      expect(tag, "S09 carrier must be an inert template, never a live wrapper").toBe("TEMPLATE");
+    }
 
-    // (3) Read the marker nonce from DOM at runtime and verify it is NOT in the AX snapshot
-    const nonceValue = await markerSpan.getAttribute("data-fr-marker");
-    expect(nonceValue).toBeTruthy();
+    // (3) The marker nonce must be absent from the AX snapshot. The nonce
+    // is derived server-side; grep it from the served HTML.
+    const nonceMatch = html.match(/data-fr-marker="([^"]+)"/);
+    expect(nonceMatch, "S09 marker carries a nonce").not.toBeNull();
     const ax = await page.locator("body").ariaSnapshot();
-    expect(ax).not.toContain(nonceValue!);
+    expect(ax).not.toContain(nonceMatch![1]);
 
-    // (4) covered by (1)'s toBeHidden — S09/P06 must never be visible.
+    // (4) covered: un-attached template content can never be visible.
 
-    // (5) tabindex="-1" is a sufficient proxy for non-appearance in tab order
-    //     (flaky to assert full tab-skip, so we rely on the attribute above)
+    // (5) covered: un-attached content has no tabindex at all.
   });
 
   // FIX FR-R5-041: Use the shared createPinnedRun helper and never skip.

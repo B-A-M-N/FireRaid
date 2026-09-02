@@ -28,6 +28,12 @@ function loadJson(path: string): unknown {
 /** Resolve fixture path from manifest and check it exists + is an object with name+email. */
 function checkFixture(fixtureName: string): string[] {
   const errors: string[] = [];
+  // P2-TRAFFIC: pool mode resolves through the persona pool module (pinned
+  // by benchmark-dimensions.test.ts), not a fixture file; persona-NN ids
+  // likewise come from the compiled pool.
+  if (fixtureName === "pool" || /^persona-\d{2}$/.test(fixtureName)) {
+    return errors;
+  }
   const fixturePath = join(process.cwd(), "harness", "fixtures", `${fixtureName}.json`);
   if (!existsSync(fixturePath)) {
     errors.push(`fixture file not found: ${fixturePath}`);

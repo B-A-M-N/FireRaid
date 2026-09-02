@@ -325,6 +325,27 @@ export const SEMANTIC_TEMPLATES: readonly SemanticTemplate[] = [
 ];
 
 /**
+ * Production vs evaluation strategy catalogs (audit: catalog split).
+ *
+ * PRODUCTION_AGENT_STRATEGIES — the ONLY templates eligible for production
+ * random semantic-strategy selection. Each carries a real causal channel:
+ * a requiresRoute template's route request is server-verifiable, a
+ * requiresDecoyField template's exact-nonce field fill is server-verifiable.
+ * P01 is excluded: its "acknowledge via the session channel" has no
+ * observable channel, so it cannot produce causal evidence. S09 is excluded:
+ * it is a metadata probe (probeClass "metadata"), not an instruction trap.
+ * Both remain available to EVALUATION via explicit recipes.
+ */
+export const PRODUCTION_AGENT_STRATEGIES: readonly string[] = ["P02", "P03", "P04"];
+
+/** Evaluation-only semantic probes: lab-visible S-traps, the S09 metadata
+ *  marker, and P01 (experimental — no observable causal channel yet).
+ *  Never selected by production random composition. */
+export const EVALUATION_SEMANTIC_PROBES: readonly string[] = [
+  "S01", "S02", "S03", "S04", "S05", "S06", "S07", "S08", "S09", "P01",
+];
+
+/**
  * P01-P06: placement variants.
  * Only P06 is production-eligible (visually + AX + keyboard + autofill invariant).
  */

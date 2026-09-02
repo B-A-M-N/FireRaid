@@ -54,11 +54,31 @@ The value is the combination.
 
 ## Known residuals (accepted, not hidden)
 
-- The profile-bound `fr_<hex>` decoy field name and the `/c/` route prefix
-  are recognizable to an adversary who knows FireRaid (session-specific but
-  not secret). Accepted in P1-23; production carriers otherwise carry no
-  FIXED greppable signature.
-- Semantic-instruction canaries are a LAB measurement mechanism only; the
-  production thesis is decoy-field + decoy-route + interaction (P1-23).
+- Decoy field names, element IDs, and route tokens are per-session random
+  hex tokens with no fixed prefix (the former `fr_<hex>` signature was
+  removed; production carriers carry no FireRaid-identifying attribute,
+  class, strategy ID, or route prefix — P1 opacity). An adversary who
+  knows FireRaid still knows the SHAPE of the defense (some hidden input
+  may exist, some same-origin probe route may exist) even though no
+  greppable signature survives; per-session values remain unpredictable.
+- The canary route prefix is operator-configured (`routes.canaryPrefix`),
+  but a route response is an observable origin behavior (distinct status
+  class for valid vs invalid tokens) an aware adversary could probe for.
+- Semantic-instruction canaries: the production composition DOES deploy
+  them (P02/P03/P04 as causal strategies via structurally inert carriers
+  invisible to humans), but semantic carry-out evidence is bounded by the
+  same unaware-vs-hardened-adversary gap as any prompt-injection channel —
+  the causal load-bearing channels remain the decoy route and the
+  exact-nonce field, which need no LLM compliance.
 - Efficacy against real autonomous agents is not yet established by a
   completed LLM pilot — see POST_FR_R7_STATUS.md ("STILL OPEN").
+- `CF-Connecting-IP` is a trusted input ONLY behind an edge that
+  overwrites it (Cloudflare). This is CODE-ENFORCED on the host middleware:
+  the route config carries `trustedIngress` ("cloudflare" | "direct"), and
+  the middleware reads the header ONLY under an explicit
+  `"cloudflare"` declaration — the default (`"direct"`, fail-closed) never
+  reads it, so a forged header cannot inject an IP into verification on a
+  non-Cloudflare origin. The Worker adapter may use it for rate
+  limiting / verification remoteip (the Worker IS behind the trusted edge
+  by construction). Origin-bypass protection (Internet must not reach the
+  origin directly) is FI network policy, not an application invariant.

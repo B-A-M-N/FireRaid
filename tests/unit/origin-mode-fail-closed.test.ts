@@ -39,12 +39,16 @@ function mustReject(over: Record<string, unknown>, needle: string) {
 }
 
 describe("P0-8/P0-9: origin-ledger condition validation (fail closed)", () => {
-  it("accepts the production-faithful condition set", () => {
+  it("accepts the production-faithful condition set (incl. PRODUCTION_DEFAULT)", () => {
     const result = validateManifest({
       ...BASE,
-      conditions: ["CONTROL", "PRODUCTION_FIELD", "PRODUCTION_ROUTE", "PRODUCTION_INTERACTION", "PRODUCTION_FULL"],
+      conditions: ["CONTROL", "PRODUCTION_DEFAULT", "PRODUCTION_FIELD", "PRODUCTION_ROUTE", "PRODUCTION_INTERACTION", "PRODUCTION_NONSEMANTIC_FULL"],
     });
     expect(result.ok).toBe(true);
+  });
+
+  it("P0-AUDIT-3: the legacy PRODUCTION_FULL name no longer validates anywhere", () => {
+    mustReject({ conditions: ["PRODUCTION_FULL"] }, "received 'PRODUCTION_FULL'");
   });
 
   it("rejects lab semantic conditions in origin-ledger mode", () => {

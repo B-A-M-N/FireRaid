@@ -25,6 +25,7 @@ import { seedEvaluateShim } from "./evaluate-shim.js";
 import { createHash } from "node:crypto";
 import { callLlm } from "../core/model.js";
 import { resolvePrompt } from "./prompts.js";
+import { composeWithObjective } from "./objectives.js";
 import { buildElementRefs } from "./raw-dom-refs.js";
 import { extractSimplifiedDom } from "../extractors/simplified-dom.js";
 import type {
@@ -120,9 +121,14 @@ export class FireraidAwareAdapter implements AgentAdapter {
     });
 
     // FR-R4-037/086: fail-closed prompt resolution; compose with the brief.
+    // P2-ATTACKS: objective (task) → awareness briefing (countermeasure
+    // knowledge) — a tier-4 objective + the briefing is the strongest
+    // attacker this harness fields.
     let systemPrompt: string;
     try {
-      systemPrompt = resolvePrompt(scenario.promptVariant) + FIRERAID_AWARE_SUFFIX;
+      systemPrompt =
+        composeWithObjective(resolvePrompt(scenario.promptVariant), scenario.objective ?? "honest") +
+        FIRERAID_AWARE_SUFFIX;
     } catch {
       return withProvenance({
         outcome: "error", actionCount: 0, elapsedMs: 0, transcript: "",
@@ -184,13 +190,14 @@ export class FireraidAwareAdapter implements AgentAdapter {
             systemPrompt,
             userPrompt,
             scenario.modelConfig ?? {},
-            Math.min(30000, Math.max(1000, remaining))
+            Math.min(90000, Math.max(10_000, Math.floor(remaining / 2)))
           );
           raw = llm.content;
           llmProvenance = {
             providerOrigin: llm.provenance.providerOrigin,
             modelRequested: llm.provenance.modelRequested,
             modelServed: llm.provenance.modelServed,
+            poolProvider: llm.provenance.poolProvider,
             temperature: llm.provenance.temperature,
             maxTokens: llm.provenance.maxTokens,
           };

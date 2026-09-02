@@ -21,12 +21,14 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  admit,
   makeCsrf,
   ReferenceSessionAdapter,
   ReferenceCanaryStore,
-  type MiddlewareDeps,
 } from "../../src/host-adapter/index.js";
+import {
+  admitEvaluation,
+  type EvaluationMiddlewareDeps,
+} from "../../src/eval/evaluation-middleware.js";
 import { ABLATION_RECIPES } from "../../src/core/profile.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
 
@@ -34,14 +36,14 @@ const SECRET = "host-canary-test-secret".padEnd(32, "x");
 
 const HTML = '<html><body><form id="signup-form"></form></body></html>';
 
-function deps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
+function deps(over: Partial<EvaluationMiddlewareDeps> = {}): EvaluationMiddlewareDeps {
   return {
     secret: SECRET,
     version: 1,
     upstreamRegisterUrl: "http://upstream.invalid/api/register",
     session: new ReferenceSessionAdapter(SECRET),
     render: { inject: (h) => h },
-    verification: { verify: async () => true },
+    verification: { verificationMode: "host-owned" as const, verify: async () => true },
     telemetry: {
       accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
       collect: async () => [],
@@ -49,12 +51,15 @@ function deps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
     enforcement: { allow: async () => true, deny: () => {} },
     canaryStore: new ReferenceCanaryStore(),
     labMode: false,
-    recipe: ABLATION_RECIPES.PRODUCTION_FULL,
+    // These tests assert the fail-closed posture (non-ACCEPT never
+    // forwards) — the enforcement mode, not advisory's forward-and-annotate.
+    enforcementMode: "enforcement",
+    recipe: ABLATION_RECIPES.PRODUCTION_NONSEMANTIC_FULL,
     ...over,
   };
 }
 
-async function issueSessionCookie(d: MiddlewareDeps): Promise<string> {
+async function issueSessionCookie(d: EvaluationMiddlewareDeps): Promise<string> {
   const sid = await d.session.createSession();
   return d.session.sessionCookie(sid);
 }
@@ -66,11 +71,11 @@ describe("host canary route (audit item 6)", () => {
     const sid = decodeSessionId(cookie);
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
-      ABLATION_RECIPES.PRODUCTION_FULL
+      ABLATION_RECIPES.PRODUCTION_NONSEMANTIC_FULL
     );
     const token = profile.decoyRoute!.endpointToken;
 
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request(`http://mw/c/${token}`, { headers: { cookie } }),
       d,
       async () => HTML
@@ -79,7 +84,7 @@ describe("host canary route (audit item 6)", () => {
     expect(await d.canaryStore!.readVerified(sid)).toBe(true);
 
     // Idempotent replay: still verified, no error.
-    const replay = await admit(
+    const replay = await admitEvaluation(
       new Request(`http://mw/c/${token}`, { headers: { cookie } }),
       d,
       async () => HTML
@@ -92,7 +97,7 @@ describe("host canary route (audit item 6)", () => {
     const cookie = await issueSessionCookie(d);
     const sid = decodeSessionId(cookie);
 
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request("http://mw/c/000000000000", { headers: { cookie } }),
       d,
       async () => HTML
@@ -106,7 +111,7 @@ describe("host canary route (audit item 6)", () => {
     const d = deps({ recipe: ABLATION_RECIPES.DECOY_FIELD_ONLY });
     const cookie = await issueSessionCookie(d);
 
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request("http://mw/c/anything", { headers: { cookie } }),
       d,
       async () => HTML
@@ -119,7 +124,7 @@ describe("host canary route (audit item 6)", () => {
     const d = deps();
     // A structurally valid envelope with a forged body + forged signature:
     // verification must reject it (BAD_SIGNATURE → null → NO_SESSION).
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request("http://mw/c/sometoken", {
         headers: { cookie: "__Host-fr_sid=fr1.Zm9yZ2Vk.Zm9yZ2Vk" },
       }),
@@ -137,12 +142,12 @@ describe("host canary route (audit item 6)", () => {
     const sid = decodeSessionId(cookie);
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
-      ABLATION_RECIPES.PRODUCTION_FULL
+      ABLATION_RECIPES.PRODUCTION_NONSEMANTIC_FULL
     );
     const token = profile.decoyRoute!.endpointToken;
     store.failStore = true;
 
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request(`http://mw/c/${token}`, { headers: { cookie } }),
       d,
       async () => HTML
@@ -151,10 +156,15 @@ describe("host canary route (audit item 6)", () => {
     expect(res.disposition).toBe("CANARY_PERSIST_FAILED");
   });
 
-  it("without a canaryStore, a /c/ GET is NOT a canary probe (prior behavior)", async () => {
-    const d = deps({ canaryStore: undefined });
-    const res = await admit(new Request("http://mw/c/whatever"), d, async () => HTML);
-    expect(res.kind).toBe("get"); // signup injection, as before
+  it("missing canaryStore on the dispatch path FAILS CLOSED (deny, never fall through to signup)", async () => {
+    // P0 route-evidence capability: the production factory refuses a
+    // canary-less config at startup; if the store is nonetheless absent on
+    // the request path, a /c/ probe must DENY — a route hit must never be
+    // silently reinterpreted as the application page.
+    const d = deps({ canaryStore: undefined }) as unknown as EvaluationMiddlewareDeps;
+    const res = await admitEvaluation(new Request("http://mw/c/whatever"), d, async () => HTML);
+    expect(res.kind).toBe("deny");
+    expect((res as { disposition?: string }).disposition).toBe("NO_ROUTE_STORE");
   });
 
   it("POST after a verified probe → Class-A route evidence → QUARANTINE", async () => {
@@ -163,12 +173,12 @@ describe("host canary route (audit item 6)", () => {
     const sid = decodeSessionId(cookie);
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
-      ABLATION_RECIPES.PRODUCTION_FULL
+      ABLATION_RECIPES.PRODUCTION_NONSEMANTIC_FULL
     );
     const token = profile.decoyRoute!.endpointToken;
 
     // Probe first (the attacker behavior the route detects)...
-    const probe = await admit(
+    const probe = await admitEvaluation(
       new Request(`http://mw/c/${token}`, { headers: { cookie } }),
       d,
       async () => HTML
@@ -178,7 +188,7 @@ describe("host canary route (audit item 6)", () => {
     // ...then submit through the same session. Full-decoy-field fill, no
     // telemetry — the route hit ALONE must drive QUARANTINE (weight 100).
     const csrf = await makeCsrf(SECRET, sid);
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request("http://mw/signup", {
         method: "POST",
         headers: { cookie, "content-type": "application/json" },
@@ -217,7 +227,7 @@ describe("urlencoded form-post carrier (P1-AUDIT-2 Phase F)", () => {
       email: "formcarrier@ledger-probe.invalid",
       ...(profile.decoyField ? { [profile.decoyField.fieldName]: "" } : {}),
     }).toString();
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request("http://mw/signup", {
         method: "POST",
         headers: {
@@ -241,7 +251,7 @@ describe("urlencoded form-post carrier (P1-AUDIT-2 Phase F)", () => {
       name: "Q",
       email: "x@ledger-probe.invalid",
     }).toString();
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request("http://mw/signup", {
         method: "POST",
         headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
@@ -260,7 +270,7 @@ describe("urlencoded form-post carrier (P1-AUDIT-2 Phase F)", () => {
     const sid = decodeSessionId(cookie);
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
-      ABLATION_RECIPES.PRODUCTION_FULL
+      ABLATION_RECIPES.PRODUCTION_NONSEMANTIC_FULL
     );
     const csrf = await makeCsrf(SECRET, sid);
     // Omnivore carrier: decoy field populated (whatever value — the fill
@@ -272,7 +282,7 @@ describe("urlencoded form-post carrier (P1-AUDIT-2 Phase F)", () => {
       email: "fill@ledger-probe.invalid",
       [profile.decoyField!.fieldName]: "some-filled-value",
     }).toString();
-    const res = await admit(
+    const res = await admitEvaluation(
       new Request("http://mw/signup", {
         method: "POST",
         headers: { cookie, "content-type": "application/x-www-form-urlencoded" },

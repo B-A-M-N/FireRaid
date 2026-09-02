@@ -108,8 +108,20 @@ export async function runRetentionSweep(
     .bind(cutoff)
     .run();
   results.submissionEvidence = r4.meta?.changes ?? 0;
+  // A submission is deletable only when nothing references it: evidence
+  // (FK on submissions.id) and review rows (FK on submissions.public_id —
+  // review-queue entries pin their submission until the entry itself is
+  // swept). NOT EXISTS, not NOT IN: public_id is TEXT while id is INTEGER,
+  // and a NOT IN across mismatched types never excludes anything.
   const r5 = await db
-    .prepare(boundedWhere("submissions", "created_at < ?"))
+    .prepare(
+      boundedWhere(
+        "submissions",
+        `created_at < ?
+         AND NOT EXISTS (SELECT 1 FROM submission_evidence WHERE submission_id = submissions.id)
+         AND NOT EXISTS (SELECT 1 FROM review_queue WHERE public_id = submissions.public_id)`
+      )
+    )
     .bind(cutoff)
     .run();
   results.submissions = r5.meta?.changes ?? 0;
@@ -123,7 +135,8 @@ export async function runRetentionSweep(
        AND NOT EXISTS (SELECT 1 FROM verification_attempts WHERE session_id = sessions.id)
        AND NOT EXISTS (SELECT 1 FROM submissions WHERE session_id = sessions.id)
        AND NOT EXISTS (SELECT 1 FROM session_metrics WHERE session_id = sessions.id)
-       AND NOT EXISTS (SELECT 1 FROM lab_runs WHERE session_id = sessions.id)`;
+       AND NOT EXISTS (SELECT 1 FROM lab_runs WHERE session_id = sessions.id)
+       AND NOT EXISTS (SELECT 1 FROM review_queue WHERE session_id = sessions.id)`;
   const r6 = await db
     .prepare(
       boundedWhere(

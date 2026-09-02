@@ -19,8 +19,13 @@ This document is generated from that file — regenerate, never hand-edit drift.
 
 Key facts this table corrects from older revisions:
 
-- **S01–S08 are all lab-only** (`labOnly: true`). Only S09 can appear in a
-  production-eligible profile, and only at placement P06.
+- **S01–S08 are all lab-only** (`labOnly: true`). S09 is `labOnly: false`
+  but is a metadata marker, not an instruction trap — production random
+  composition does not select it. Within the S-series, only S09 at
+  placement P06 can appear in a production profile.
+- **Production instruction traps live in the P-series** (P02/P03/P04,
+  `partition: "production"`): these are the templates the production
+  random path draws (`PRODUCTION_AGENT_STRATEGIES`). See the next section.
 - **S06 is mode-dependent**: in `decoy` mode it names the decoy field; in
   `observe`/`handoff` mode it renders the corresponding S01/S02 wording.
 - **S09 is not a semantic canary** (`probeClass: "metadata"`) — a hidden DOM
@@ -30,6 +35,36 @@ Key facts this table corrects from older revisions:
 - Templates S04/S05/S08 require a canary route; S06 requires a decoy field.
   The renderer provisions these from the profile's `decoyRoute`/`decoyField`
   projections (there is no aggregate `profile.decoy` object).
+
+## Production Semantic Strategies (P01–P04)
+
+Production-safe instruction traps (`labOnly: false`, partition
+`production`, placement P06 — invisible to humans, intact for an
+HTML-reading agent):
+
+| ID | Causal channel | Requires | Server-verifiable evidence |
+|----|----------------|----------|----------------------------|
+| P01 | none (metadata acknowledgment) | — | **none — excluded from production random selection** (no observable channel) |
+| P02 | decoy route request | route | CANARY_ROUTE_MATCH (Class A, weight 100) |
+| P03 | exact-nonce decoy-field fill | decoy field | DECOY_FIELD_MATCHES_NONCE (Class A/B via scoring) |
+| P04 | route + field (independent pair) | route + decoy field | both channels above |
+
+`PRODUCTION_AGENT_STRATEGIES = ["P02", "P03", "P04"]` — the ONLY templates
+the production random composition draws as the causal semantic strategy.
+The composition ALSO guarantees at least one independent trap layer beyond
+the strategy's own dependency (DiD): a single deterministic seed chooses
+strategy (semantic-strategy domain), companions, and the independent layer
+(composition domain) per session, so two sessions never share a full
+treatment. P01 and the S-probes remain available to EVALUATION via explicit
+recipes only.
+
+Production rendering: instruction carriers are STRUCTURALLY INERT channels
+(bare `<template>` elements, `<meta name="verification-context">` markers,
+HTML comments) with no FireRaid-identifying attribute, class, or strategy
+ID anywhere in the markup (P1 opacity). Carriers that can carry the full
+action (route/field material) are FULL-ACTION; meta/comment channels carry
+MARKER-only material (session context + nonce — detectable exposure, never
+counted as another complete trap).
 
 ## Placements
 

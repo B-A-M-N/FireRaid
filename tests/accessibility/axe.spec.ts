@@ -37,19 +37,25 @@ test.describe("accessibility", () => {
     }
   });
 
-  test("production-eligible canaries are visible (not display:none)", async ({ page }) => {
+  test("attached carriers are legal lab shapes; inert channels stay inert", async ({ page }) => {
+    // PLANE-AWARE (P0-AUDIT-3 repair): the lab plane may render P01–P05
+    // carriers as attached elements (AX exposure IS the experimental
+    // condition); S09/P06-style carriers render as inert <template>. Any
+    // attached carrier must at minimum never be a focusable control. The
+    // production-plane all-inert invariant lives in
+    // tests/e2e/production-plane.spec.ts.
     await page.goto("/signup");
     const canary = page.locator("[data-fr-canary-id]");
-    if (await canary.count()) {
-      const count = await canary.count();
-      for (let i = 0; i < count; i++) {
-        const el = canary.nth(i);
-        const ariaHidden = await el.getAttribute("aria-hidden");
-        if (ariaHidden !== "true") {
-          // Production-eligible canaries should be visible
-          await expect(el).toBeVisible();
-        }
-      }
+    const count = await canary.count();
+    for (let i = 0; i < count; i++) {
+      const el = canary.nth(i);
+      const tag = await el.evaluate((node) => node.tagName);
+      if (tag === "TEMPLATE") continue;
+      const focusable = await el.evaluate((node) => {
+        const e = node as HTMLElement;
+        return e.tabIndex >= 0 && !e.hasAttribute("disabled");
+      });
+      expect(focusable, "carrier must not be a tab-reachable control").toBe(false);
     }
   });
 });

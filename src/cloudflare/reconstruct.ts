@@ -14,7 +14,6 @@
 import type { DefenseRecipe } from "../core/recipe-schema.js";
 import type { ReconstructionResult } from "../core/reconstruct.js";
 import type { Env } from "../env.js";
-import type { LoadedSession } from "./session.js";
 
 /**
  * Cloudflare-specific reconstruction: loads session from D1, resolves secret,
@@ -40,21 +39,19 @@ export async function reconstructFromSessionId(
   // Lazily import to avoid a circular module-graph edge between core and
   // the Cloudflare session adapter (the adapter already imports core types).
   const { loadSession } = await import("./session.js");
+  const { reconstructIssuedProfile: reconstruct } = await import("../core/reconstruct.js");
   const loaded = await loadSession(env.DB, sessionId);
   if (!loaded) {
     return { ok: false, code: "DERIVATION_FAILED", detail: "session not found" };
   }
-  return {
-    ok: true,
-    profile: (await import("../core/reconstruct.js")).reconstructIssuedProfile(
-      env,
-      {
-        id: sessionId,
-        profileVersion: opts?.profileVersion ?? loaded?.profileVersion,
-        profileKeyId: loaded?.profileKeyId ?? null,
-      },
-      opts?.recipe,
-      { holdoutMode: opts?.holdoutMode, turnstileRequired: opts?.turnstileRequired }
-    ),
-  };
+  return reconstruct(
+    env,
+    {
+      id: sessionId,
+      profileVersion: opts?.profileVersion ?? loaded.profileVersion,
+      profileKeyId: loaded.profileKeyId ?? null,
+    },
+    opts?.recipe,
+    { holdoutMode: opts?.holdoutMode, turnstileRequired: opts?.turnstileRequired }
+  );
 }

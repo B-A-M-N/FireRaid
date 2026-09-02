@@ -33,13 +33,13 @@ import {
   ensureSessionRow,
 } from "../cloudflare/session-envelope.js";
 import { loadSession } from "../cloudflare/session.js";;
-import { getPolicy } from "../core/decision.js";
+import { getPolicyOrThrow } from "../core/decision.js";
 import { reconstructIssuedProfile } from "../core/reconstruct.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
 import { readLabAssignment, type LabAssignment } from "../core/lab-assignment.js";
 import { checkCsrf } from "../security/csrf.js";
 import { defaultVerificationProvider } from "../turnstile/verify.js";
-import { correlate, type ObservationSet } from "../core/correlation.js";
+import { correlate, deriveCanaryReference, type ObservationSet } from "../core/correlation.js";
 import { decide } from "../core/decision.js";
 import { MAX_SUBMIT_BODY_BYTES } from "../types/telemetry.js";
 import { isLabMode } from "../env.js";
@@ -48,7 +48,7 @@ import {
   ingestTelemetryBatch,
   type ValidatedEvent,
 } from "./telemetry.js";
-import { aggregateSessionTelemetry, loadSessionMetrics, mergeSessionMetrics, type SessionMetricsRead } from "../telemetry/aggregate.js";
+import { aggregateSessionTelemetry, loadSessionMetrics, mergeSessionMetrics, type SessionMetricsRead } from "../cloudflare/session-metrics.js";
 import { validateSignupForm } from "../security/request-validation.js";
 import type { TelemetryMetrics } from "../telemetry/aggregate.js";
 import { D1SubmissionFinalizer } from "../cloudflare/session-store.js";
@@ -292,6 +292,14 @@ export async function submit(req: Request, env: Env): Promise<Response> {
     }
   }
 
+  // Server-derived canary reference: an agent that pasted the semantic trap
+  // text (nonce) into a VISIBLE field is reproducing hidden instruction
+  // material — server-verifiable behavioral evidence. (The decoy field's
+  // own fill has its own, stronger evidence path.)
+  if (profile.semantic && deriveCanaryReference(profile, form)) {
+    observations.semanticNonceEcho = true;
+  }
+
   // 9. inspect canary evidence (causal hits recorded during this session)
   // FR-R7-020: skipped entirely when the profile has no decoyRoute.
   // P1-9: the verified-hit boolean is compacted onto the session row at hit
@@ -435,8 +443,10 @@ export async function submit(req: Request, env: Env): Promise<Response> {
 
   // 11. correlate + decide
   // FR-R6-017: the profile's OWN scoring policy decides — strict-v1 and
-  // permissive-v1 are real treatments, not labels.
-  const policy = getPolicy(profile.scoringPolicy);
+  // permissive-v1 are real treatments, not labels. STRICT lookup: an unknown
+  // policy name is a configuration/derivation error, never a silent
+  // default-v1 score (the profile and the decision plane must agree).
+  const policy = getPolicyOrThrow(profile.scoringPolicy);
   const evidence = await correlate(profile, observations);
   const decision = decide(evidence, policy);
 
@@ -452,7 +462,6 @@ export async function submit(req: Request, env: Env): Promise<Response> {
       publicId,
       sessionId,
       createdAt: Date.now(),
-      // FR-P0-16: reality, not a constant — false when no challenge ran.
       // FR-P0-16: reality, not a constant — false when no challenge ran.
       turnstileOk: verificationProvider !== "none",
       verificationProvider,
@@ -494,32 +503,40 @@ export async function submit(req: Request, env: Env): Promise<Response> {
  * Production clients see only workflow state, never the real disposition
  * or risk score.
  */
-function projectFinalized(env: Env, disposition: string, score: number, alreadySubmitted: boolean): Response {
+export function projectFinalized(env: Env, disposition: string, score: number, alreadySubmitted: boolean): Response {
   if (isLabMode(env)) {
     return json({ status: "received", disposition, score, alreadySubmitted });
   }
-  const workflowState = disposition === "ACCEPT" ? "ACCEPT" : "REVIEW";
-  return json({ status: "received", disposition: workflowState, alreadySubmitted });
+  // Audit item 24 (applicant opacity): production NEVER reveals the internal
+  // disposition — FI reviews every application manually anyway, so an
+  // ACCEPT/REVIEW differential would let an autonomous agent iterate on its
+  // own submissions and learn the defenses. Every valid submission sees the
+  // same neutral receipt.
+  return json({ status: "received", message: "Submission received.", alreadySubmitted });
 }
 
 /**
  * Project decision response based on environment (FR-R2-004).
+ *
+ * Audit item 24: the production surface is the neutral receipt regardless of
+ * the core decision, the advisory-forward disposition, or the risk projection.
+ * Lab mode keeps full internal state for the harness.
  */
-function projectDecisionResponse(env: Env, decision: { disposition: string; score: number; signals: unknown[]; reasons: string[] }): Response {
+export function projectDecisionResponse(
+  env: Env,
+  decision: { disposition: string; score: number; signals: unknown[]; reasons: string[] },
+  runtimeDisposition?: string,
+  risk?: { tier: string; confidence: string; recommendedAction: string }
+): Response {
   if (isLabMode(env)) {
     return json({
       status: "received",
-      disposition: decision.disposition,
+      disposition: runtimeDisposition ?? decision.disposition,
       score: decision.score,
-    });
-  } else {
-    // Production: only expose workflow state
-    const workflowState = decision.disposition === "ACCEPT" ? "ACCEPT" : "REVIEW";
-    return json({
-      status: "received",
-      disposition: workflowState,
+      risk,
     });
   }
+  return json({ status: "received", message: "Submission received." });
 }
 
 /**

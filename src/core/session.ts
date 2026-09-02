@@ -194,6 +194,47 @@ export function resolveProfileKey(
 const KEY_ID_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
 const MIN_KEY_SECRET_BYTES = 32;
 
+/**
+ * AUDIT (P1 key ring): validate a ProfileKeyRing OBJECT at factory/startup
+ * — current id format, minimum secret lengths, no duplicate ids, no
+ * current-in-previous overlap. Returns null when valid, else an error
+ * string. Strictly structural (no env parsing): the middleware factory and
+ * any host-owned wiring call this before accepting a configuration.
+ */
+export function validateKeyRing(ring: ProfileKeyRing): string | null {
+  if (!ring || typeof ring !== "object") return "ring must be an object";
+  const { current, previous } = ring;
+  if (!current || typeof current.id !== "string" || typeof current.secret !== "string") {
+    return "current key must carry string id + secret";
+  }
+  if (!KEY_ID_PATTERN.test(current.id)) {
+    return `current key id is malformed: "${current.id}"`;
+  }
+  if (new TextEncoder().encode(current.secret).length < MIN_KEY_SECRET_BYTES) {
+    return `current key secret must be at least ${MIN_KEY_SECRET_BYTES} bytes`;
+  }
+  if (previous !== undefined) {
+    if (typeof previous !== "object" || previous === null || Array.isArray(previous)) {
+      return "previous must be an object of {id: secret}";
+    }
+    for (const [id, secret] of Object.entries(previous)) {
+      if (!KEY_ID_PATTERN.test(id)) {
+        return `previous contains a malformed key id: "${id}"`;
+      }
+      if (typeof secret !== "string") {
+        return `previous["${id}"] is not a string`;
+      }
+      if (new TextEncoder().encode(secret).length < MIN_KEY_SECRET_BYTES) {
+        return `previous["${id}"] must be at least ${MIN_KEY_SECRET_BYTES} bytes`;
+      }
+      if (id === current.id) {
+        return `previous must not contain the current key id ("${current.id}")`;
+      }
+    }
+  }
+  return null;
+}
+
 export function validateProfileKeyRing(env: {
   FIRERAID_PROFILE_SECRET: string;
   FIRERAID_PROFILE_KEY_CURRENT_ID?: string;

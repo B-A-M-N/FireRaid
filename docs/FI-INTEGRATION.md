@@ -26,15 +26,47 @@ FI signup POST
     └── FireRaid evidence
             │
             ▼
-    ACCEPT / REVIEW / VERIFY / QUARANTINE
+    admission decision (see "Decision layers" below)
 ```
+
+## Decision layers
+
+FireRaid's admission output has THREE distinct layers. Integrators should not
+collapse them into one enum:
+
+1. **Core disposition** — the engine's verdict on the evidence record
+   (`src/types/event.ts`):
+   `ACCEPT | REVIEW | QUARANTINE | REJECT_TURNSTILE | INVALID_SESSION`.
+   This is the causal-evidence verdict. There is no "VERIFY" disposition:
+   "verify the applicant further" is a HOST workflow action, expressed
+   through the risk tier's recommended action, not a core verdict.
+
+2. **Risk tier + recommended action** — `projectRisk` maps the evidence
+   score to a tier (`LOW / ELEVATED / HIGH / CAUSAL`) with a
+   `recommendedAction` (`CONTINUE / MANUAL_REVIEW / SUPPRESS_AUTO_APPROVAL
+   / QUARANTINE`). This is advisory guidance for the host's workflow; it
+   does not itself block the request.
+
+3. **Runtime (enforcement) disposition** — `resolveRuntimeDisposition`
+   combines the core disposition with the host's enforcement mode:
+   - `advisory` mode → always `ACCEPT` (log only)
+   - `enforcement` mode → auto-suppress tiers become `QUARANTINE`
+   - `review` mode (and non-auto-suppress enforcement tiers) → core
+     verdict, with `QUARANTINE` downgraded to `REVIEW`
+   This is what the admission hook actually receives at request time.
 
 ## Recommended Production Behavior
 
-- **Class A causal evidence** → verification/review queue (not permanent ban)
-- **Turnstile failure** → retry/reject
-- **Weak behavior only** → log or request extra verification
-- **Nothing interesting** → normal signup
+Map the runtime disposition (layer 3), informed by the tier (layer 2):
+
+- **Class A causal evidence** (core `REVIEW`/`QUARANTINE`, tier `CAUSAL`)
+  → host-side verification/review queue (extra verification step, manual
+  approval) — not a permanent ban
+- **Turnstile failure** (`REJECT_TURNSTILE`) → retry/reject
+- **Invalid session** (`INVALID_SESSION`) → reject and reissue
+- **Weak behavior only** (tier `ELEVATED`/`HIGH`) → log or request extra
+  verification
+- **Nothing interesting** (`ACCEPT`, tier `LOW`) → normal signup
 
 ## What FI Needs to Provide
 
@@ -42,7 +74,8 @@ FI signup POST
 2. A CSRF secret (`FIRERAID_CSRF_SECRET`) — 64-char hex
 3. Turnstile credentials (or use FireRaid's)
 4. A session store (or use FireRaid's cookie-based sessions)
-5. An admission hook that respects FireRaid's disposition
+5. An admission hook that respects FireRaid's runtime disposition
+   (layer 3 above), consulting the recommended action (layer 2)
 
 ## What FI Does NOT Need
 

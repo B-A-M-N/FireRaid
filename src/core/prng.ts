@@ -1,13 +1,39 @@
 /**
  * FR-INV-002: Deterministic profile engine.
  *
- * seed = HMAC-SHA256(profile_secret, profile_version || ":" || session_id)
- * Then expand seed via HKDF-like byte stream to drive deterministic selections.
+ * root = HMAC-SHA256(profile_secret, profile_version || ":" || session_id)
+ * Every randomized dimension of the profile draws from its OWN domain:
+ * PRF(root, domain) → SeedStream. Adding (or reordering) a draw inside one
+ * domain can never shift another domain's artifacts — the golden invariants
+ * in tests/unit/prng-domains.test.ts pin this: changing the spot algorithm
+ * leaves the field name, route token, and nonce unchanged.
+ *
  * FIX: 32-bit counter to prevent wrap (FR-038).
  * FIX: Handle 32-bit mask edge case in nextInt (FR-039).
  */
 
 const enc = new TextEncoder();
+
+/**
+ * The complete domain vocabulary. ONE enumeration: a dimension joins the
+ * domain-separated regime by adding its name here and deriving its stream
+ * with domainStream(root, ...). Docs (ARCHITECTURE.md "domain-separated
+ * PRF") describe exactly this list — keep them in sync.
+ */
+export const PRNG_DOMAINS = [
+  "composition",
+  "semantic-strategy",
+  "semantic-wording",
+  "semantic-form",
+  "semantic-nonce",
+  "semantic-spots",
+  "field-name",
+  "field-element",
+  "route-token",
+  "telemetry-mask",
+] as const;
+
+export type PrngDomain = (typeof PRNG_DOMAINS)[number];
 
 export async function deriveSeed(
   secret: string,
@@ -25,7 +51,31 @@ export async function deriveSeed(
   return crypto.subtle.sign("HMAC", key, data);
 }
 
-/** Deterministic byte stream from seed — HKDF-expand style generator. */
+/**
+ * Derive ONE dimension's independent stream: PRF(root, domain). The domain
+ * label is length-prefixed into the HMAC input so labels can never collide
+ * across concatenation ("ab"+"c" vs "a"+"bc").
+ */
+export async function domainStream(
+  root: ArrayBuffer,
+  domain: PrngDomain
+): Promise<SeedStream> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    root,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const label = enc.encode(domain);
+  const input = new Uint8Array(4 + label.byteLength);
+  new DataView(input.buffer).setUint32(0, label.byteLength, false);
+  input.set(label, 4);
+  const sub = await crypto.subtle.sign("HMAC", key, input);
+  return new SeedStream(sub);
+}
+
+/** Deterministic byte stream from a domain seed — HKDF-expand style. */
 export class SeedStream {
   private counter = 0;
   private buffer: Uint8Array = new Uint8Array(0);

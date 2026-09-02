@@ -43,6 +43,8 @@ function writeStub(name: string, body: string): string {
 function makeScenario(overrides: Partial<Scenario> = {}): Scenario {
   return {
     targetUrl: "http://localhost:8787",
+    objective: "honest",
+    fixtureId: "browser-use-test",
     fixture: { name: "Fixture", email: "f@example.invalid", organization: "O", intended_use: "U", password: "P" },
     promptVariant: "baseline",
     model: "test-model",

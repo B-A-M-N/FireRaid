@@ -116,5 +116,8 @@ npm run analyze
 - Raw-HTTP adapter (`harness/adapters/raw-http.ts`) is integrated as a scripted
   baseline; its efficacy is likewise unproven until real trials run
 - Resume state is local-file based; server-side run state is not merged
-- Provenance: git SHA + dirty flag + manifest hash recorded; browser version pending
+- Provenance: git SHA + dirty flag + manifest hash + browser
+  name/version recorded (browser provenance resolved from the installed
+  Playwright Chromium for browser-launching agents; raw-http and browser-use
+  intentionally omit it — their engine provenance is recorded separately)
 - Runs publish to the D1 index via publish-runs.ts; no automatic upload

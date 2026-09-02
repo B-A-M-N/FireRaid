@@ -10,7 +10,7 @@ import { signup } from "./routes/signup.js";
 import { submit } from "./routes/submit.js";
 import { canary } from "./routes/canary.js";
 import { events } from "./routes/telemetry.js";
-import { adminLogin, adminSummary, adminSessions, adminSessionDetail, adminExperiments, adminExperimentDetail, adminExport, adminLogout, adminCleanup } from "./routes/admin.js";
+import { adminLogin, adminSummary, adminSessions, adminSessionDetail, adminExperiments, adminExperimentDetail, adminExport, adminLogout, adminCleanup, adminReviewDecision } from "./routes/admin.js";
 import { createLabRun, getLabRun, ingestLabRuns, postLabRunOutcome, expireStaleLabRuns } from "./routes/lab.js";
 import { error, html } from "./security/headers.js";
 import { readAdminHtml } from "./core/static.js";
@@ -46,24 +46,38 @@ function validateConfig(env: Env): string | null {
 
   // Production-specific restrictions
   if (!isLabMode(env)) {
-    // Production: reject known test sitekeys
-    if (env.TURNSTILE_SITE_KEY && looksLikeTestSiteKey(env.TURNSTILE_SITE_KEY)) {
-      return "Production LAB_MODE=false but TURNSTILE_SITE_KEY looks like a test key";
-    }
+    // P1 (P0-AUDIT-3 follow-up): the ONLY way a LAB_MODE=false deployment may
+    // run without Turnstile is the explicit local-test opt-in — an env var a
+    // real deployment never sets. This keeps release-test infrastructure off
+    // developers' .dev.vars.production files (the review's P1 item) without
+    // weakening real production: absent the flag, production still requires
+    // real credentials.
+    if (env.TURNSTILE_MODE === "disabled-test") {
+      // Local production-shape testing: Turnstile OFF. Any real credential
+      // configured alongside the flag is a configuration mistake.
+      if (env.TURNSTILE_SITE_KEY || env.TURNSTILE_SECRET_KEY) {
+        return "TURNSTILE_MODE=disabled-test forbids TURNSTILE_SITE_KEY/TURNSTILE_SECRET_KEY";
+      }
+    } else {
+      // Production: reject known test sitekeys
+      if (env.TURNSTILE_SITE_KEY && looksLikeTestSiteKey(env.TURNSTILE_SITE_KEY)) {
+        return "Production LAB_MODE=false but TURNSTILE_SITE_KEY looks like a test key";
+      }
 
-    // Production: reject known test secrets
-    if (env.TURNSTILE_SECRET_KEY && looksLikeTestSecret(env.TURNSTILE_SECRET_KEY)) {
-      return "Production LAB_MODE=false but TURNSTILE_SECRET_KEY looks like a test secret";
-    }
+      // Production: reject known test secrets
+      if (env.TURNSTILE_SECRET_KEY && looksLikeTestSecret(env.TURNSTILE_SECRET_KEY)) {
+        return "Production LAB_MODE=false but TURNSTILE_SECRET_KEY looks like a test secret";
+      }
 
-    // Production: require TURNSTILE_EXPECTED_HOSTNAME
-    if (!env.TURNSTILE_EXPECTED_HOSTNAME) {
-      return "Production requires TURNSTILE_EXPECTED_HOSTNAME";
-    }
+      // Production: require TURNSTILE_EXPECTED_HOSTNAME
+      if (!env.TURNSTILE_EXPECTED_HOSTNAME) {
+        return "Production requires TURNSTILE_EXPECTED_HOSTNAME";
+      }
 
-    // Production: require Turnstile to be enabled
-    if (!env.TURNSTILE_SITE_KEY || !env.TURNSTILE_SECRET_KEY) {
-      return "Production requires both TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY";
+      // Production: require Turnstile to be enabled
+      if (!env.TURNSTILE_SITE_KEY || !env.TURNSTILE_SECRET_KEY) {
+        return "Production requires both TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY";
+      }
     }
   }
 
@@ -144,12 +158,32 @@ export default {
     const path = url.pathname;
 
     try {
-      // Public
+      // ═══════════════════════════════════════════════════════════════════
+      // PRODUCT SURFACE
+      // What a real FireRaid deployment (origin middleware) serves:
+      //   /health GET         — health probe
+      //   /signup GET         — enrollment page (injects lab bind token when lab-mode)
+      //   /api/submit POST    — user submission (evaluate via profile/recipe)
+      //   /api/events POST    — telemetry
+      //   /c/* GET/POST       — canary hit endpoint
+      //   /admin review READ  — admin review-queue READ (read annotations in production)
+      //
+      // A production FireRaid deployment uses the middleware factory
+      // (createFireRaidMiddleware from src/host-adapter/) as its entry.
+      // This Cloudflare Worker IS the evaluation fixture, but these routes
+      // constitute the product surface shared with origin deployments.
+      // ═══════════════════════════════════════════════════════════════════
+
+      // Health
       if (path === "/health" && req.method === "GET") return health(req, env);
+
+      // Signup
       if (path === "/signup" && req.method === "GET") return signup(req, env, ctx);
 
-      // API
+      // Submit
       if (path === "/api/submit" && req.method === "POST") return submit(req, env);
+
+      // Telemetry
       if (path === "/api/events" && req.method === "POST") return events(req, env);
 
       // Canary
@@ -157,24 +191,45 @@ export default {
         return canary(req, env);
       }
 
-      // Admin API
+      // Admin auth (product-agnostic — needed for review-queue reads below)
       if (path === "/api/admin/login" && req.method === "POST") return adminLogin(req, env);
       if (path === "/api/admin/logout" && req.method === "POST") return adminLogout(req, env);
+
+      // Admin summary / sessions (product read surfaces)
       if (path === "/api/admin/summary" && req.method === "GET") return adminSummary(req, env);
       if (path === "/api/admin/sessions" && req.method === "GET") return adminSessions(req, env);
-      if (path === "/api/admin/experiments" && req.method === "GET") return adminExperiments(req, env);
-      if (path === "/api/admin/export" && req.method === "GET") return adminExport(req, env);
       const sessionMatch = path.match(/^\/api\/admin\/sessions\/(.+)$/);
       if (sessionMatch && req.method === "GET") return adminSessionDetail(req, env, sessionMatch[1]);
-
-      // Admin experiment detail (FR-R3-105)
-      const experimentMatch = path.match(/^\/api\/admin\/experiments\/(.+)$/);
-      if (experimentMatch && req.method === "GET") return adminExperimentDetail(req, env, experimentMatch[1]);
 
       // Admin maintenance
       if (path === "/api/admin/cleanup" && req.method === "POST") return adminCleanup(req, env);
 
-      // Lab correlation API (disabled in production)
+      // ═══════════════════════════════════════════════════════════════════
+      // EVALUATION CONTROL PLANE
+      // ┌─────────────────────────────────────────────────────────────────┐
+      // │ The Cloudflare Worker IS the evaluation fixture.               │
+      // │ A production FireRaid deployment (origin middleware) serves     │
+      // │ ONLY the product surface above.                                 │
+      // │                                                                 │
+      // │ Evaluation routes below require LAB_MODE=true (enforced via     │
+      // │ isEvaluationDeployment guard or per-handler guards).            │
+      // │ Authenticated read-only analytics (/api/admin/experiments*,     │
+      // │ /api/admin/export) are available regardless of lab mode.        │
+      // └─────────────────────────────────────────────────────────────────┘
+      // ═══════════════════════════════════════════════════════════════════
+
+      // Admin experiments list — authenticated read, available in any mode
+      if (path === "/api/admin/experiments" && req.method === "GET") return adminExperiments(req, env);
+
+      // Admin experiment detail — authenticated read, available in any mode
+      const experimentMatch = path.match(/^\/api\/admin\/experiments\/(.+)$/);
+      if (experimentMatch && req.method === "GET") return adminExperimentDetail(req, env, experimentMatch[1]);
+
+      // Admin export — authenticated read, available in any mode
+      if (path === "/api/admin/export" && req.method === "GET") return adminExport(req, env);
+
+      // Lab correlation API (EVALUATION-ONLY — disabled outside lab mode)
+      // Each handler self-guards with isLabMode(env) → 404 when not lab.
       if (path === "/api/lab/runs" && req.method === "POST") return createLabRun(req, env);
       // FR-R4-070: run-index ingest — must precede the /:id matchers
       if (path === "/api/lab/runs/ingest" && req.method === "POST") return ingestLabRuns(req, env);
@@ -184,7 +239,11 @@ export default {
       const labRunMatch = path.match(/^\/api\/lab\/runs\/([^/]+)$/);
       if (labRunMatch && req.method === "GET") return getLabRun(req, env, labRunMatch[1]);
 
-      // Admin UI (FR-R3-070: use html() helper for security headers)
+      // Review decision — EVALUATION-ONLY WRITE (enforced inside admin.ts)
+      const reviewDecisionMatch = path.match(/^\/api\/admin\/review-queue\/([^/]+)$/);
+      if (reviewDecisionMatch && req.method === "POST") return adminReviewDecision(req, env);
+
+      // Admin UI — served in any mode; the fixture uses it for review reads
       if (path === "/admin" || path === "/admin/") {
         const adminHtml = await readAdminHtml(env);
         return html(adminHtml);

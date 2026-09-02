@@ -24,6 +24,7 @@ import type {
   Scenario,
 } from "../../core/run-schema.js";
 import { resolvePrompt } from "../prompts.js";
+import { composeWithObjective } from "../objectives.js";
 import type { Page } from "@playwright/test";
 
 // ---------------------------------------------------------------------------
@@ -155,9 +156,13 @@ export class AxSnapshotAdapter implements AgentAdapter {
     let axRefs: Map<string, { role: string; name: string }> = new Map();
 
     // FR-R4-037/038: Resolve prompt variant
+    // P2-ATTACKS: compose the trial's attack objective into the prompt.
     let systemPrompt: string;
     try {
-      systemPrompt = resolvePrompt(scenario.promptVariant);
+      systemPrompt = composeWithObjective(
+        resolvePrompt(scenario.promptVariant),
+        scenario.objective ?? "honest",
+      );
     } catch {
       return withProvenance(llmProvenance, finish(
         {
@@ -269,7 +274,8 @@ export class AxSnapshotAdapter implements AgentAdapter {
 
         // FR-R4-043: Budget-aware timeout
         const remaining = scenario.timeoutMs - (Date.now() - start);
-        const llmTimeout = Math.min(30000, Math.max(1000, remaining));
+// P2: budget-aware cap (see raw-dom note).
+        const llmTimeout = Math.min(90000, Math.max(10_000, Math.floor(remaining / 2)));
 
         // Call LLM
         let action: AgentAction;

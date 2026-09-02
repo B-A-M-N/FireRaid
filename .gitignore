@@ -2,10 +2,16 @@ node_modules/
 dist/
 .dev.vars
 .env
+.env.*
+!.env.example
+harness/.env
+harness/.llm-pool.json
 .wrangler/
 harness/results/*.json
 harness/results/**/*.json
 !harness/results/.gitkeep
+# Per-tree release evidence (npm run release:verify) — regenerated per run.
+release-evidence.json
 playwright-report/
 test-results/
 *.log

@@ -23,16 +23,20 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  admit,
   makeCsrf,
   ReferenceSessionAdapter,
   referenceInject,
   ReferenceVerificationAdapter,
   ReferenceTelemetryAdapter,
-  type MiddlewareDeps,
   type HostEnforcementAdapter,
+  ReferenceCanaryStore,
 } from "../../src/host-adapter/index.js";
+import {
+  admitEvaluation,
+  type EvaluationMiddlewareDeps,
+} from "../../src/eval/evaluation-middleware.js";
 import { aggregateTelemetry } from "../../src/telemetry/aggregate.js";
+import type { ValidatedEvent } from "../../src/routes/telemetry.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
 
 const SECRET = "p".repeat(64);
@@ -48,7 +52,7 @@ class CountingEnforcement implements HostEnforcementAdapter {
   deny(): void {}
 }
 
-function deps(telemetry: ReferenceTelemetryAdapter, recipe?: { families: string[] }): MiddlewareDeps {
+function deps(telemetry: ReferenceTelemetryAdapter, recipe?: { families: string[] }): EvaluationMiddlewareDeps {
   return {
     secret: SECRET,
     version: VERSION,
@@ -58,6 +62,7 @@ function deps(telemetry: ReferenceTelemetryAdapter, recipe?: { families: string[
     verification: new ReferenceVerificationAdapter(),
     telemetry,
     enforcement: new CountingEnforcement(),
+    canaryStore: new ReferenceCanaryStore(),
     labMode: false,
     recipe: recipe as never,
   };
@@ -71,19 +76,20 @@ function csrfFor(sessionId: string): Promise<string> {
   return makeCsrf(SECRET, sessionId);
 }
 
-/** Drive one POST through the facade path admit() sees. */async function postJson(
-  depsObj: MiddlewareDeps,
+/** Drive one POST through the facade path admit() sees. */
+async function postJson(
+  depsObj: EvaluationMiddlewareDeps,
   sessionId: string,
   path: string,
   body: Record<string, unknown>
-): Promise<{ status: number; json: Record<string, unknown> | null; kind: string; result: Awaited<ReturnType<typeof admit>> }> {
+): Promise<{ status: number; json: Record<string, unknown> | null; kind: string; result: Awaited<ReturnType<typeof admitEvaluation>> }> {
   const cookie = await cookieFor(sessionId);
   const req = new Request(`http://mw${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", cookie },
     body: JSON.stringify(body),
   });
-  const result = await admit(req, depsObj, async () => HTML);
+  const result = await admitEvaluation(req, depsObj, async () => HTML);
   const status = result.kind === "deny" ? 403 : 200;
   const json =
     result.kind === "ingest"
@@ -155,7 +161,20 @@ describe("P0-2: host telemetry transport semantics (Worker parity)", () => {
     // This is P0-1 + P0-2 joined: the real signup.js drains 1..10 through
     // /api/events, then submits eventBatch=1..10 (its outbox until ACK).
     // Metrics must equal aggregation over 1..10 — not 1..10 twice.
+    // The scoring-time stream is captured via collect() (the accessor the
+    // middleware itself scores through) — the lifecycle's finalize() drops
+    // the raw stream once the submission resolves, by design.
+    let scoredStream: ValidatedEvent[] = [];
     const telemetry = new ReferenceTelemetryAdapter();
+    const capturingTelemetry = Object.create(telemetry) as ReferenceTelemetryAdapter & {
+      collect: (sid: string) => Promise<ValidatedEvent[]>;
+    };
+    capturingTelemetry.collect = async (capturedSid: string) => {
+      const events = await telemetry.collect(capturedSid);
+      if (capturedSid === sidUnderTest && events.length > 0) scoredStream = events;
+      return events;
+    };
+    let sidUnderTest = "";
     const sessionId = await new ReferenceSessionAdapter(SECRET).createSession();
     // A profile with interaction scoring ON — the aggregate drives evidence.
     let profile = null;
@@ -169,7 +188,8 @@ describe("P0-2: host telemetry transport semantics (Worker parity)", () => {
       if (p.interaction?.scoringEnabled) { profile = p; break; }
     }
     expect(profile).not.toBeNull();
-    const d = deps(telemetry, { families: ["interaction"] });
+    sidUnderTest = sid;
+    const d = deps(capturingTelemetry, { families: ["interaction"] });
 
     const events = stream(10);
     const drained = await postJson(d, sid, "/api/events", { events });
@@ -184,9 +204,11 @@ describe("P0-2: host telemetry transport semantics (Worker parity)", () => {
     });
     expect(submit.kind).toBe("admit");
 
-    // The canonical store holds 1..10 EXACTLY ONCE.
-    const stored = telemetry.streamsFor(sid);
+    // The canonical stream the middleware SCORED holds 1..10 EXACTLY ONCE.
+    const stored = scoredStream;
     expect(stored.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    // And the lifecycle dropped the raw stream after resolution (finalize).
+    expect(telemetry.streamsFor(sid)).toEqual([]);
 
     // And the metrics the middleware scored equal aggregation over that
     // unique stream (the Worker invariant).

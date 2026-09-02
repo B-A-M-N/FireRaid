@@ -2,9 +2,9 @@
  * FireRaid Engine Facade (FR-R3-086).
  * Unified entry point for the defense plane.
  */
-import { deriveProfilePure, type DefenseRecipe } from "./profile.js";
+import { deriveProductionProfile, deriveEvaluationProfile, type DefenseRecipe } from "./profile.js";
 import { correlate, type ServerObservationSet } from "./correlation.js";
-import { decide, getPolicy } from "./decision.js";
+import { decide, getPolicyOrThrow } from "./decision.js";
 import type { DefenseProfile } from "../types/profile.js";
 
 export interface FireRaidOptions {
@@ -57,12 +57,15 @@ export class FireRaidEngine {
     sessionId: string,
     recipe?: DefenseRecipe
   ): Promise<DefenseProfile> {
-    return deriveProfilePure({
-      secret: this.secret,
-      version: this.version,
-      sessionId,
-      mode: this.mode,
-    }, recipe);
+    // FR-R5-032: "production" mode goes through the production API (no
+    // recipe override); "lab" is the evaluation plane.
+    if (this.mode === "lab") {
+      return deriveEvaluationProfile(
+        { secret: this.secret, version: this.version, sessionId, mode: "lab" },
+        recipe
+      );
+    }
+    return deriveProductionProfile({ secret: this.secret, version: this.version, sessionId });
   }
 
   /**
@@ -79,7 +82,7 @@ export class FireRaidEngine {
     }
 
     const evidence = await correlate(options.profile, options.observations);
-    const policy = getPolicy(options.policy || options.profile.scoringPolicy);
+    const policy = getPolicyOrThrow(options.policy || options.profile.scoringPolicy);
     const decision = decide(evidence, policy);
 
     return {

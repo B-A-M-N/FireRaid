@@ -1,0 +1,34 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["vitest/globals"]
+  },
+  "include": [
+    "src/core/artifacts.ts",
+    "src/core/catalog.ts",
+    "src/core/correlation.ts",
+    "src/core/decision.ts",
+    "src/core/engine.ts",
+    "src/core/prng.ts",
+    "src/core/profile.ts",
+    "src/core/recipe-schema.ts",
+    "src/core/renderer.ts",
+    "src/core/review.ts",
+    "src/core/risk.ts",
+    "src/core/session-envelope.ts",
+    "src/core/session.ts",
+    "src/core/tokens.ts",
+    "src/types/**/*.ts",
+    "src/telemetry/aggregate.ts",
+    "src/telemetry/state.ts",
+    "src/telemetry/validate.ts",
+    "src/security/headers.ts",
+    "src/security/request-validation.ts",
+    "src/host-adapter/**/*.ts",
+    "src/runtime/**/*.ts",
+    "src/eval/evaluation-middleware.ts"
+  ],
+  "exclude": ["node_modules", "dist", "src/eval/review-workflow.ts", "src/cloudflare/**", "src/routes/**", "src/index.ts", "src/core/lab-assignment.ts", "src/core/reconstruct.ts", "src/core/static.ts"]
+}

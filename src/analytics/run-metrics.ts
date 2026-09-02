@@ -35,6 +35,15 @@ export interface RunMetricsRow {
    */
   origin_account_created?: number | boolean | null;
   origin_reconciled?: number | boolean | null;
+  /**
+   * P1-AUDIT-2 (audit item 12b): provenance columns for substitution
+   * detection. When present, the admin plane mirrors the run-schema
+   * predicate and must exclude substituted runs from headline efficacy.
+   */
+  llm_model_served?: string | null;
+  llm_model_requested?: string | null;
+  llm_pool_provider?: string | null;
+  pool_mode?: string | null;
 }
 
 /** Mirror of analyze.py:is_valid_run — server reconciled AND a terminal
@@ -63,6 +72,33 @@ export function isCanaryReferenced(r: RunMetricsRow): boolean {
   return r.canary_referenced === 1 || r.canary_referenced === true;
 }
 
+/**
+ * P1-AUDIT-2 (audit item 12b): a run is substituted when the serving model
+ * differs from the requested official model, or when a pool provider served
+ * in substitute mode. Substituted runs are degraded diagnostics — they must
+ * never count toward headline efficacy estimates.
+ */
+export function isSubstitutedRun(r: RunMetricsRow): boolean {
+  const { llm_model_served, llm_model_requested, llm_pool_provider, pool_mode } = r;
+  // Condition (a): served != requested when both are set.
+  if (
+    typeof llm_model_served === "string" &&
+    typeof llm_model_requested === "string" &&
+    llm_model_served !== llm_model_requested
+  ) {
+    return true;
+  }
+  // Condition (b): pool provider served + substitute mode.
+  if (
+    typeof llm_pool_provider === "string" &&
+    llm_pool_provider.length > 0 &&
+    pool_mode === "substitute"
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /** The aggregate block adminExperimentDetail returns. Definitions identical
  * to analyze.py's per-group rates (valid = isValidRun, denominators there).
  *
@@ -88,9 +124,16 @@ export function experimentMetrics(runs: RunMetricsRow[]): {
   /** When endpointBasis is the proxy: the primary endpoint is measured
    * elsewhere (the harness record set) — admin must not treat this as it. */
   proxyForPrimary: boolean;
+  /** P1-AUDIT-2 (12b): runs excluded from efficacy because served≠requested
+   * or pool substitute mode. These are degraded diagnostics, not silently
+   * dropped — they are always named. */
+  substitutedRuns: number;
 } {
   const totalRuns = runs.length;
-  const valid = runs.filter(isValidRun);
+  // P1-AUDIT-2 (12b): strip substituted runs before efficacy denominators.
+  const nonSub = runs.filter((r) => !isSubstitutedRun(r));
+  const substitutedCount = totalRuns - nonSub.length;
+  const valid = nonSub.filter(isValidRun);
   const n = valid.length;
   const submitted = valid.filter(isSubmitted).length;
   const quarantined = valid.filter((r) => r.disposition === "QUARANTINE").length;
@@ -112,5 +155,6 @@ export function experimentMetrics(runs: RunMetricsRow[]): {
     errorRate: totalRuns > 0 ? errored / totalRuns : 0,
     endpointBasis: usingOrigin ? "origin_account_creation" : "submission_proxy",
     proxyForPrimary: usingOrigin,
+    substitutedRuns: substitutedCount,
   };
 }

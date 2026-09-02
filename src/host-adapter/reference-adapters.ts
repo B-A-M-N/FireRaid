@@ -51,9 +51,19 @@ export class ReferenceSessionAdapter implements HostSessionAdapter {
   private readonly ring: ProfileKeyRing;
   private readonly version: number;
 
-  constructor(secret: string, opts?: { version?: number; keyId?: string }) {
-    this.ring = { current: { id: opts?.keyId ?? "default", secret } };
-    this.version = opts?.version ?? 1;
+  /**
+   * Create a session adapter.
+   * - (secret, opts?) — legacy single-key constructor (synthesizes a ring).
+   * - (ring, opts?) — new constructor accepting a full ProfileKeyRing.
+   */
+  constructor(secretOrRing: string | ProfileKeyRing, opts?: { version?: number; keyId?: string }) {
+    if (typeof secretOrRing === "string") {
+      this.ring = { current: { id: opts?.keyId ?? "default", secret: secretOrRing } };
+      this.version = opts?.version ?? 1;
+    } else {
+      this.ring = secretOrRing;
+      this.version = opts?.version ?? 1;
+    }
   }
 
   async createSession(): Promise<string> {
@@ -115,10 +125,29 @@ export class ReferenceSessionAdapter implements HostSessionAdapter {
  * admission (the ledger is the truth). Production adapters wrap Turnstile
  * over the CANONICAL VerificationInput fields (P1-4): token, action,
  * hostname, remoteIp, userAgent, requestUrl.
+ *
+ * AUDIT (P1 verification capability): the no-op DECLARES its mode. A
+ * production deployment cannot ship it unknowingly — createFireRaidMiddleware
+ * refuses verificationMode "disabled-test"; evaluation wiring accepts it
+ * explicitly.
  */
 export class ReferenceVerificationAdapter implements HostVerificationAdapter {
+  readonly verificationMode = "disabled-test" as const;
   async verify(): Promise<boolean> {
     return true;
+  }
+}
+
+/**
+ * AUDIT (P1): a host that ALREADY verified the human elsewhere (the FI
+ * integration: FI's own verification result consumed, no duplicate widget).
+ * Production-legal by declaration — the factory accepts this mode.
+ */
+export class HostOwnedVerificationAdapter implements HostVerificationAdapter {
+  readonly verificationMode = "host-owned" as const;
+  constructor(private readonly verdict: () => boolean = () => true) {}
+  async verify(): Promise<boolean> {
+    return this.verdict();
   }
 }
 
@@ -166,6 +195,7 @@ export class ReferenceTelemetryAdapter implements HostTelemetryAdapter {
   private readonly streams = new Map<string, ValidatedEvent[]>();
 
   async accept(sessionId: string, batch: unknown): Promise<HostTelemetryIngest> {
+    if (!this.createdAt.has(sessionId)) this.createdAt.set(sessionId, Date.now());
     const check = validateTelemetryBatch(batch);
     if (!check.ok) {
       return { kind: "invalid", code: check.code };
@@ -222,6 +252,43 @@ export class ReferenceTelemetryAdapter implements HostTelemetryAdapter {
   clearSession(sessionId: string): void {
     this.streams.delete(sessionId);
   }
+
+  // ── HostSessionEvidenceLifecycle (audit P1: unbounded store lifecycle) ──
+  readonly ttlMs = 30 * 60 * 1000;
+  /** sessionId → wall-clock created-at, for the TTL sweep. */
+  private readonly createdAt = new Map<string, number>();
+
+  /**
+   * finalize(sessionId): the session completed (submission resolved) —
+   * aggregate what scoring needed, drop the raw transient stream.
+   */
+  finalize(sessionId: string): void {
+    this.streams.delete(sessionId);
+    this.createdAt.delete(sessionId);
+  }
+
+  /**
+   * sweepExpired(): drop every session stream older than ttlMs.
+   * Returns the number of sessions evicted. Called opportunistically by
+   * the middleware; production stores should run it on a timer instead.
+   */
+  sweepExpired(): number {
+    const cutoff = Date.now() - this.ttlMs;
+    let evicted = 0;
+    for (const [sid, created] of this.createdAt) {
+      if (created < cutoff) {
+        this.streams.delete(sid);
+        this.createdAt.delete(sid);
+        evicted++;
+      }
+    }
+    // Streams admitted before any sweep without a createdAt entry: record
+    // lazily so they eventually age out too.
+    for (const sid of this.streams.keys()) {
+      if (!this.createdAt.has(sid)) this.createdAt.set(sid, Date.now());
+    }
+    return evicted;
+  }
 }
 
 /** Reference enforcement adapter — forwards to the upstream over HTTP. */
@@ -260,14 +327,37 @@ export class ReferenceCanaryStore implements HostCanaryStore {
   private readonly hits = new Set<string>();
   /** When true, record() fails (simulates a real storage outage). */
   failStore = false;
+  /** AUDIT (P1 lifecycle): TTL contract — verified hits expire too. */
+  readonly ttlMs = 30 * 60 * 1000;
+  private readonly recordedAt = new Map<string, number>();
 
   async record(sessionId: string, _token: string, _expected: string): Promise<boolean> {
     if (this.failStore) return false;
     this.hits.add(sessionId);
+    this.recordedAt.set(sessionId, Date.now());
     return true;
   }
 
   async readVerified(sessionId: string): Promise<boolean> {
     return this.hits.has(sessionId);
+  }
+
+  /** Drop one session's verified-hit state (submit resolved / TTL). */
+  async finalize(sessionId: string): Promise<void> {
+    this.hits.delete(sessionId);
+    this.recordedAt.delete(sessionId);
+  }
+
+  /** Evict verified hits older than ttlMs. Returns sessions evicted. */
+  sweepExpired(): number {
+    const cutoff = Date.now() - this.ttlMs;
+    let evicted = 0;
+    for (const [sid, at] of this.recordedAt) {
+      if (at < cutoff) {
+        this.finalize(sid);
+        evicted++;
+      }
+    }
+    return evicted;
   }
 }

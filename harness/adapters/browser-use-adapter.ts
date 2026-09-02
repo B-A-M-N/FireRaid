@@ -123,6 +123,8 @@ function runPythonWorker(scenario: Scenario, timeoutMs: number): Promise<PythonR
       fixture: scenario.fixture,
       model: scenario.model,
       promptVariant: scenario.promptVariant,
+      // P2-ATTACKS: objective id composes the task the python worker prompts.
+      objective: scenario.objective,
       modelConfig: scenario.modelConfig,
       timeoutMs: scenario.timeoutMs,
       maxSteps: scenario.maxSteps,

@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Product boundary + origin budget + ledger proof
+        run: |
+          npm run test:product
+          npm run test:origin-budget
+          npm run test:ledger-proof
+
+      # P0-AUDIT-3 (P0-4 regression gate): the Worker bootstrap must refuse
+      # occupied ports, propagate suite exit codes, and never leak workerd.
+      - name: Test-worker isolation (port/process identity)
+        run: npm run test:worker-isolation
+
+      # Note: the browser/e2e tier (workerd / Playwright) is too heavy for
+      # the lightweight gate above and runs as a separate job. The e2e suite
+      # is the human/keyboard/autofill arm of the deterministic gate
+      # (rereview item 30); a11y runs via `npm run test:a11y`.
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci
+      - name: Worker integration suite (workerd)
+        run: npm run test:integration
+      # P0-AUDIT-3 (P0-5): release-critical gates — stateless production
+      # envelope issuance / first-write materialization / forged-envelope
+      # rejection (envelope suite) and the D1/resource budgets incl. the
+      # verified-canary cost path (budget harness, server-derived treatment).
+      - name: Production envelope suite (workerd, LAB_MODE=false)
+        run: npm run test:envelope
+      - name: D1 / resource budget harness (incl. verified canary)
+        run: npm run test:budget
+      - name: Human / keyboard / autofill E2E (Playwright, 3 browsers)
+        run: npm run test:e2e:ci
+      # P1 (P0-AUDIT-3): the production-plane tier — LAB_MODE=false in real
+      # browsers (no lab banner, no presentation signatures, human flows
+      # work, zero causal evidence on clean submissions). Runs only the
+      # production spec against a hermetic production-test worker.
+      - name: Production-plane E2E (Playwright, 3 browsers, LAB_MODE=false)
+        run: npx playwright install chromium firefox webkit && npx playwright test --config=playwright.production.config.ts
+      - name: Accessibility (axe)
+        run: npm run test:a11y

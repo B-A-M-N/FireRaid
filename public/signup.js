@@ -3,7 +3,7 @@
  * Buffers coarse interaction events, flushes before submit.
  * FIX: Now properly prevents default form submission and posts JSON.
  * FIX: Final telemetry events are included in the submit request (FR-R2-008).
- * FR-R6-036: the server-generated capture mask (fr-client-config JSON block)
+ * FR-R6-036: the server-generated capture mask (client config JSON block)
  *   gates EVERY listener — a profile with capturePointer=false captures no
  *   pointer events client-side; randomized telemetry conditions are real.
  *   Fail-safe default when the config is absent/invalid: capture only submit.
@@ -11,11 +11,10 @@
  *   submit/events request is ACKNOWLEDGED. On verification_required or
  *   network failure, in-flight events return to the FRONT of the queue in
  *   original order. Turnstile resets for a fresh token on retry.
- * FR-R7-014: when interactionScoring is OFF (the production default for
- *   most profiles), the client creates NO outbox, NEVER pushes page_ready,
- *   NEVER schedules a periodic flush, and NEVER calls /api/events from
- *   the page. A profile that does not score interaction does not need the
- *   telemetry stream at all.
+ * FR-R7-014: when interactionScoring is OFF, the client creates NO outbox,
+ *   NEVER pushes page_ready, NEVER schedules a periodic flush, and NEVER
+ *   calls the telemetry endpoint from the page. A profile that does not
+ *   score interaction does not need the telemetry stream at all.
  * FR-R7-015: the outbox represents UNSENT events only — the redundant
  *   keep-alive flush is removed; events leave the queue exactly when the
  *   server's acceptedThrough confirms receipt (or before submit, or on
@@ -23,12 +22,24 @@
  * FR-R7-016: 409 is no longer treated as "drop everything"; the server
  *   returns the current watermark (acceptedThrough) so the client trims
  *   only the prefix the server actually has.
+ *
+ * P0-AUDIT (client opacity): the client NEVER fabricates server state.
+ *   The production server deliberately sends no disposition on a received
+ *   submission — the client renders "Submission received." and nothing
+ *   else. Displaying an internal disposition requires the served client
+ *   config to explicitly mark the page an evaluation surface
+ *   (evaluationMode:true); it is never inferred from a missing field.
+ *
+ * P0-AUDIT (client routing): the client's ENTIRE routing comes from the
+ *   server-generated config — form selector, submit endpoint, telemetry
+ *   endpoint. No path or selector literals live in this file; a host that
+ *   remounts the middleware at different routes needs no client change.
  */
 (function () {
   "use strict";
 
-  // ── FR-R6-036: server-generated capture mask ─────────────────────────────
-  const DEFAULT_MASK = {
+  // ── FR-R6-036: server-generated capture mask + routing ───────────────────
+  const DEFAULT_CONFIG = {
     telemetry: {
       captureFocus: false,
       captureInput: false,
@@ -41,15 +52,31 @@
     // FR-P0-5: defaults mirror the server schema; the rendered config is
     // authoritative when present.
     limits: { maxEventsPerBatch: 256, maxBatchBytes: 16 * 1024 },
+    // P0-AUDIT: client routing — fail-safe defaults mirror the reference
+    // middleware's canonical route table.
+    endpoints: {
+      formSelector: "#signup-form",
+      submit: "/api/submit",
+      telemetry: "/api/events",
+    },
+    // P0-AUDIT: evaluation surfaces declare themselves. Absent ⇒ production
+    // (opaque receipts; the disposition is never rendered).
+    evaluationMode: false,
   };
 
   function readClientConfig() {
     try {
-      const el = document.getElementById("fr-client-config");
-      if (!el) return DEFAULT_MASK;
+      // The config island id is emitted by the shared renderer — one id per
+      // mode (app-runtime-config in production, fr-client-config on
+      // evaluation surfaces). Reading both is presentation-tolerance, not
+      // mode inference: the MODE still comes only from the parsed config.
+      const el =
+        document.getElementById("app-runtime-config") ||
+        document.getElementById("fr-client-config");
+      if (!el) return DEFAULT_CONFIG;
       const parsed = JSON.parse(el.textContent);
       const t = parsed && typeof parsed === "object" ? parsed.telemetry : null;
-      if (!t || typeof t !== "object") return DEFAULT_MASK;
+      if (!t || typeof t !== "object") return DEFAULT_CONFIG;
       const bool = (v) => typeof v === "boolean" ? v : false;
       // FR-P0-5: server-derived batch limits — count AND byte caps travel
       // with the config so the client can never drift from the server schema.
@@ -64,6 +91,17 @@
             ? Math.floor(limits.maxBatchBytes)
             : 16 * 1024,
       };
+      // P0-AUDIT: routing — every endpoint from the server, shape-checked;
+      // any malformed entry falls back to the canonical route default
+      // (never a partial mix of invented paths).
+      const endpoints = parsed.endpoints && typeof parsed.endpoints === "object" ? parsed.endpoints : {};
+      const routeOf = (v, fallback) =>
+        typeof v === "string" && v.length > 0 ? v : fallback;
+      const endpointsOut = {
+        formSelector: routeOf(endpoints.formSelector, DEFAULT_CONFIG.endpoints.formSelector),
+        submit: routeOf(endpoints.submit, DEFAULT_CONFIG.endpoints.submit),
+        telemetry: routeOf(endpoints.telemetry, DEFAULT_CONFIG.endpoints.telemetry),
+      };
       return {
         telemetry: {
           captureFocus: bool(t.captureFocus),
@@ -75,16 +113,23 @@
         },
         interactionScoring: bool(parsed.interactionScoring),
         limits: limitsOut,
+        endpoints: endpointsOut,
+        // Explicit declaration ONLY — a missing field is production.
+        evaluationMode: parsed.evaluationMode === true,
       };
     } catch {
-      return DEFAULT_MASK;
+      return DEFAULT_CONFIG;
     }
   }
 
-  const MASK = readClientConfig();
+  const CONFIG = readClientConfig();
+  const MASK = { telemetry: CONFIG.telemetry, interactionScoring: CONFIG.interactionScoring, limits: CONFIG.limits };
 
-  const form = document.getElementById("signup-form");
+  // P0-AUDIT: routing — ALL of it from the config. No literals below.
+  const form = document.querySelector(CONFIG.endpoints.formSelector);
   if (!form) return;
+  const SUBMIT_ENDPOINT = CONFIG.endpoints.submit;
+  const TELEMETRY_ENDPOINT = CONFIG.endpoints.telemetry;
 
   let turnstileToken = null;
   let submitInFlight = false;
@@ -105,11 +150,19 @@
     if (result.error) {
       div.innerHTML = `<p class="fr-result-error">${escapeHtml(result.error)}</p>`;
     } else if (result.status === "received") {
-      const disposition = result.disposition || "REVIEW";
-      div.innerHTML = `
-        <p class="fr-result-status">Submission received.</p>
-        <p class="fr-result-disposition">Status: ${escapeHtml(disposition)}</p>
-      `;
+      // P0-AUDIT (client opacity): production renders the neutral receipt
+      // ONLY — the server sends no disposition, and the client must not
+      // invent one ("REVIEW" was exactly such a fabrication, and an oracle
+      // an aware agent could read). An internal disposition is shown ONLY
+      // on a surface the server explicitly declared an evaluation surface.
+      if (CONFIG.evaluationMode && typeof result.disposition === "string") {
+        div.innerHTML = `
+          <p class="fr-result-status">Submission received.</p>
+          <p class="fr-result-disposition">Status: ${escapeHtml(result.disposition)}</p>
+        `;
+      } else {
+        div.innerHTML = `<p class="fr-result-status">Submission received.</p>`;
+      }
     }
     form.after(div);
   }
@@ -143,7 +196,7 @@
   }
 
   // ── FR-R7-014: telemetry OFF branch — no outbox, no listeners, no flush.
-  if (!MASK.interactionScoring) {
+  if (!CONFIG.interactionScoring) {
     // Turnstile callbacks still needed so the form actually works; they
     // just don't push telemetry.
     window.turnstileOnSuccess = function (token) { turnstileToken = token; };
@@ -161,7 +214,7 @@
           if (key !== "csrf") formObj[key] = value;
         });
         const csrfToken = form.querySelector('[name="csrf"]')?.value || "";
-        const resp = await fetch("/api/submit", {
+        const resp = await fetch(SUBMIT_ENDPOINT, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -208,9 +261,9 @@
    * over the byte cap is 413'd wholesale, so the client must never build one.
    */
   function batchFits(batch) {
-    if (batch.length > MASK.limits.maxEventsPerBatch) return false;
+    if (batch.length > CONFIG.limits.maxEventsPerBatch) return false;
     try {
-      return new TextEncoder().encode(JSON.stringify({ events: batch })).length <= MASK.limits.maxBatchBytes;
+      return new TextEncoder().encode(JSON.stringify({ events: batch })).length <= CONFIG.limits.maxBatchBytes;
     } catch {
       return false;
     }
@@ -224,7 +277,7 @@
    */
   function takeBatch() {
     if (events.length === 0) return null;
-    let size = Math.min(events.length, MASK.limits.maxEventsPerBatch);
+    let size = Math.min(events.length, CONFIG.limits.maxEventsPerBatch);
     while (size > 1) {
       const candidate = events.slice(0, size);
       if (batchFits(candidate)) return candidate;
@@ -250,7 +303,7 @@
    */
   async function tryAcknowledge(batch) {
     try {
-      const resp = await fetch("/api/events", {
+      const resp = await fetch(TELEMETRY_ENDPOINT, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ events: batch }),
@@ -278,10 +331,10 @@
   }
 
   /**
-   * FR-R7-015 / FR-P0-4/5: drain the outbox through /api/events. Each
-   * iteration takes a sendable batch off the queue FRONT (splice semantics:
-   * nothing is duplicated), sends it, and trims by the server's ACK.
-   * Failure leaves the remaining queue intact for the next drain.
+   * FR-R7-015 / FR-P0-4/5: drain the outbox through the telemetry endpoint.
+   * Each iteration takes a sendable batch off the queue FRONT (splice
+   * semantics: nothing is duplicated), sends it, and trims by the server's
+   * ACK. Failure leaves the remaining queue intact for the next drain.
    */
   async function drainToBatches() {
     while (events.length > 0) {
@@ -299,27 +352,27 @@
   // Form events — FR-R6-036: each listener gated by its mask flag.
   const fields = form.querySelectorAll("input, textarea, select");
   fields.forEach((el) => {
-    if (MASK.telemetry.captureFocus) {
+    if (CONFIG.telemetry.captureFocus) {
       el.addEventListener("focus", () => push("focus", el.name || el.id));
     }
-    if (MASK.telemetry.captureFocus) {
+    if (CONFIG.telemetry.captureFocus) {
       el.addEventListener("blur", () => push("blur", el.name || el.id));
     }
-    if (MASK.telemetry.captureInput) {
+    if (CONFIG.telemetry.captureInput) {
       el.addEventListener("input", () => push("input", el.name || el.id, { inputType: el.type }));
     }
-    if (MASK.telemetry.captureChange) {
+    if (CONFIG.telemetry.captureChange) {
       el.addEventListener("change", () => push("change", el.name || el.id, { inputType: el.type }));
     }
   });
 
   // Pointer / key — FR-R6-036: gated.
-  if (MASK.telemetry.capturePointer) {
+  if (CONFIG.telemetry.capturePointer) {
     document.addEventListener("pointerdown", (e) => {
       push("pointer", e.target.name || e.target.id || e.target.tagName);
     });
   }
-  if (MASK.telemetry.captureKey) {
+  if (CONFIG.telemetry.captureKey) {
     document.addEventListener("keydown", (e) => {
       if (e.isComposing) return;
       push("key", e.target.name || e.target.id || e.target.tagName);
@@ -351,7 +404,7 @@
     const batch = takeBatch();
     if (!batch) return;
     try {
-      fetch("/api/events", {
+      fetch(TELEMETRY_ENDPOINT, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ events: batch }),
@@ -384,9 +437,9 @@
     await drainToBatches();
 
     // P1-AUDIT-2 (P1-14): attach at most ONE BOUNDED batch to the submit —
-    // the same takeBatch() cap the /api/events contract enforces. The prior
+    // the same takeBatch() cap the telemetry contract enforces. The prior
     // splice(0, events.length) re-sent the WHOLE residual queue when a drain
-    // failed (network down, or a host plane without an /api/events route),
+    // failed (network down, or a host plane without a telemetry route),
     // building an eventBatch the server contract explicitly rejects
     // (>256 events → TOO_MANY_EVENTS → the whole registration died on
     // telemetry transport, exactly the coupling P1-14 forbids). The rest of
@@ -410,7 +463,7 @@
     }
 
     try {
-      const resp = await fetch("/api/submit", {
+      const resp = await fetch(SUBMIT_ENDPOINT, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({

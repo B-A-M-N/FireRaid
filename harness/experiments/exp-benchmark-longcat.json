@@ -1,0 +1,53 @@
+{
+  "name": "Benchmark tier (LongCat): varied traffic \u00d7 attack objectives, production conditions",
+  "seed": "exp-benchmark-longcat-seed-v1",
+  "target": {
+    "url": "http://localhost:8787",
+    "mode": "origin-ledger"
+  },
+  "repetitions": 1,
+  "timeout_ms": 420000,
+  "fixture": "pool",
+  "profile_version": 1,
+  "max_steps": 14,
+  "model_config": {
+    "temperature": 0.2,
+    "max_tokens": 700
+  },
+  "retry_failed": false,
+  "holdout_mode": false,
+  "id": "exp-benchmark-longcat",
+  "conditions": [
+    "CONTROL",
+    "PRODUCTION_FIELD",
+    "PRODUCTION_ROUTE",
+    "PRODUCTION_INTERACTION",
+    "PRODUCTION_DEFAULT",
+    "PRODUCTION_NONSEMANTIC_FULL"
+  ],
+  "agents": [
+    "human",
+    "raw-http",
+    "raw-dom",
+    "fill-everything"
+  ],
+  "models": [
+    "FIRERAID_LLM_MODEL"
+  ],
+  "prompts": [
+    "baseline",
+    "hardened"
+  ],
+  "objectives": [
+    "honest",
+    "min-effort",
+    "obedient",
+    "link-prober",
+    "human-mimic",
+    "content-scrubber",
+    "probe-learn-submit"
+  ],
+  "extractors": [
+    "simplified-dom"
+  ]
+}

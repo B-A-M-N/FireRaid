@@ -15,10 +15,11 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { execSync, execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { loadHarnessEnv } from "./model.js";
+import { loadHarnessEnv, poolMode } from "./model.js";
 // P1-AUDIT-2 Phase C: origin-ledger runtime + named ablation conditions.
 import { startOriginLedgerRuntime, trialEmail, type OriginLedgerRuntime } from "./origin-ledger.js";
-import { ABLATION_RECIPES } from "../../src/core/profile.js";
+import { resolveConditionRecipe } from "../../src/core/profile.js";
+import type { DefenseRecipe } from "../../src/core/recipe-schema.js";
 // Imported lazily-resolved at top level so browserProvenance can use it
 // without a forbidden require(): the import itself must not launch anything.
 import * as playwrightCore from "playwright-core";
@@ -34,8 +35,11 @@ import {
   type AgentType,
   type AgentAdapter,
   type LabRunContext,
+  type TrialDescriptor,
 } from "./index.js";
 import { RawDomAdapter } from "../adapters/raw-dom.js";
+// P2-TRAFFIC: persona pool for the fixture dimension ("pool" mode).
+import { personaForTrial, personaById, PERSONAS } from "../fixtures/personas.js";
 import { RawHttpAdapter } from "../adapters/raw-http.js";
 import { BrowserUseAdapter } from "../adapters/browser-use-adapter.js";
 import { HumanControlAdapter } from "../adapters/human-control.js";
@@ -149,11 +153,12 @@ function trialKey(manifestId: string, trial: {
   agent: AgentType;
   model: string;
   prompt: string;
+  objective?: string;
   extractor?: string;
   repetition: number;
   controlVariant?: "normal" | "keyboard" | "autofill";
 }): string {
-  return `${manifestId}:${trial.recipeId ?? "-"}:${trial.agent}:${trial.model}:${trial.prompt}:${trial.extractor ?? "-"}:${trial.controlVariant ?? "-"}:${trial.repetition}`;
+  return `${manifestId}:${trial.recipeId ?? "-"}:${trial.agent}:${trial.model}:${trial.prompt}:${trial.objective ?? "-"}:${trial.extractor ?? "-"}:${trial.controlVariant ?? "-"}:${trial.repetition}`;
 }
 
 /**
@@ -559,13 +564,21 @@ async function executeTrial(
     runId = generateRunId();
   }
 
+  const fixtureId = resolveFixtureId(manifest, trial);
   const scenario = {
     // P1-AUDIT-2 Phase C: origin-ledger mode drives the middleware facade
     // (worker-shaped), so existing adapters run unmodified against the
     // REAL defense in front of the ordinary upstream.
     targetUrl: originRuntime ? originRuntime.facadeUrl : manifest.target.url,
-    fixture: loadFixture(manifest.fixture),
+    // P2-TRAFFIC: persona resolution — "pool" assigns a persona seeded by
+    // (manifest.seed, trialKey) so resume replays the identical identity;
+    // explicit persona ids pin; "default" keeps the historical fixture.
+    fixture: resolveFixtureForTrial(manifest, { ...trial, key: trialKey(manifest.id, trial) }),
+    fixtureId,
     promptVariant: trial.prompt,
+    // P2-ATTACKS: the composed objective reaches adapters through the
+    // existing prompt plumbing — no adapter signature changed.
+    objective: trial.objective,
     model: modelId,
     maxSteps: manifest.max_steps,
     timeoutMs: manifest.timeout_ms,
@@ -584,13 +597,18 @@ async function executeTrial(
 
   // P1-AUDIT-2 Phase C: assign THIS trial's condition to the middleware
   // before the adapter runs — the blocked-randomized recipe_id maps to the
-  // canonical ablation recipe (CONTROL = {families:[]}, as on the Worker).
-  // The middleware derives every profile for the trial under it.
+  // canonical treatment recipe (P0-AUDIT-3: PRODUCTION_DEFAULT resolves to
+  // the production-redirect marker; CONTROL = {families:[]}, as on the
+  // Worker). The middleware derives every profile for the trial under it.
   let ledgerEmail: string | undefined;
   if (originRuntime) {
-    const recipe = trial.recipeId ? ABLATION_RECIPES[trial.recipeId] : undefined;
-    if (trial.recipeId && !recipe) {
-      throw new Error(`origin-ledger mode: unknown recipe_id ${trial.recipeId}`);
+    let recipe: DefenseRecipe | undefined;
+    if (trial.recipeId !== undefined) {
+      try {
+        recipe = resolveConditionRecipe(trial.recipeId);
+      } catch {
+        throw new Error(`origin-ledger mode: unknown recipe_id ${trial.recipeId}`);
+      }
     }
     originRuntime.setTrialRecipe(recipe);
     ledgerEmail = trialEmail(manifest.id, trialKey(manifest.id, trial));
@@ -623,6 +641,8 @@ async function executeTrial(
     agent: trial.agent,
     model: modelId,
     prompt_variant: trial.prompt,
+    objective: trial.objective,
+    fixture_id: fixtureId,
     extractor: trial.extractor,
     profile_version: manifest.profile_version,
     ...(trial.recipeId !== undefined ? { recipe_id: trial.recipeId } : {}),
@@ -651,6 +671,9 @@ async function executeTrial(
     outcome: result.outcome,
     action_count: result.actionCount,
     elapsed_ms: result.elapsedMs,
+    ...(result.persistenceAttempted !== undefined
+      ? { persistence_attempted: result.persistenceAttempted }
+      : {}),
     error_code: result.errorCode ?? null,
     node_version: process.version,
     adapter_version: adapterCaps.version,
@@ -661,8 +684,13 @@ async function executeTrial(
           llm_provider_origin: result.llmProvenance.providerOrigin,
           llm_model_requested: result.llmProvenance.modelRequested,
           llm_model_served: result.llmProvenance.modelServed,
+          ...(result.llmProvenance.poolProvider
+            ? { llm_pool_provider: result.llmProvenance.poolProvider }
+            : {}),
         }
       : {}),
+    // P1-POOL: record pool posture for downstream substitution detection.
+    pool_mode: poolMode(),
     temperature: manifest.model_config.temperature,
     max_tokens: manifest.model_config.max_tokens,
     // FR-POST-R6-P8: real browser provenance for Playwright-based adapters;
@@ -903,6 +931,37 @@ async function executeTrial(
 /**
  * Load fixture by name.
  * FR-R4-086: fail closed if non-default fixture is missing.
+ * P2-TRAFFIC: "pool" and persona-NN ids resolve here too — "pool" derives
+ * a persona from (manifest.seed, trialKey) so the assignment is stable
+ * across resume and reproducible from the manifest alone; a persona-NN id
+ * pins that identity for every trial in the run.
+ */
+function resolveFixtureForTrial(
+  manifest: ExperimentManifest,
+  trial: TrialDescriptor & { key: string }
+): Record<string, string> {
+  const f = manifest.fixture ?? "default";
+  if (f === "pool") {
+    const persona = personaForTrial(manifest.seed, trial.key);
+    return { ...persona };
+  }
+  if (PERSONAS.some((p) => p.id === f)) {
+    return { ...personaById(f) };
+  }
+  return loadFixture(f);
+}
+
+/** The fixture provenance id recorded on the run record (P2-TRAFFIC). */
+function resolveFixtureId(manifest: ExperimentManifest, trial: TrialDescriptor): string {
+  const f = manifest.fixture ?? "default";
+  if (f === "pool") return personaForTrial(manifest.seed, trialKey(manifest.id, trial)).id;
+  if (PERSONAS.some((p) => p.id === f)) return f;
+  return f;
+}
+
+/**
+ * Load fixture by name (legacy file-backed fixtures).
+ * FR-R4-086: fail closed if non-default fixture is missing.
  */
 function loadFixture(name: string): Record<string, string> {
   const fixturePath = join(process.cwd(), "harness", "fixtures", `${name}.json`);
@@ -944,6 +1003,10 @@ export async function runExperiment(manifestPath: string): Promise<void> {
   // FR-P0-11: attack-plane credentials (harness/.env) load before anything
   // reads FIRERAID_* — model resolution and lab secrets included.
   loadHarnessEnv();
+
+  // P1-POOL: surface the pool posture for this run (honesty: a
+  // substitute-mode run measures different models than requested).
+  console.log(`LLM pool: ${poolMode()}`);
 
   // Load and validate manifest
   const raw = JSON.parse(readFileSync(manifestPath, "utf-8"));
@@ -1018,14 +1081,29 @@ export async function runExperiment(manifestPath: string): Promise<void> {
 
   const recorder = new Recorder(manifest.id);
 
+  // P0-AUDIT-3 (P0-2): identity of the expanded trial PLAN — a stable hash
+  // over every trial's full identity (condition, agent, model, prompt,
+  // objective, extractor, control variant, repetition). The analyzer uses it
+  // (with planned_trials) to distinguish "interrupted" from "complete".
+  const trialPlanHash = createHash("sha256")
+    .update(trials.map((t) => trialKey(manifest.id, t)).join("\n"))
+    .digest("hex");
+
   // P1-AUDIT-2 (P0-6): declare the endpoint protocol BEFORE records land —
   // the analyzer reads this to know origin coverage is REQUIRED (and the
   // endpoint INVALID without it) vs the worker-mode labeled proxy.
+  // P0-AUDIT-3 (P0-2): the declaration opens with status:"RUNNING" +
+  // planned_trials + trial_plan_hash. finalizeExperiment (below) flips it to
+  // COMPLETE only when every scheduled trial reached a terminal state — an
+  // interrupted run leaves RUNNING, and the analyzer refuses to estimate
+  // efficacy from it.
   recorder.declareExperiment({
     experiment_id: manifest.id,
     target_mode: manifest.target.mode === "origin-ledger" ? "origin-ledger" : "fireraid-worker",
     manifest_hash: manifestHash,
     conditions: manifest.conditions ?? (manifest.recipe_id ? [manifest.recipe_id] : ["CONTROL"]),
+    planned_trials: trials.length,
+    trial_plan_hash: trialPlanHash,
   });
 
   // P1-AUDIT-2 Phase C (audit item 2): origin-ledger mode — start the
@@ -1173,6 +1251,29 @@ export async function runExperiment(manifestPath: string): Promise<void> {
   };
   writeResumeState(resumePath, finalState);
 
+  // P0-AUDIT-3 (P0-2): experiment completeness state. Terminal = every
+  // scheduled trial reached ANY terminal state (COMPLETE/ERROR/TIMEOUT —
+  // errors and timeouts are valid ITT outcomes; an interrupted experiment
+  // is the different thing). Only a terminal run flips the declaration to
+  // COMPLETE; an interrupted run leaves status:"RUNNING" and the analyzer
+  // refuses headline efficacy from it.
+  const terminalCount = resumeTrials.length; // every executed trial pushed exactly one status
+  if (terminalCount === trials.length && trials.length > 0) {
+    recorder.finalizeExperiment({
+      manifest_hash: manifestHash,
+      records_expected: trials.length,
+      records_present: Recorder.loadExperiment(manifest.id).length,
+    });
+    console.log(
+      `Experiment COMPLETE: ${terminalCount}/${trials.length} scheduled trials reached a terminal state.`
+    );
+  } else {
+    console.log(
+      `Experiment INCOMPLETE: ${terminalCount}/${trials.length} scheduled trials executed — ` +
+        `experiment.json stays status:"RUNNING"; the analyzer will not estimate efficacy from this dataset.`
+    );
+  }
+
   // Print summary
   const runs = Recorder.loadExperiment(manifest.id);
   const metrics = Recorder.computeMetrics(runs);
@@ -1188,6 +1289,10 @@ export async function runExperiment(manifestPath: string): Promise<void> {
   console.log(`Canary verified: ${metrics.canary_verified}`);
   console.log(`Median elapsed: ${metrics.median_elapsed}ms`);
   console.log(`Error rate: ${(metrics.error_rate * 100).toFixed(1)}%`);
+  // P1-AUDIT-2 (audit item 12b): substituted runs excluded from efficacy
+  if (metrics.substituted > 0) {
+    console.log(`Substituted (excluded from efficacy): ${metrics.substituted}`);
+  }
   console.log(`Authoritative effectiveness metrics: npm run analyze -- ${manifest.id}`);
 
   // P1-AUDIT-2 Phase C: tear down the origin-ledger runtime (if any).

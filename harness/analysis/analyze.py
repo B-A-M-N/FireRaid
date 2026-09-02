@@ -11,6 +11,23 @@ from collections import defaultdict
 
 RESULTS_DIR = Path("harness/results")
 
+# P2-ATTACKS: objective tier table — mirrors harness/adapters/objectives.ts.
+# Legacy records without an `objective` field are not tiered (analysis keys
+# on the recorded id, never on a guess).
+OBJECTIVE_TIER = {
+    "honest": 0,
+    "min-effort": 1,
+    "impatient": 1,
+    "obedient": 2,
+    "link-prober": 2,
+    "fill-all": 2,
+    "human-mimic": 3,
+    "content-scrubber": 3,
+    "visibility-principled": 3,
+    "probe-learn-submit": 4,
+    "forensic": 4,
+}
+
 
 def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple:
     """Wilson score interval for a proportion. Returns (low, high)."""
@@ -72,6 +89,130 @@ def load_declaration(experiment_id: str, records_dir: str | None = None) -> dict
 def origin_endpoint_is_required(declaration: dict | None) -> bool:
     """P0-6: is this dataset declared origin-ledger (origin coverage REQUIRED)?"""
     return bool(declaration) and declaration.get("target_mode") == "origin-ledger"
+
+
+# ─── P0-AUDIT-3 (P0-2): experiment completeness state ────────────────────────
+
+INCOMPLETE_WATERMARK = (
+    "INCOMPLETE EXPERIMENT — NOT AN EFFICACY ESTIMATE"
+)
+
+
+def experiment_completeness(
+    experiment_id: str, records_dir: str | None = None
+) -> dict:
+    """
+    P0-AUDIT-3 (P0-2): read the experiment's completeness state.
+
+    A dataset is COMPLETE only when experiment.json declares
+    status == "COMPLETE" (the runner flipped it after every scheduled trial
+    reached a terminal state) AND records_present == records_expected.
+    Everything else — no declaration (legacy), status RUNNING (interrupted),
+    or a record-count mismatch — is INCOMPLETE: the analyzer must not print
+    a headline treatment effect from it.
+
+    Errors and timeouts recorded by the runner ARE valid ITT outcomes and
+    count toward records_present; "incomplete" means the run never reached
+    its scheduled end, not that some trials failed.
+    """
+    decl = load_declaration(experiment_id, records_dir)
+    if decl is None:
+        return {
+            "complete": False,
+            "status": "UNDECLARED",
+            "reason": "no experiment.json declaration sidecar (legacy dataset)",
+            "declaration": None,
+        }
+    status = decl.get("status", "UNDECLARED")
+    expected = decl.get("records_expected")
+    present = decl.get("records_present")
+    if status != "COMPLETE":
+        return {
+            "complete": False,
+            "status": status,
+            "reason": f'experiment status is "{status}" (COMPLETE is required)',
+            "declaration": decl,
+        }
+    if not isinstance(expected, int) or not isinstance(present, int):
+        return {
+            "complete": False,
+            "status": status,
+            "reason": "COMPLETE declaration lacks records_expected/records_present counts",
+            "declaration": decl,
+        }
+    if present != expected:
+        return {
+            "complete": False,
+            "status": status,
+            "reason": f"record count mismatch: expected {expected}, present {present}",
+            "declaration": decl,
+        }
+    return {
+        "complete": True,
+        "status": status,
+        "reason": None,
+        "declaration": decl,
+    }
+
+
+# Cell identity = every trial dimension EXCEPT the condition. Two records
+# with the same cell key differ ONLY by treatment assignment, so a
+# CONTROL/defended comparison is matched exactly when both arms carry ≥1
+# record for the same cell key.
+CELL_DIMENSIONS = (
+    "repetition",
+    "agent",
+    "model",
+    "prompt_variant",
+    "objective",
+    "extractor",
+    "control_variant",
+    "fixture_id",
+)
+
+
+def cell_key(r: dict) -> tuple:
+    """The record's cell identity (all dimensions except the condition)."""
+    return tuple(
+        _cell_norm(r.get(dim))
+        for dim in CELL_DIMENSIONS
+    )
+
+
+def _cell_norm(v) -> str:
+    """Normalize one cell dimension (None/absent → "-" so keys stay stable)."""
+    if v is None:
+        return "-"
+    return str(v)
+
+
+def matched_cells(
+    control_runs: list, defended_runs: list
+) -> tuple[dict, dict, list]:
+    """
+    P0-AUDIT-3 (P0-2): restrict a comparative estimate to MATCHED cells.
+
+    Returns (matched_control, matched_defended, unmatched_defended_cells).
+    A cell contributes to the primary comparative estimate only when BOTH
+    arms carry ≥1 record for that exact cell — a partially-run experiment
+    (or an arm where a model substitution dropped cells) otherwise changes
+    the attacker-architecture MIX across arms, which is a confound the
+    unstratified rate cannot correct.
+    """
+    control_cells = defaultdict(list)
+    for r in control_runs:
+        control_cells[cell_key(r)].append(r)
+    defended_cells = defaultdict(list)
+    for r in defended_runs:
+        defended_cells[cell_key(r)].append(r)
+
+    shared = set(control_cells) & set(defended_cells)
+    matched_control = [r for c in shared for r in control_cells[c]]
+    matched_defended = [r for c in shared for r in defended_cells[c]]
+    unmatched = sorted(
+        "-".join(k) for k in set(defended_cells) - shared
+    )
+    return matched_control, matched_defended, unmatched
 
 
 def exposure_view(r: dict) -> tuple:
@@ -179,6 +320,35 @@ def is_valid_run(r: dict) -> bool:
         r.get("server_reconciled") is True
         and r.get("outcome") in ("submitted", "stopped", "handoff")
     )
+
+
+def is_substituted_run(r: dict) -> bool:
+    """
+    P1-AUDIT-2 (audit item 12b): a run is substituted (degraded) when the
+    serving model differs from the requested official model, or when a pool
+    provider served in substitute mode. Substituted runs must NOT count
+    toward headline efficacy estimates — they are reported separately.
+    """
+    llm_model_served = r.get("llm_model_served")
+    llm_model_requested = r.get("llm_model_requested")
+    llm_pool_provider = r.get("llm_pool_provider")
+    pool_mode = r.get("pool_mode")
+
+    # Condition (a): served != requested when both present.
+    if (
+        isinstance(llm_model_served, str)
+        and isinstance(llm_model_requested, str)
+        and llm_model_served != llm_model_requested
+    ):
+        return True
+    # Condition (b): pool provider served + substitute mode.
+    if (
+        isinstance(llm_pool_provider, str)
+        and llm_pool_provider
+        and pool_mode == "substitute"
+    ):
+        return True
+    return False
 
 
 # P1-AUDIT-2: failure taxonomy. Which plane failed, if any? Only
@@ -309,10 +479,17 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
     EFFECTIVENESS rates (denominator = *valid* runs only):
       submission_rate, quarantine_rate, review_rate, canary rates, exposure rates
 
+    P1-AUDIT-2 (audit item 12b): substituted runs (served≠requested model or
+    pool substitute mode) are excluded from effectiveness denominators and
+    reported in ``n_substituted``. They never silently dilute efficacy.
+
     Returns a dict with per-group counts and rate tuples (point, lo, hi).
     """
-    n_valid = sum(1 for r in runs if is_valid_run(r))
-    valid = [r for r in runs if is_valid_run(r)]
+    # P1-AUDIT-2 (12b): strip substituted before any effectiveness denominator.
+    non_sub = [r for r in runs if not is_substituted_run(r)]
+    n_substituted = len(runs) - len(non_sub)
+    n_valid = sum(1 for r in non_sub if is_valid_run(r))
+    valid = [r for r in non_sub if is_valid_run(r)]
 
     # P1-AUDIT-2: ITT denominator + failure taxonomy. assignable = every
     # trial whose primary outcome (account created?) is knowable.
@@ -469,6 +646,8 @@ def compute_rates(runs: list, n_attempted: int) -> dict:
         "n": n_valid,
         "n_valid": n_valid,
         "n_attempted": n_attempted,
+        # P1-AUDIT-2 (12b): degraded-diagnostics runs excluded from efficacy.
+        "n_substituted": n_substituted,
         # P1-AUDIT-2: ITT denominator + failure taxonomy.
         "n_assignable": n_assignable,
         "failure_taxonomy": taxonomy,
@@ -529,12 +708,17 @@ def submission_proxy_rate(runs: list) -> tuple:
     SECONDARY proxy (P1-26 legacy, renamed P0-5): fraction of VALID runs
     whose submission was accepted by FireRaid (server `submitted` is True).
 
+    P1-AUDIT-2 (12b): pre-strips substituted runs so only non-substituted
+    evidence feeds the denominator. Substituted runs are degraded diagnostics.
+
     This is NOT account creation. It is "the middleware allowed a
     submission through" — the best available endpoint for FireRaid-worker
     mode records (no origin ledger), and a useful comparator against the
     origin endpoint. It must never be labeled "account-creation rate".
     """
-    valid = [r for r in runs if is_valid_run(r)]
+    # P1-AUDIT-2 (12b): exclude substituted runs from efficacy denominators.
+    non_sub = [r for r in runs if not is_substituted_run(r)]
+    valid = [r for r in non_sub if is_valid_run(r)]
     n = len(valid)
     if n == 0:
         return (0.0, 0.0, 0.0)
@@ -559,6 +743,11 @@ def origin_eligible(runs: list) -> list:
     ]
 
 
+def _non_sub(runs: list) -> list:
+    """P1-AUDIT-2 (12b): helper to strip substituted runs from a list."""
+    return [r for r in runs if not is_substituted_run(r)]
+
+
 def account_creation_rate(runs: list) -> tuple:
     """
     PRIMARY endpoint (P1-26 / P0-5): account-creation rate from ORIGIN
@@ -566,11 +755,15 @@ def account_creation_rate(runs: list) -> tuple:
     reconciliation observed the ordinary upstream actually creating the
     account. Wilson interval over that denominator.
 
+    P1-AUDIT-2 (12b): pre-strips substituted runs so efficacy denominators
+    never count degraded diagnostics.
+
     Returns (0, 0, 0) when no run in `runs` carries origin truth — an
     honest "unmeasured", never a silent 0% via a proxy substitution.
     """
+    non_sub = _non_sub(runs)
     eligible = [
-        r for r in origin_eligible(runs)
+        r for r in origin_eligible(non_sub)
         if is_assignable(r)
     ]
     n = len(eligible)
@@ -605,6 +798,9 @@ def risk_reduction(control_runs: list, defended_runs: list) -> dict:
     returned dict — so worker-mode reports still work but never present the
     proxy as account creation.
 
+    P1-AUDIT-2 (12b): pre-strips substituted runs from each arm so efficacy
+    denominators count only non-degraded evidence.
+
     Absolute risk reduction (ARR) = control_rate - defended_rate.
     Relative risk reduction (RRR) = ARR / control_rate.
     Each rate carries a Wilson CI; we propagate uncertainty by computing the
@@ -617,12 +813,14 @@ def risk_reduction(control_runs: list, defended_runs: list) -> dict:
     accounts (or zero eligible runs), RRR is undefined (None) rather than a
     fabricated "infinite protection" claim.
     """
-    c_origin_n = len([r for r in origin_eligible(control_runs) if is_assignable(r)])
-    d_origin_n = len([r for r in origin_eligible(defended_runs) if is_assignable(r)])
+    c_runs = _non_sub(control_runs)
+    d_runs = _non_sub(defended_runs)
+    c_origin_n = len([r for r in origin_eligible(c_runs) if is_assignable(r)])
+    d_origin_n = len([r for r in origin_eligible(d_runs) if is_assignable(r)])
     using_origin = (c_origin_n + d_origin_n) > 0
     rate_fn = account_creation_rate if using_origin else submission_proxy_rate
-    c_rate, c_lo, c_hi = rate_fn(control_runs)
-    d_rate, d_lo, d_hi = rate_fn(defended_runs)
+    c_rate, c_lo, c_hi = rate_fn(c_runs)
+    d_rate, d_lo, d_hi = rate_fn(d_runs)
 
     arr = c_rate - d_rate
     arr_lo = c_lo - d_hi
@@ -642,8 +840,8 @@ def risk_reduction(control_runs: list, defended_runs: list) -> dict:
         "defended_rate": (d_rate, d_lo, d_hi),
         "arr": (arr, arr_lo, arr_hi),
         "rrr": (rrr, rrr_lo, rrr_hi),
-        "control_n": sum(1 for r in control_runs if is_valid_run(r)),
-        "defended_n": sum(1 for r in defended_runs if is_valid_run(r)),
+        "control_n": sum(1 for r in c_runs if is_valid_run(r)),
+        "defended_n": sum(1 for r in d_runs if is_valid_run(r)),
         # P0-5: which truth the effect was computed on. Never let a worker-
         # mode proxy render as "account creation".
         "endpoint_basis": "origin_account_creation" if using_origin else "submission_proxy",
@@ -657,6 +855,9 @@ def false_positive_upper_bound(control_runs: list, z: float = 2.326) -> tuple:
     P1-26: replace "zero false positives" claims with an UPPER-CONFIDENCE-BOUND
     on the human-control false-positive rate.
 
+    P1-AUDIT-2 (12b): pre-strips substituted runs so the bound only uses
+    non-degraded evidence.
+
     For the human/control arm we never observe a causal hit, but "0 observed"
     does not mean "0 possible". Report the one-sided upper bound on the rate
     of quarantined/flagged legitimate submissions: for x observed events in n
@@ -666,7 +867,8 @@ def false_positive_upper_bound(control_runs: list, z: float = 2.326) -> tuple:
 
     Returns (observed_count, n_valid, upper_bound_rate).
     """
-    valid = [r for r in control_runs if is_valid_run(r)]
+    non_sub = _non_sub(control_runs)
+    valid = [r for r in non_sub if is_valid_run(r)]
     n = len(valid)
     if n == 0:
         return (0, 0, 0.0)
@@ -695,11 +897,19 @@ def group_cross_sectional(runs: list, dimension: str) -> dict:
       template    — issued semantic template (server truth)
       placement   — issued placement (server truth)
       families    — issued defense family set (server truth)
+      objective   — P2-ATTACKS attack-objective id (tiered attack corpus)
+      fixture_id  — P2-TRAFFIC persona identity the trial submitted as
+      tier        — P2-ATTACKS objective tier (0 honest … 4 adaptive)
     Unknown/absent values group under "<missing>".
     """
     groups = defaultdict(list)
     for r in runs:
-        if dimension in ("template", "placement", "families"):
+        if dimension == "tier":
+            # P2-ATTACKS: tier is derived from the objective id; legacy
+            # records without an objective all land in "<missing>".
+            obj = r.get("objective")
+            key = str(OBJECTIVE_TIER.get(obj, "<missing>"))
+        elif dimension in ("template", "placement", "families"):
             # Server-truth slices come from reconciliation data.
             if dimension == "families":
                 df = r.get("defense_families")
@@ -752,11 +962,16 @@ def print_report(experiment_id: str, records_dir: str | None = None):
         sub = rates.get("submission_rate", (0, 0, 0))
         quar = rates.get("quarantine_rate", (0, 0, 0))
         tout = rates.get("timeout_rate", (0, 0, 0))
+        sub_s = f"{sub[0]*100:>8.1f}%" if "submission_rate" in rates else "N/A"
+        quar_s = f"{quar[0]*100:>10.1f}%" if "quarantine_rate" in rates else "N/A"
+        tout_s = f"{tout[0]*100:>8.1f}%" if "timeout_rate" in rates else "N/A"
+        sub_count = rates.get("n_substituted", 0)
+        sub_line = f" (substituted={sub_count})" if sub_count > 0 else ""
         print(
             f"{group_name:<25} {n_attempted:>12} {n_valid:>10} "
-            f"{sub[0]*100:>8.1f}% "
-            f"{quar[0]*100:>10.1f}% "
-            f"{tout[0]*100:>8.1f}%"
+            f"{sub_s} "
+            f"{quar_s} "
+            f"{tout_s}{sub_line}"
         )
 
     # Identify baseline group for delta table (FR-R5-049)
@@ -851,7 +1066,10 @@ def print_report(experiment_id: str, records_dir: str | None = None):
             )
 
     # --- FR-R6-072: cross-sectional breakdown ---
-    for dimension in ("agent", "model", "template"):
+    # P2: objective/fixture_id/tier slices join the report whenever the run
+    # carries those dimensions (legacy records show "<missing>" once each
+    # and the len<=1 guard suppresses the table).
+    for dimension in ("agent", "model", "template", "objective", "fixture_id", "tier"):
         sliced = group_cross_sectional(runs, dimension)
         if len(sliced) <= 1:
             continue
@@ -927,7 +1145,11 @@ def print_report(experiment_id: str, records_dir: str | None = None):
             print(f"  {metric:<25} {val*100:>6.1f}%  [{lo*100:.1f}%, {hi*100:.1f}%]")
 
 
-def print_endpoints(experiment_id: str, records_dir: str | None = None):
+def print_endpoints(
+    experiment_id: str,
+    records_dir: str | None = None,
+    allow_incomplete: bool = False,
+):
     """
     P1-26: endpoints report.
 
@@ -950,6 +1172,53 @@ def print_endpoints(experiment_id: str, records_dir: str | None = None):
     print(f"\n{'='*70}")
     print(f"FireRaid Endpoints Report: {experiment_id}")
     print(f"{'='*70}")
+
+    # ── P0-AUDIT-3 (P0-2): completeness gate ────────────────────────────────
+    # A dataset the runner never drove to a terminal state for every
+    # scheduled trial — or whose record set disagrees with its declaration —
+    # is an interrupted experiment. Printing headline ARR/RRR from it
+    # invites exactly the confound this gate exists to prevent (partial
+    # runs leave arms with different attacker-architecture mixes). The
+    # operational summary below is always honest; the EFFICACY table is
+    # what gets withheld.
+    completeness = experiment_completeness(experiment_id, records_dir)
+    allow_note = ""
+    if not completeness["complete"]:
+        print(f"\n  *** {INCOMPLETE_WATERMARK} ***")
+        print(f"  Reason: {completeness['reason']}")
+        decl = completeness.get("declaration") or {}
+        if decl.get("planned_trials") is not None:
+            print(
+                f"  planned_trials={decl.get('planned_trials')}"
+                + (
+                    f", records_expected={decl.get('records_expected')}, "
+                    f"records_present={decl.get('records_present')}"
+                    if decl.get("records_expected") is not None
+                    else ""
+                )
+            )
+        print(
+            "  Errors/timeouts are valid ITT outcomes; an INTERRUPTED "
+            "experiment is not. Re-run to completion (or resume) before\n"
+            "  estimating efficacy."
+        )
+        if not allow_incomplete:
+            print(
+                "\n  Headline ARR/RRR withheld. Operational summary only.\n"
+                "  (Re-run with --allow-incomplete-diagnostics to override — "
+                "output stays watermarked.)\n"
+            )
+            _print_operational_summary(runs)
+            return
+        allow_note = (
+            "  (--allow-incomplete-diagnostics: operational diagnostics "
+            "below are STILL NOT AN EFFICACY ESTIMATE)\n"
+        )
+    elif allow_incomplete:
+        allow_note = ""
+
+    if allow_note:
+        print(allow_note)
 
     groups = group_runs(runs)
     if "CONTROL" not in groups:
@@ -1007,7 +1276,23 @@ def print_endpoints(experiment_id: str, records_dir: str | None = None):
         if name == "CONTROL":
             continue
         defended = groups[name]
-        rr = risk_reduction(control, defended)
+        # P0-AUDIT-3 (P0-2): the headline comparative estimate uses MATCHED
+        # cells only — a cell (all trial dimensions except the condition)
+        # contributes only when BOTH arms carry it. Unmatched defended
+        # cells would silently change the attacker mix across arms.
+        m_control, m_defended, unmatched = matched_cells(control, defended)
+        if unmatched:
+            print(
+                f"  {name:<22} NOTE: {len(unmatched)} cell(s) have no CONTROL "
+                f"twin — excluded from ARR/RRR (matched n={len(m_defended)})"
+            )
+        if not m_defended:
+            print(
+                f"  {name:<22} NO MATCHED CELLS — no comparative estimate "
+                f"(every defended cell lacks its CONTROL twin)"
+            )
+            continue
+        rr = risk_reduction(m_control, m_defended)
         d_rate = rr["defended_rate"][0]
         arr = rr["arr"][0]
         rrr = rr["rrr"][0]
@@ -1016,10 +1301,10 @@ def print_endpoints(experiment_id: str, records_dir: str | None = None):
         print(f"  {name:<22} {d_rate*100:>9.1f}% {arr*100:>9.1f}% {rrr_s:>10}  {arr_ci:>18}")
         # Per-arm coverage: a defended arm measured on 60% of its trials is
         # not an efficacy result.
-        arm_cov = origin_measurement_coverage(defended)[0]
+        arm_cov = origin_measurement_coverage(m_defended)[0]
         if using_origin and arm_cov < 1.0:
-            n_assign = len([r for r in defended if is_assignable(r)])
-            n_elig = len([r for r in origin_eligible(defended) if is_assignable(r)])
+            n_assign = len([r for r in m_defended if is_assignable(r)])
+            n_elig = len([r for r in origin_eligible(m_defended) if is_assignable(r)])
             print(
                 f"  {'':22} WARNING: origin coverage {arm_cov*100:.1f}% "
                 f"({n_elig}/{n_assign} assignable measured) — unmeasured "
@@ -1116,6 +1401,39 @@ def print_endpoints(experiment_id: str, records_dir: str | None = None):
         print(f"  {name:<22} {rates['n_valid']:>8} {sub*100:>8.1f}% {rev*100:>6.1f}% {quar*100:>6.1f}% {stop*100:>6.1f}% {hand*100:>6.1f}% {err*100:>6.1f}%")
 
 
+def _print_operational_summary(runs: list):
+    """
+    P0-AUDIT-3 (P0-2): the diagnostic view printed for INCOMPLETE datasets —
+    counts and data-quality state only, never a treatment-effect estimate.
+    Everything here describes what EXISTS on disk; nothing compares arms.
+    """
+    groups = group_runs(runs)
+    print(f"  Dataset: {len(runs)} record(s), {len(groups)} condition group(s)")
+    print(f"  {'Condition':<22} {'N':>6} {'Sub%':>7} {'Err%':>7} {'Timeout%':>9}")
+    print("  " + "-" * 56)
+    for name in sorted(groups.keys()):
+        g = groups[name]
+        n = len(g)
+        sub = sum(1 for r in g if r.get("submitted") is True)
+        err = sum(1 for r in g if r.get("outcome") == "error")
+        tmo = sum(1 for r in g if r.get("outcome") == "timeout")
+        pct = lambda k: (k / n * 100) if n else 0.0
+        print(
+            f"  {name:<22} {n:>6} {pct(sub):>6.1f}% {pct(err):>6.1f}% {pct(tmo):>8.1f}%"
+        )
+    # Attacker-architecture mix per arm — the confound that makes partial
+    # datasets structurally incomparable.
+    by_agent = defaultdict(lambda: defaultdict(int))
+    for r in runs:
+        by_agent[r.get("recipe_id") or "NO_RECIPE"][r.get("agent", "?")] += 1
+    if by_agent:
+        print("\n  Attacker-architecture mix per condition (the mix a partial")
+        print("  run silently skews — comparative estimates require it balanced):")
+        for cond in sorted(by_agent):
+            mix = ", ".join(f"{a}×{n}" for a, n in sorted(by_agent[cond].items()))
+            print(f"    {cond:<22} {mix}")
+
+
 def export_csv(experiment_id: str, output_path: str, records_dir: str | None = None):
     runs = load_runs(experiment_id, records_dir)
     if not runs:
@@ -1139,23 +1457,29 @@ if __name__ == "__main__":
     if len(sys.argv) < 2 or "--help" in sys.argv or "-h" in sys.argv:
         print(
             "Usage: python3 analyze.py <experiment_id> "
-            "[--records-dir DIR] [--csv output.csv] [--strict]"
+            "[--records-dir DIR] [--csv output.csv] [--strict] "
+            "[--allow-incomplete-diagnostics]"
         )
         if len(sys.argv) >= 2:
             print(
                 "\n--records-dir DIR analyzes an archived records directory "
                 "(e.g. harness/evidence/pilot/records/exp-pilot-control)\n"
-                "directly instead of harness/results/<experiment_id>."
+                "directly instead of harness/results/<experiment_id>.\n"
+                "\n--allow-incomplete-diagnostics prints the full endpoint "
+                "layout for an INCOMPLETE experiment, watermarked "
+                "NOT-AN-EFFICACY-ESTIMATE. The comparative table is computed "
+                "over matched cells only."
             )
         sys.exit(1 if len(sys.argv) < 2 else 0)
 
     exp_id = sys.argv[1]
     records_dir = _cli_value(sys.argv, "--records-dir")
+    allow_incomplete = "--allow-incomplete-diagnostics" in sys.argv
     if "--csv" in sys.argv:
         idx = sys.argv.index("--csv")
         export_csv(exp_id, sys.argv[idx + 1], records_dir)
     elif "--endpoints" in sys.argv:
-        print_endpoints(exp_id, records_dir)
+        print_endpoints(exp_id, records_dir, allow_incomplete)
     else:
         print_report(exp_id, records_dir)
         # FR-R6-074: official reports must fail if any authoritative run

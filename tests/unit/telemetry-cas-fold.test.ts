@@ -17,15 +17,13 @@
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { aggregateTelemetry } from "../../src/telemetry/aggregate.js";
+import { emptyState, advance, toMetrics } from "../../src/telemetry/state.js";
 import {
   loadMetricsState,
   foldNewEvents,
   catchUpSessionMetrics,
   saveMetricsState,
-  emptyState,
-  advance,
-  toMetrics,
-} from "../../src/telemetry/state.js";
+} from "../../src/cloudflare/session-metrics.js";
 import type { ValidatedEvent } from "../../src/routes/telemetry.js";
 
 function makeDb() {

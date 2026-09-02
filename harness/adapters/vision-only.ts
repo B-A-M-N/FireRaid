@@ -37,6 +37,7 @@ import { createHash } from "node:crypto";
 import { callLlmVision, loadHarnessEnv } from "../core/model.js";
 import { seedEvaluateShim } from "./evaluate-shim.js";
 import { resolvePrompt } from "./prompts.js";
+import { composeWithObjective } from "./objectives.js";
 import type {
   AgentAdapter,
   AgentRunResult,
@@ -265,7 +266,12 @@ export class VisionOnlyAdapter implements AgentAdapter {
     // FR-R4-037/086: fail-closed prompt resolution.
     let systemPrompt: string;
     try {
-      systemPrompt = resolvePrompt(scenario.promptVariant) + VISION_SYSTEM_SUFFIX;
+      // P2-ATTACKS: objective composes FIRST (task shaping), the vision
+      // suffix last (percept mechanics) — stable, hashable order.
+      systemPrompt = composeWithObjective(
+        resolvePrompt(scenario.promptVariant),
+        scenario.objective ?? "honest",
+      ) + VISION_SYSTEM_SUFFIX;
     } catch {
       return withProvenance({
         outcome: "error", actionCount: 0, elapsedMs: 0, transcript: "",
@@ -347,13 +353,14 @@ export class VisionOnlyAdapter implements AgentAdapter {
             userPrompt,
             `data:image/png;base64,${shotB64}`,
             scenario.modelConfig ?? {},
-            Math.min(45000, Math.max(1000, scenario.timeoutMs - (Date.now() - start)))
+            Math.min(90000, Math.max(10_000, Math.floor((scenario.timeoutMs - (Date.now() - start)) / 2)))
           );
           raw = llm.content;
           llmProvenance = {
             providerOrigin: llm.provenance.providerOrigin,
             modelRequested: llm.provenance.modelRequested,
             modelServed: llm.provenance.modelServed,
+            poolProvider: llm.provenance.poolProvider,
             temperature: llm.provenance.temperature,
             maxTokens: llm.provenance.maxTokens,
           };

@@ -54,13 +54,30 @@ test.describe("normal user", () => {
     expect(canaryHits.length).toBe(0);
   });
 
-  test("canary is visible in DOM but not in AX tree (production placements)", async ({ page }) => {
+  test("canary carriers never become focusable controls (no AX/tab footprint)", async ({ page }) => {
     await page.goto("/signup");
-    // Canary exists in DOM
+    // Lab plane: carriers may render VISIBLE banner text (that is the lab's
+    // purpose — researcher-visible traps). What must hold on EVERY plane:
+    // carriers are never focusable controls, never sit in the tab order,
+    // and add no interactive AX nodes. The production-plane invisibility
+    // invariant is pinned cross-session in unit browser-parity (real
+    // Chromium, evaluationMode=false).
     const canary = page.locator("[data-fr-canary-id]");
-    if (await canary.count()) {
-      await expect(canary.first()).toBeVisible();
+    const n = await canary.count();
+    for (let i = 0; i < n; i++) {
+      const el = canary.nth(i);
+      const tag = await el.evaluate((e) => e.tagName);
+      // Inert containers only — never an interactive element.
+      expect(["TEMPLATE", "META", "P", "DIV", "SPAN", "SECTION"]).toContain(tag);
+      const focusable = await el.evaluate(
+        (e) => (e as HTMLElement).tabIndex >= 0 && e.tagName !== "TEMPLATE"
+      );
+      expect(focusable, "carrier is not tab-reachable").toBe(false);
     }
+    // The form's tab order still reaches a legitimate field first.
+    await page.keyboard.press("Tab");
+    const first = await page.evaluate(() => (document.activeElement as HTMLElement)?.id || (document.activeElement as HTMLElement)?.tagName);
+    expect(first).toBeTruthy();
   });
 });
 

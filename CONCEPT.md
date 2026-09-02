@@ -3,13 +3,30 @@
 ## Deterministic Per-Session Defense-in-Depth Middleware
 
 **Version:** 0.1
-**Status:** Implementation Specification
+**Status:** Implementation Specification (ORIGINAL DESIGN — see divergence note)
 **Target:** Production agent-admission middleware + evaluation subsystem
 **Primary deployment:** Origin/host middleware (platform-agnostic)
 **Optional deployment:** Cloudflare Workers + D1 + Turnstile
 **Local runtime:** Node.js (origin middleware via host-adapter)
 **Production-path LLM usage:** None
 **Attack-harness LLM usage:** OpenAI-compatible inference endpoints, Browser Use, Playwright MCP, custom raw-DOM agent, vision-only screenshot agents, fireraid-aware briefed agents
+
+> **DIVERGENCE NOTE (P0/P1-AUDIT-3).** This is the original implementation
+> specification, retained as the design record. Where it disagrees with
+> current code, CURRENT CODE AND ITS TESTS WIN. Known divergences:
+> - **Placement/strategy catalog** — this document describes P06 as a
+>   "non-rendered lab annotation" and earlier revisions centered production
+>   on S09 × P06. Since the P1-AUDIT-2 catalog split, P06 is the
+>   production-eligible placement and production random composition draws
+>   semantic strategies from `PRODUCTION_AGENT_STRATEGIES = [P02, P03, P04]`
+>   (`src/core/catalog.ts`); S09/P01 are evaluation-only. See
+>   `docs/ACCESSIBILITY.md` and `docs/CANARY-CATALOG.md`.
+> - **Experiment conditions** — `PRODUCTION_DEFAULT` now resolves to the
+>   real production treatment (`deriveProductionProfile`); the old
+>   field+route+interaction combo is `PRODUCTION_NONSEMANTIC_FULL`. See
+>   `docs/EXPERIMENTS.md`.
+> - **Live experimental contract** — `docs/EXPERIMENTS.md`; current claim
+>   surface — `README.md` "Scope of proof".
 
 ---
 

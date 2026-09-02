@@ -18,7 +18,7 @@
  *   5. lab-only templates (S01–S08) still fail in production (template guard).
  */
 import { describe, it, expect } from "vitest";
-import { deriveProfilePure, PRODUCTION_FAMILIES, LAB_FAMILIES } from "../../src/core/profile.js";
+import { deriveProductionProfile, deriveEvaluationProfile, deriveProfilePure, LAB_FAMILIES, PRODUCTION_AGENT_STRATEGIES } from "../../src/core/profile.js";
 import { buildArtifactSet } from "../../src/core/artifacts.js";
 
 const SECRET = "production-family-pool-secret".padEnd(32, "x");
@@ -27,27 +27,27 @@ describe("Phase E: production random family pool", () => {
   it("production random draws can include the semantic family (200 sessions)", async () => {
     let sawSemantic = false;
     for (let i = 0; i < 200; i++) {
-      const profile = await deriveProfilePure({
+      const profile = await deriveProductionProfile({
         secret: SECRET,
         version: 1,
         sessionId: `pool-prod-${i}`,
-        mode: "production",
       });
-      expect(profile.families.every((f) => PRODUCTION_FAMILIES.includes(f))).toBe(true);
+      expect(profile.families).toContain("semantic");
+      expect(PRODUCTION_AGENT_STRATEGIES).toContain(profile.semantic!.templateId);
       if (profile.families.includes("semantic")) sawSemantic = true;
     }
     // With pool of 4 families and draw of 2–4, semantic should appear ~50% of time.
     expect(sawSemantic, "semantic appeared in production draws").toBe(true);
   });
 
-  it("production draw never throws; family count stays within [2, 4]", async () => {
+  it("production draw never throws; composition invariants hold (semantic + >=1 independent layer)", async () => {
     for (let i = 0; i < 300; i++) {
-      const profile = await deriveProfilePure({
+      const profile = await deriveProductionProfile({
         secret: SECRET,
         version: 2,
         sessionId: `pool-clamp-${i}`,
-        mode: "production",
       });
+      expect(profile.families).toContain("semantic");
       expect(profile.families.length).toBeGreaterThanOrEqual(2);
       expect(profile.families.length).toBeLessThanOrEqual(4);
     }
@@ -56,7 +56,7 @@ describe("Phase E: production random family pool", () => {
   it("lab draws still reach the semantic family (full pool retained)", async () => {
     let sawSemantic = 0;
     for (let i = 0; i < 100; i++) {
-      const profile = await deriveProfilePure({
+      const profile = await deriveEvaluationProfile({
         secret: SECRET,
         version: 1,
         sessionId: `pool-lab-${i}`,
@@ -84,7 +84,7 @@ describe("Phase E: production random family pool", () => {
   });
 
   it("explicit S09 recipe still works in LAB (where its probe actually renders)", async () => {
-    const profile = await deriveProfilePure(
+    const profile = await deriveEvaluationProfile(
       {
         secret: SECRET,
         version: 1,
@@ -113,7 +113,8 @@ describe("Phase E: production random family pool", () => {
     ).rejects.toThrow();
   });
 
-  it("PRODUCTION_FAMILIES === LAB_FAMILIES (no mode-based family exclusion)", async () => {
-    expect(PRODUCTION_FAMILIES).toEqual(LAB_FAMILIES);
+  it("evaluation plane keeps the full family pool (no mode-based family exclusion)", async () => {
+    // LAB_FAMILIES remains the evaluation-plane random pool (all 4 families).
+    expect(LAB_FAMILIES.length).toBe(4);
   });
 });

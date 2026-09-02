@@ -379,6 +379,118 @@ export async function adminCleanup(req: Request, env: Env): Promise<Response> {
 }
 
 
+// ─── Review-queue (product plane) ─────────────────────────────────────────
+// READ endpoint: available in all modes. Reviewers read FireRaid's annotation
+// in production to make decisions in their own system.
+
+export async function adminReviewQueue(req: Request, env: Env): Promise<Response> {
+  if (!(await requireAdmin(req, env))) return error("unauthorized", 401);
+
+  const url = new URL(req.url);
+  const status = url.searchParams.get("status") as "pending" | "reviewed" | undefined;
+  const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit")) || 50, 200));
+  const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
+
+  const entries = await env.DB
+    .prepare(
+      `SELECT session_id, public_id, created_at, risk_score, risk_tier, disposition, policy, reasons_json,
+              status, reviewer_decision, reviewer_note, reviewed_at, reviewed_by
+       FROM review_queue` +
+        (status ? ` WHERE status = ?` : "") +
+        ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+    )
+    .bind(status ?? null, limit, offset)
+    .all<{
+      session_id: string;
+      public_id: string;
+      created_at: number;
+      risk_score: number;
+      risk_tier: string;
+      disposition: string;
+      policy: string;
+      reasons_json: string;
+      status: string;
+      reviewer_decision: string | null;
+      reviewer_note: string | null;
+      reviewed_at: number | null;
+      reviewed_by: string | null;
+    }>();
+
+  return json({
+    entries: (entries.results ?? []).map((row) => ({
+      sessionId: row.session_id,
+      publicId: row.public_id,
+      createdAt: row.created_at,
+      riskScore: row.risk_score,
+      riskTier: row.risk_tier,
+      disposition: row.disposition,
+      policy: row.policy,
+      reasons: JSON.parse(row.reasons_json || "[]"),
+      status: row.status,
+      reviewerDecision: row.reviewer_decision ?? undefined,
+      reviewerNote: row.reviewer_note ?? undefined,
+      reviewedAt: row.reviewed_at ?? undefined,
+      reviewedBy: row.reviewed_by ?? undefined,
+    })),
+    limit,
+    offset,
+  });
+}
+
+// ─── Review decision (evaluation plane) ───────────────────────────────────
+// WRITE endpoint: HARD-DISABLED outside lab mode. Reviewer decisions are only
+// writable in the lab/evaluation deployment. Production users decide via
+// FI's own human-reviewer interface.
+
+import { finalizeReview } from "../eval/review-workflow.js";
+import { D1ReviewStore } from "../cloudflare/review-store.js";
+
+export async function adminReviewDecision(req: Request, env: Env): Promise<Response> {
+  // EVALUATION-ONLY GUARD: reviewer decisions are not writable in production.
+  if (env.LAB_MODE !== "true") {
+    return error("not found", 404);
+  }
+
+  if (!(await requireAdmin(req, env))) return error("unauthorized", 401);
+  if (req.method !== "POST") return error("method not allowed", 405);
+
+  let body: { sessionId: string; decision: string; reviewerId?: string; note?: string };
+  try {
+    body = (await req.json()) as typeof body;
+  } catch {
+    return error("invalid JSON", 400);
+  }
+
+  if (!body.sessionId || !body.decision) {
+    return error("missing sessionId or decision", 400);
+  }
+  if (body.decision !== "approved" && body.decision !== "rejected") {
+    return error("decision must be 'approved' or 'rejected'", 400);
+  }
+
+  const store = new D1ReviewStore(env.DB);
+  const entry = await store.getBySession(body.sessionId);
+  if (!entry) return error("not found", 404);
+
+  const { entry: updated, calibration } = finalizeReview(
+    entry,
+    body.decision as "approved" | "rejected",
+    { reviewerId: body.reviewerId, note: body.note }
+  );
+
+  const updatedRows = await store.updateEntry(updated);
+  if (updatedRows === 0) {
+    // Concurrent decision: entry was already finalized by another reviewer.
+    return error("already decided", 409);
+  }
+
+  // Only record calibration when this is the first (winning) decision.
+  await store.recordCalibration(calibration);
+
+  return json({ ok: true, reviewedBy: body.reviewerId ?? "anonymous" });
+}
+
+
 /**
  * Escape a value for CSV output (RFC 4180).
  * Also prevents CSV/formula injection by prefixing dangerous characters.

@@ -73,6 +73,21 @@ production-equivalent FireRaid test deployment
 The harness attacks the **same artifacts that production uses**. Debug
 instrumentation can differ; the treatment itself cannot.
 
+## Product vs evaluation
+
+The **product** is the deterministic middleware (`createFireRaidMiddleware`
++ origin runtime): zero LLM calls, zero D1, zero Worker requirement.
+`npm run test:product` enforces the product/evaluation boundary at build time.
+
+The **evaluation system** (harness/, experiments, Worker fixture) imports
+the product; the product never imports the harness.  This asymmetry is
+the testable zero-infrastructure thesis — the defense core runs standalone.
+
+`npm run dev:origin` runs the reference origin host on Node (Node 18+).
+`npm run test:origin-budget` proves the zero-infrastructure thesis by
+measuring profile generation, GET inject, and POST submit timing budgets
+and asserting zero network egress and zero D1 imports in the product path.
+
 ### Invariants
 
 The authoritative invariants are in [docs/INVARIANTS.md](docs/INVARIANTS.md):
@@ -143,15 +158,14 @@ git clone <repo>
 cd FireRaid
 npm install
 
-# Set up environment
-cp .env.example .dev.vars
-# Edit .dev.vars with real values (or use the test defaults)
-
-# Run locally (as origin middleware — no Cloudflare required)
-npx tsx src/host-adapter/middleware.ts
+# Run the reference origin host (pure Node — no Cloudflare account, no
+# .dev.vars setup; it generates dev-only secrets itself)
+npm run dev:origin
 ```
 
-Then open http://localhost:8787/signup
+Then open http://127.0.0.1:3456/signup — a real signup page served by the
+origin host with FireRaid's middleware attached (the same `public/signup.js`
+client a deployment ships).
 
 ### Cloudflare Worker Deployment (Optional)
 
@@ -167,10 +181,11 @@ npm run deploy:production   # or deploy:lab — named-env deploys only
 ## Testing
 
 ```bash
-npm test                  # Unit + integration tests
+npm test                  # Runs unit tests via vitest (tests/unit/)
 npm run test:unit         # Profile engine, catalog, correlation, decision
-npm run test:integration  # Full signup → canary → submit flow
-npm run test:e2e          # Playwright browser tests (normal user, keyboard, autofill)
+npm run test:integration  # Full signup → canary → submit flow (requires worker)
+npm run test:e2e          # Playwright browser tests (lab plane, LAB_MODE=true)
+npm run test:e2e:production  # Production plane (LAB_MODE=false) across Chromium/Firefox/WebKit
 npm run test:a11y         # Accessibility assertions
 ```
 

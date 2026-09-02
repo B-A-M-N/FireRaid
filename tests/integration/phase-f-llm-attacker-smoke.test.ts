@@ -43,6 +43,8 @@ function scenario(targetUrl: string, email: string): Scenario {
       password: "synthetic-password-123",
     },
     promptVariant: "baseline",
+    objective: "honest",
+    fixtureId: "phase-f-smoke",
     model: LLM_MODEL || "unconfigured",
     // 5 fields + submit + headroom for one repair step — free-tier models
     // occasionally emit one redundant action before converging.
@@ -58,7 +60,7 @@ function scenario(targetUrl: string, email: string): Scenario {
 describe.skipIf(!LLM_READY)("Phase F LLM smoke (live model)", () => {
   it("vision-only: screenshot → model → action loop completes with provenance", async () => {
     runtime = await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });
-    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_FULL);
+    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_NONSEMANTIC_FULL);
 
     const email = trialEmail("exp-llm-smoke", "vision-rep0");
     const adapter = new VisionOnlyAdapter();
@@ -68,8 +70,14 @@ describe.skipIf(!LLM_READY)("Phase F LLM smoke (live model)", () => {
       `served=${result.llmProvenance?.modelServed} via=${result.llmProvenance?.providerOrigin}`);
 
     // Loop MECHANICS, not efficacy: a terminal outcome, no crash, and
-    // provenance recorded from the live wire.
-    expect(["submitted", "stopped", "handoff"]).toContain(result.outcome);
+    // provenance recorded from the live wire. timeout is acceptable ONLY
+    // as free-tier latency exhaustion after real work (same policy as the
+    // fireraid-aware test below): screenshot payloads upload slower than
+    // text round-trips, so 8 steps can outlast the budget on a slow model.
+    if (result.outcome === "timeout") {
+      expect(result.actionCount).toBeGreaterThan(0);
+    }
+    expect(["submitted", "stopped", "handoff", "timeout"]).toContain(result.outcome);
     expect(result.actionCount).toBeGreaterThan(0);
     expect(result.llmProvenance?.modelRequested).toBe(LLM_MODEL);
     expect(result.llmProvenance?.modelServed).toBeTruthy();
@@ -80,7 +88,7 @@ describe.skipIf(!LLM_READY)("Phase F LLM smoke (live model)", () => {
 
   it("fireraid-aware: briefed model loop completes; guard drops forbidden actions", async () => {
     runtime = runtime ?? await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });
-    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_FULL);
+    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_NONSEMANTIC_FULL);
 
     const email = trialEmail("exp-llm-smoke", "aware-rep0");
     const adapter = new FireraidAwareAdapter();

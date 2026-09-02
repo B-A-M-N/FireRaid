@@ -44,7 +44,8 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { admit, makeCsrf, ReferenceSessionAdapter, referenceInject, ReferenceVerificationAdapter, ReferenceTelemetryAdapter, ReferenceCanaryStore, type MiddlewareDeps, type HostEnforcementAdapter } from "../../src/host-adapter/index.js";
+import { makeCsrf, ReferenceSessionAdapter, referenceInject, ReferenceVerificationAdapter, ReferenceTelemetryAdapter, ReferenceCanaryStore, type HostEnforcementAdapter } from "../../src/host-adapter/index.js";
+import { admitEvaluation, type EvaluationMiddlewareDeps } from "../../src/eval/evaluation-middleware.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
 import type { DefenseRecipe } from "../../src/core/recipe-schema.js";
 
@@ -156,6 +157,14 @@ export async function startOriginLedgerRuntime(opts: {
   secret: string;
   version: number;
   labMode: boolean;
+  /**
+   * P2 (advisory surface): the runtime's enforcement posture. Defaults to
+   * "enforcement" — the origin-ledger experiment's reason to exist is
+   * proving the defense HOLDS at the origin (ledger stays empty), which is
+   * a blocking posture. Advisory-mode arms (forward-and-annotate, account
+   * IS created, annotation carries the verdict) pass "advisory" explicitly.
+   */
+  enforcementMode?: "advisory" | "review" | "enforcement";
 }): Promise<OriginLedgerRuntime> {
   // 1. Ordinary upstream (own in-memory ledger, FireRaid-ignorant), on an
   //    EPHEMERAL port (P1-8): pre-allocate a free port and pass it through.
@@ -212,7 +221,7 @@ export async function startOriginLedgerRuntime(opts: {
   // P0-4: per-trial middleware-side truth capture (harness-only).
   let truth: HostTrialTruth | undefined;
 
-  const deps = (): MiddlewareDeps => ({
+  const deps = (): EvaluationMiddlewareDeps => ({
     secret: opts.secret,
     version: opts.version,
     upstreamRegisterUrl: `http://localhost:${upstreamPort}/api/register`,
@@ -224,6 +233,10 @@ export async function startOriginLedgerRuntime(opts: {
     canaryStore,
     labMode: opts.labMode,
     recipe: trialRecipe,
+    // P2: blocking-by-default here — see the option doc above. The middleware
+    // product default (advisory) would silently turn every ledger-proof arm
+    // into "forward and annotate", voiding the experiment.
+    enforcementMode: opts.enforcementMode ?? "enforcement",
   });
 
   // P0-4/P0-12: derive the profile a session was issued under the CURRENT
@@ -268,16 +281,22 @@ export async function startOriginLedgerRuntime(opts: {
     });
     // Route both paths through admit(); the middleware is method-driven
     // (GET → inject+session, POST → evaluate+forward).
-    const result = await admit(fetchReq, deps(), async () => upstreamHtml);
+    const result = await admitEvaluation(fetchReq, deps(), async () => upstreamHtml);
 
     // P0-4: record the middleware-side trial truth whenever the request
     // resolved to a session (submit evaluation paths). Harness-only state.
     if (result.kind === "admit" || (result.kind === "deny" && result.sessionId)) {
       try {
         const profile = await issuedProfile(result.sessionId!);
-        const canaryVerified = profile.decoyRoute
-          ? await canaryStore.readVerified(result.sessionId!)
-          : false;
+        // AUDIT (P1 lifecycle): the middleware FINALIZES canary/telemetry
+        // transient state when the submit resolves, so a post-hoc store read
+        // is stale-by-design. The decide-time observation travels on the
+        // result itself — risk.evidence carries CANARY_ROUTE_MATCH verified
+        // — and that is the authoritative record.
+        const canaryVerified =
+          result.risk?.evidence?.some(
+            (e) => e.source === "CANARY_ROUTE_MATCH" && e.verified
+          ) === true;
         truth = {
           sessionId: result.sessionId!,
           profileId: profile.profileId,

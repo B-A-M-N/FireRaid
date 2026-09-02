@@ -46,7 +46,7 @@ production conditions only, blocked-randomized per repetition):
   "models": ["FIRERAID_LLM_MODEL"],
   "prompts": ["baseline"],
   "extractors": ["raw-html", "simplified-dom"],
-  "conditions": ["CONTROL", "PRODUCTION_FIELD", "PRODUCTION_ROUTE", "PRODUCTION_INTERACTION", "PRODUCTION_FULL"],
+  "conditions": ["CONTROL", "PRODUCTION_DEFAULT", "PRODUCTION_FIELD", "PRODUCTION_ROUTE", "PRODUCTION_INTERACTION", "PRODUCTION_NONSEMANTIC_FULL"],
   "profile_version": 1,
   "repetitions": 20,
   "timeout_ms": 120000,
@@ -74,8 +74,14 @@ Agent architecture names (harness agent taxonomy): `human`, `raw-dom`,
   with `recipes` (or any other key) is REJECTED by the strict schema, never
   silently stripped into a CONTROL-only run.
 - **Production-faithful origin experiments** may name only production
-  conditions: `CONTROL`, `PRODUCTION_FIELD`, `PRODUCTION_ROUTE`,
-  `PRODUCTION_INTERACTION`, `PRODUCTION_FULL`. The lab semantic arms
+  conditions: `CONTROL`, `PRODUCTION_DEFAULT`, `PRODUCTION_FIELD`,
+  `PRODUCTION_ROUTE`, `PRODUCTION_INTERACTION`,
+  `PRODUCTION_NONSEMANTIC_FULL`. `PRODUCTION_DEFAULT` (P0-AUDIT-3) IS the
+  shipped treatment: it resolves to the production derivation path itself
+  (`deriveProductionProfile`), so the benchmark arm is byte-equal to what a
+  production deployment derives — pinned by a release invariant in
+  `tests/unit/ablation-recipes.test.ts`. It is the headline arm; every other
+  production condition is an ABLATION of it. The lab semantic arms
   (`SEMANTIC_ONLY`, `SEMANTIC_ROUTE`, `FULL`) are lab-plane mechanisms —
   the origin runtime renders in production mode, so those conditions fail
   manifest validation with an explicit error (running them anyway would
@@ -107,11 +113,12 @@ Agent architecture names (harness agent taxonomy): `human`, `raw-dom`,
 | E1 | Semantic canary only (lab) |
 | E2 | Decoy field/route only |
 | E3 | Interaction telemetry only |
-| E4 | Decoy field + route + interaction (production thesis, P1-23) |
-| E5 | Full lab stack (all four families) |
-| E6 | Full + Turnstile required |
-| E7 | Hardened-agent condition |
-| E8 | Holdout catalog (S09 partition) |
+| E4 | **CONTROL vs PRODUCTION_DEFAULT** (the headline efficacy experiment — PRODUCTION_DEFAULT is the shipped treatment) |
+| E5 | Production ablations: field / route / interaction / non-semantic-full (attribute the effect to a mechanism) |
+| E6 | Full lab stack (all four families, lab plane) |
+| E7 | Full lab stack + Turnstile required |
+| E8 | Hardened-agent condition |
+| E9 | Holdout catalog (S09 partition) |
 
 ## Running
 

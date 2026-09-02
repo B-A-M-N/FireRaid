@@ -1,0 +1,3 @@
+[GET /signup] 200
+[POST /api/submit] 200
+[SUBMIT RESPONSE] disposition=ACCEPT score=0

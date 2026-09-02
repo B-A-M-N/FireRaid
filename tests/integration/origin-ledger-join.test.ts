@@ -50,6 +50,8 @@ function scenario(targetUrl: string): Scenario {
       password: "synthetic-password-123",
     },
     promptVariant: "baseline",
+    objective: "honest",
+    fixtureId: "ledger-join",
     model: "none",
     maxSteps: 5,
     timeoutMs: 15_000,
@@ -144,7 +146,7 @@ describe("Phase C: real agent → middleware → origin ledger", () => {
     // minted a fresh session. Drive the facade over real HTTP like the
     // raw-http adapter would.
     runtime = await startOriginLedgerRuntime({ secret: SECRET, version: 1, labMode: false });
-    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_FULL);
+    runtime.setTrialRecipe(ABLATION_RECIPES.PRODUCTION_NONSEMANTIC_FULL);
 
     const email = trialEmail("exp-join-test", "probe-then-submit-rep0");
 
@@ -162,7 +164,7 @@ describe("Phase C: real agent → middleware → origin ledger", () => {
     const { deriveProfilePure } = await import("../../src/core/profile.js");
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
-      ABLATION_RECIPES.PRODUCTION_FULL
+      ABLATION_RECIPES.PRODUCTION_NONSEMANTIC_FULL
     );
     const token = profile.decoyRoute!.endpointToken;
 

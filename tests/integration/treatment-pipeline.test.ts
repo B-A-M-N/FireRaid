@@ -121,11 +121,19 @@ function renderedFacts(html: string): {
   decoyField: string | null;
   canaryRoute: string | null;
 } {
+  // Lab multi-spot carriers fan out over THREE channels (template/meta/
+  // comment — placeSemanticCarriers), so the template id can appear in any
+  // of the three lab carrier shapes. Decoy field names are per-session hex
+  // PRF tokens (no fr_ prefix — P1-22 removed that signature).
   return {
-    template: html.match(/data-fr-canary(?:-id)?="([A-Z]\d\d)"/)?.[1] ?? null,
+    template:
+      html.match(/data-fr-canary(?:-id)?="([A-Z]\d\d)"/)?.[1] ??
+      html.match(/name="fr-canary-spot" content="([A-Z]\d\d)/)?.[1] ??
+      html.match(/<!-- canary ([A-Z]\d\d) /)?.[1] ??
+      null,
     placement: html.match(/data-fr-placement="([^"]+)"/)?.[1] ?? null,
     marker: html.match(/data-fr-marker="([^"]+)"/)?.[1] ?? null,
-    decoyField: html.match(/name="(fr_[a-z0-9_]+)"/)?.[1] ?? null,
+    decoyField: html.match(/name="([0-9a-f]{16})"/)?.[1] ?? null,
     canaryRoute: html.match(/\/c\/([a-f0-9]+)/)?.[1] ?? null,
   };
 }
@@ -176,12 +184,14 @@ describe("treatment pipeline: named recipes (Phase 3)", () => {
       // --- rendered: requested treatment appears in the DOM ---
       const rendered = renderedFacts(html);
       if (c.expect.families.includes("semantic")) {
-        expect(rendered.template).toMatch(/^S\d\d$/);
+        // Lab random pool = evaluation probes (S-traps + P01; Wave: catalog split).
+        expect(rendered.template).toMatch(/^[SP]\d\d$/);
       } else {
         expect(rendered.template).toBeNull();
       }
       if (c.expect.decoyField) {
-        expect(rendered.decoyField).toMatch(/^fr_/);
+        // Per-session hex PRF token (P1-22: no fr_ prefix).
+        expect(rendered.decoyField).toMatch(/^[0-9a-f]{16}$/);
       }
       if (c.expect.canaryRoute) {
         expect(rendered.canaryRoute).toMatch(/^[a-f0-9]+$/);
@@ -509,6 +519,7 @@ describe("perception chain: requested → verified (Phase 4)", () => {
     });
     const devSession = await bindSession(dev.data.run_id, dev.data.bind_token);
     const devTemplate = renderedFacts(devSession.html).template;
-    expect(devTemplate).toMatch(/^S\d\d$/);
+    // Lab random pool = evaluation probes (S-traps + P01).
+    expect(devTemplate).toMatch(/^[SP]\d\d$/);
   });
 });

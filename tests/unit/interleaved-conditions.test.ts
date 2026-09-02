@@ -39,7 +39,7 @@ const MANIFEST: ExperimentManifest = {
 
 /** Cell identity: everything except condition + repetition. */
 function cellOf(t: TrialDescriptor): string {
-  return `${t.agent}|${t.model}|${t.prompt}|${t.extractor ?? "-"}|${t.controlVariant ?? "-"}`;
+  return `${t.agent}|${t.model}|${t.prompt}|${t.objective}|${t.extractor ?? "-"}|${t.controlVariant ?? "-"}`;
 }
 
 describe("P1-20 blocked randomization (P1-AUDIT-2 item 13)", () => {
@@ -88,7 +88,7 @@ describe("P1-20 blocked randomization (P1-AUDIT-2 item 13)", () => {
     const sampleCell = cellOf({
       index: 0, repetition: 0,
       agent: "raw-dom", model: MANIFEST.models[0], prompt: "baseline",
-      extractor: "raw-html",
+      extractor: "raw-html", objective: "honest",
     });
     const orders: string[] = [];
     for (let rep = 0; rep < MANIFEST.repetitions; rep++) {

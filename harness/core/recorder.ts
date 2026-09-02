@@ -6,12 +6,15 @@
  * FR-P0-7: v2 is the NATIVE write format. Archived v1 evidence loads through
  *             parseRunRecord's v1→v2 normalizer, so all in-memory records are
  *             v2 regardless of on-disk schema version.
+ * P1-AUDIT-2 (audit item 12b): substituted-run exclusion — runs where the
+ *             served model differs from requested (or pool substitute mode)
+ *             are excluded from headline efficacy and reported separately.
  */
 import { randomUUID } from "node:crypto";
 import { writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RunRecordV2 } from "./run-schema.js";
-import { parseRunRecord, RunRecordV2Schema } from "./run-schema.js";
+import { parseRunRecord, RunRecordV2Schema, isSubstitutedRun } from "./run-schema.js";
 
 const RESULTS_DIR = join(process.cwd(), "harness", "results");
 
@@ -62,12 +65,24 @@ export class Recorder {
    * (origin-ledger ⇒ the primary endpoint REQUIRES origin measurement
    * coverage; worker-mode ⇒ `submitted` stays a labeled proxy). Called once
    * by the runner before the first record lands. Idempotent.
+   *
+   * P0-AUDIT-3 (P0-2): the sidecar also carries the experiment COMPLETENESS
+   * state — planned_trials, trial_plan_hash, and status:"RUNNING". A dataset
+   * whose runner never reached a terminal state for every scheduled trial is
+   * an interrupted experiment: the analyzer refuses to print headline
+   * efficacy from it. finalizeExperiment() (below) flips status to COMPLETE
+   * with records_expected/records_present/finished_at only when the runner
+   * actually finished.
    */
   declareExperiment(declaration: {
     experiment_id: string;
     target_mode: "origin-ledger" | "fireraid-worker";
     manifest_hash: string;
     conditions?: string[];
+    /** P0-2: total trials the plan schedules (expandManifest output size). */
+    planned_trials?: number;
+    /** P0-2: SHA-256 over the expanded trial plan (identity of WHAT runs). */
+    trial_plan_hash?: string;
   }): void {
     const dir = join(RESULTS_DIR, this.experimentId);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -83,7 +98,67 @@ export class Recorder {
       }
       return;
     }
-    writeFileSync(path, JSON.stringify(declaration, null, 2));
+    writeFileSync(
+      path,
+      JSON.stringify(
+        {
+          ...declaration,
+          // Default when the runner did not supply plan metadata (legacy
+          // callers/tests): UNKNOWN completeness — the analyzer treats it as
+          // incomplete (fail-closed), never as complete.
+          planned_trials: declaration.planned_trials ?? null,
+          trial_plan_hash: declaration.trial_plan_hash ?? null,
+          status: "RUNNING",
+          started_at: new Date().toISOString(),
+        },
+        null,
+        2
+      )
+    );
+  }
+
+  /**
+   * P0-AUDIT-3 (P0-2): flip the declaration to COMPLETE. Called by the
+   * runner ONLY after every scheduled trial reached a terminal state. The
+   * declaration must already exist (declareExperiment ran) and must carry
+   * the same manifest hash — an interrupted run leaves status:"RUNNING",
+   * which is the exact state the analyzer refuses to estimate from.
+   */
+  finalizeExperiment(final: {
+    manifest_hash: string;
+    records_expected: number;
+    records_present: number;
+  }): void {
+    const dir = join(RESULTS_DIR, this.experimentId);
+    const path = join(dir, "experiment.json");
+    if (!existsSync(path)) {
+      throw new Error(
+        `finalizeExperiment: no declaration for ${this.experimentId} — declareExperiment must run first`
+      );
+    }
+    const decl = JSON.parse(readFileSync(path, "utf-8")) as {
+      manifest_hash?: string;
+      status?: string;
+    };
+    if (decl.manifest_hash !== final.manifest_hash) {
+      throw new Error(
+        `finalizeExperiment hash mismatch for ${this.experimentId}: declared ${decl.manifest_hash}, finalizing ${final.manifest_hash}`
+      );
+    }
+    writeFileSync(
+      path,
+      JSON.stringify(
+        {
+          ...decl,
+          status: "COMPLETE",
+          finished_at: new Date().toISOString(),
+          records_expected: final.records_expected,
+          records_present: final.records_present,
+        },
+        null,
+        2
+      )
+    );
   }
 
   /**
@@ -187,6 +262,9 @@ export class Recorder {
 
   /**
    * Get summary metrics for an experiment.
+   * P1-AUDIT-2 (audit item 12b): efficacy denominators exclude substituted
+   * runs (served != requested model, or pool substitute mode). These runs
+   * are counted separately as `substituted` and never silently dropped.
    */
   static computeMetrics(runs: RunRecordV2[]): {
     attempts: number;
@@ -205,9 +283,17 @@ export class Recorder {
     unreconciled: number;
     timeouts: number;
     errors: number;
+    /** P1-AUDIT-2 (12b): runs excluded from efficacy because served≠requested or pool-substitute. */
+    substituted: number;
   } {
+    // P1-AUDIT-2 (12b): separate substituted from non-substituted before
+    // any efficacy denominator is computed — substituted runs are degraded
+    // diagnostics, not efficacy evidence.
+    const nonSub = runs.filter((r) => !isSubstitutedRun(r));
+    const substitutedCount = runs.length - nonSub.length;
+
     // FR-R5-022: "valid" = server truth — reconciled with authoritative outcomes
-    const valid = runs.filter(
+    const valid = nonSub.filter(
       (r) => r.server_reconciled === true && ["submitted", "stopped", "handoff"].includes(r.outcome)
     );
     // Submitted counts server truth (r.submitted === true) within valid
@@ -250,6 +336,7 @@ export class Recorder {
       unreconciled: runs.filter((r) => r.server_reconciled !== true).length,
       timeouts,
       errors,
+      substituted: substitutedCount,
     };
   }
 }

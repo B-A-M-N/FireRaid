@@ -1,6 +1,10 @@
 /**
  * FireRaid environment bindings and variables.
  * Everything the Worker needs at runtime, typed.
+ *
+ * LAB_MODE marks the Cloudflare Worker as the EVALUATION FIXTURE deployment.
+ * It is an evaluation-layer concept, not a product operating mode — the product
+ * (host middleware) has exactly one production contract and no lab switch.
  */
 export interface Env {
   // Bindings
@@ -13,6 +17,15 @@ export interface Env {
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
   TURNSTILE_EXPECTED_HOSTNAME?: string;
+  /**
+   * P1 (P0-AUDIT-3 follow-up): the ONLY sanctioned way a LAB_MODE=false
+   * deployment runs without Turnstile — the local production-shape test
+   * tier (wrangler env production-test). validateConfig rejects it in any
+   * deployment that also carries real Turnstile credentials, and nothing
+   * sets it outside the tracked test env. A real production deployment
+   * never sets this.
+   */
+  TURNSTILE_MODE?: string;
 
   // Secrets (from .dev.vars / wrangler secret)
   FIRERAID_PROFILE_SECRET: string;
@@ -43,6 +56,16 @@ export interface Env {
 }
 
 export function isLabMode(env: Env): boolean {
+  return env.LAB_MODE === "true";
+}
+
+/**
+ * True when this Worker deployment IS the evaluation fixture (LAB_MODE=true).
+ * The evaluation fixture hosts the experiment control plane; the product
+ * (host middleware, see src/host-adapter/) is the production entry.
+ * Product code must never import evaluation code; evaluation may import product.
+ */
+export function isEvaluationDeployment(env: Env): boolean {
   return env.LAB_MODE === "true";
 }
 

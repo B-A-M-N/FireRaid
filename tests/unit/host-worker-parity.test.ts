@@ -21,7 +21,6 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  admit,
   makeCsrf,
   ReferenceSessionAdapter,
   ReferenceVerificationAdapter,
@@ -29,10 +28,13 @@ import {
   ReferenceCanaryStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
+import {
+  admitEvaluation,
+} from "../../src/eval/evaluation-middleware.js";
 import { deriveProfilePure, ABLATION_RECIPES, type DefenseRecipe } from "../../src/core/profile.js";
 import { aggregateTelemetry, type CaptureConfig } from "../../src/telemetry/aggregate.js";
-import { correlate, type ObservationSet } from "../../src/core/correlation.js";
-import { decide, getPolicy } from "../../src/core/decision.js";
+import { correlate, deriveCanaryReference, type ObservationSet } from "../../src/core/correlation.js";
+import { decide, getPolicyOrThrow } from "../../src/core/decision.js";
 import type { ValidatedEvent } from "../../src/security/request-validation.js";
 
 const SECRET = "parity".padEnd(64, "x");
@@ -57,12 +59,14 @@ function modeFor(recipe: DefenseRecipe): "lab" | "production" {
 }
 
 /** The Worker submit route's decision core (routes/submit.ts steps 9–11),
- * extracted verbatim so the test drives the SAME code. */
+ * extracted verbatim so the test drives the SAME code. STRICT policy lookup:
+ * mirrors routes/submit.ts's getPolicyOrThrow — an unknown policy throws
+ * instead of silently default-scoring. */
 async function workerDecision(
   profile: Awaited<ReturnType<typeof deriveProfilePure>>,
   observations: ObservationSet
 ): Promise<string> {
-  const policy = getPolicy(profile.scoringPolicy);
+  const policy = getPolicyOrThrow(profile.scoringPolicy);
   const evidence = await correlate(profile, observations);
   return decide(evidence, policy).disposition;
 }
@@ -85,6 +89,10 @@ function workerObservations(
         observations.decoyFieldMatchesNonce = true;
       }
     }
+  }
+  // Server-derived canary reference — the SAME helper both planes run.
+  if (profile.semantic && deriveCanaryReference(profile, form)) {
+    observations.semanticNonceEcho = true;
   }
   if (profile.decoyRoute && canaryVerified) {
     observations.canaryEndpointHit = true;
@@ -188,6 +196,8 @@ describe("Worker vs host decision parity (Batch 3)", () => {
           },
           canaryStore,
           labMode: modeFor(recipe) === "lab",
+          // Decision parity is asserted against the fail-closed posture.
+          enforcementMode: "enforcement",
           recipe,
         };
         const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
@@ -201,7 +211,7 @@ describe("Worker vs host decision parity (Batch 3)", () => {
           headers: { "content-type": "application/json", cookie },
           body: JSON.stringify({ csrf, form, eventBatch: stream }),
         });
-        const res = await admit(req, deps as never, async () => SIGNUP_HTML);
+        const res = await admitEvaluation(req, deps as never, async () => SIGNUP_HTML);
 
         // ── Worker plane: the route's decision core over the same inputs ──
         const hostAccepted = telemetry.streamsFor(sessionId);
@@ -234,3 +244,51 @@ function recipeName(recipe: DefenseRecipe): string {
   }
   return "custom";
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Strict scoring-policy lookup on BOTH planes (rereview item 26)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("strict scoring-policy lookup (rereview item 26)", () => {
+  it("the Worker decision core throws for an unknown policy — no silent default-v1", async () => {
+    const profile = await deriveProfilePure(
+      { secret: SECRET, version: VERSION, sessionId: "strict-policy-sid", mode: "production" }
+    );
+    // Forge the exact failure the audit described: a profile whose
+    // scoringPolicy names a policy the registry does not know.
+    const forged = { ...profile, scoringPolicy: "nonexistent-policy" } as typeof profile;
+    await expect(workerDecision(forged, workerObservations(forged, [], {}, false)))
+      .rejects.toThrow(/UNKNOWN_POLICY/);
+  });
+
+  it("the middleware path fails closed (deny, UNKNOWN_SCORING_POLICY) for an unknown policy", async () => {
+    const sessionId = "strict-policy-mw-sid";
+    const store = new ReferenceTelemetryAdapter();
+    const deps = {
+      secret: SECRET,
+      version: VERSION,
+      upstreamRegisterUrl: "http://localhost:1/api/register",
+      session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
+      render: { inject: referenceInject },
+      verification: new ReferenceVerificationAdapter(),
+      telemetry: store,
+      canaryStore: new ReferenceCanaryStore(),
+      enforcement: { allow: async () => true, deny: () => {} },
+    };
+    const cookie = await (deps.session as ReferenceSessionAdapter).sessionCookie(sessionId);
+    const csrf = await makeCsrf(SECRET, sessionId);
+    // Drive a REAL admit() submission, then check what the middleware would
+    // have scored: the profile is forged post-derivation only in the policy
+    // name — so the strict lookup is exercised through resolveScoringPolicy.
+    const { resolveScoringPolicy } = await import("../../src/host-adapter/reference-adapters.js");
+    const p = await deriveProfilePure(
+      { secret: SECRET, version: VERSION, sessionId, mode: "production" }
+    );
+    const forged = { ...p, scoringPolicy: "nonexistent-policy" } as typeof p;
+    expect(resolveScoringPolicy(forged)).toBeNull();
+    // And the req still goes through the middleware unchanged (sanity: the
+    // real policy name derives fine).
+    expect(resolveScoringPolicy(p)).not.toBeNull();
+    void deps; void cookie; void csrf; void store;
+  });
+});

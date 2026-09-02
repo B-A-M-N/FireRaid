@@ -164,6 +164,40 @@
         "PROFILE_VERSION": "1",
         "LAB_MODE": "false"
       }
+    },
+    // P1 (P0-AUDIT-3 follow-up): the production-SHAPE test tier — the real
+    // production plane (LAB_MODE=false, stateless envelopes, no lab banner,
+    // no data-fr-*/data-rt-*) with NO Turnstile and NO real secrets. The
+    // bootstrap injects synthetic secrets via process env; TURNSTILE_MODE
+    // is the tracked, explicit Turnstile-off opt-in that validateConfig
+    // rejects in any deployment carrying real credentials. This env replaces
+    // the old dependence on a developer's local .dev.vars.production file.
+    "production-test": {
+      "assets": {
+        "directory": "./public",
+        "binding": "ASSETS",
+        "run_worker_first": [
+          "/signup",
+          "/api/*",
+          "/c/*",
+          "/admin*"
+        ]
+      },
+      "triggers": {
+        "crons": ["41 4 * * *"]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "fireraid-production-test",
+          "database_id": "REPLACE_AFTER_CREATE"
+        }
+      ],
+      "vars": {
+        "PROFILE_VERSION": "1",
+        "LAB_MODE": "false",
+        "TURNSTILE_MODE": "disabled-test"
+      }
     }
   },
 
