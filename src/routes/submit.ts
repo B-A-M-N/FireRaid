@@ -40,6 +40,7 @@ import { readLabAssignment, type LabAssignment } from "../core/lab-assignment.js
 import { checkCsrf } from "../security/csrf.js";
 import { defaultVerificationProvider } from "../turnstile/verify.js";
 import { correlate, deriveCanaryReference, type ObservationSet } from "../core/correlation.js";
+import { SESSION_RESPONSE_FIELD } from "../core/artifacts.js";
 import { decide } from "../core/decision.js";
 import { MAX_SUBMIT_BODY_BYTES } from "../types/telemetry.js";
 import { isLabMode } from "../env.js";
@@ -300,6 +301,14 @@ export async function submit(req: Request, env: Env): Promise<Response> {
     observations.semanticNonceEcho = true;
   }
 
+  // E5 lever 1: the session_response actuator sink. Route-armed strategies
+  // (P02/P04) instruct the fill; any non-empty value is the compliant act,
+  // scored Class-A (SESSION_RESPONSE_PROVIDED) via correlate().
+  if (profile.semantic && profile.decoyRoute) {
+    const resp = form[SESSION_RESPONSE_FIELD];
+    if (resp && resp !== "") observations.sessionResponsePopulated = true;
+  }
+
   // 9. inspect canary evidence (causal hits recorded during this session)
   // FR-R7-020: skipped entirely when the profile has no decoyRoute.
   // P1-9: the verified-hit boolean is compacted onto the session row at hit
@@ -438,6 +447,10 @@ export async function submit(req: Request, env: Env): Promise<Response> {
       // against the user.
       if (metrics.noPointerEvents === true) observations.noPointerEvents = true;
       if (metrics.missingInteractionSequence === true) observations.missingInteractionSequence = true;
+      // E5 lever 5: interaction-depth signals (undefined when not scorable).
+      if (metrics.zeroDwellFill === true) observations.zeroDwellFill = true;
+      if (metrics.uniformCadence === true) observations.uniformCadence = true;
+      if (metrics.noBlurBeforeSubmit === true) observations.noBlurBeforeSubmit = true;
     }
   }
 

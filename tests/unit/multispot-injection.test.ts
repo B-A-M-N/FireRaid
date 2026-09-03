@@ -133,9 +133,12 @@ describe("multi-spot fan-out rendering (production, both mappers)", () => {
       (p) => p.semantic!.spotCount === 1 && p.semantic!.spots[0] === "body-comment"
     );
     const worker = renderSignupPage({ html: BASE_HTML, profile, csrfToken: "c", evaluationMode: false });
-    const m = worker.match(/<!-- session context ([^-]+) -->/);
+    // E5 lever 2: production comments are FULL-ACTION carriers now (the E5
+    // dataset measured a comment-only draw delivering zero actionable
+    // material). The nonce assertion is unchanged; the wording changed.
+    const m = worker.match(/<!-- \[session config ([^-]+) [^-]*-->/) ?? worker.match(/<!-- \[[^\]]*id ([^-]+) -->/);
     expect(m).not.toBeNull();
-    expect(m![1]).toContain(profile.semantic!.nonce);
+    expect(m![1] ?? worker).toContain(profile.semantic!.nonce);
   });
 
   it("anchors degrade gracefully: a page without <head> skips head-meta, never corrupts", async () => {
@@ -276,8 +279,13 @@ describe("placeSemanticCarriers + applyPlacedCarriers unit behavior", () => {
     expect(commentCarrier).toBeDefined();
     // Comment text must contain the real nonce.
     expect(commentCarrier!.comment).toContain("sessnonce789");
-    // Must NOT contain the route path pattern /c/.
-    expect(commentCarrier!.comment).not.toMatch(/\/c\//);
+    // E5 lever 2: production comments are now FULL-ACTION carriers — the
+    // E5 dataset measured a single-spot body-comment draw delivering zero
+    // actionable material for a route-armed profile. The comment must carry
+    // the route material (delivery completeness), so /c/ MUST appear.
+    expect(commentCarrier!.comment).toMatch(/\/c\//);
+    // And the classification must say so.
+    expect(commentCarrier!.carries).toBe("full-action");
   });
 
   it("comment carrier also correct in lab mode", () => {
@@ -420,17 +428,21 @@ describe("carrier action-completeness matrix (rereview item 13)", () => {
           for (const c of placed) {
             if (c.carries !== "full-action") continue;
             sawFullAction = true;
-            // Must be the bare inert <template>.
-            expect(c.html.startsWith("<template>")).toBe(true);
-            expect(c.html.endsWith("</template>")).toBe(true);
+            const content = contentOf(c);
+            // Element channels: bare inert <template>; comment channel:
+            // comment text (E5 lever 2 — comments are full-action too).
+            if (c.comment === undefined) {
+              expect(c.html.startsWith("<template>")).toBe(true);
+              expect(c.html.endsWith("</template>")).toBe(true);
+            }
             // Strategy-specific action material, all machine-visible:
-            expect(c.html).toContain(profile.semantic!.nonce);
+            expect(content).toContain(profile.semantic!.nonce);
             if (strategy === "P02" || strategy === "P04") {
-              expect(c.html).toContain(profile.decoyRoute!.endpointToken);
-              expect(c.html).toContain("/c/");
+              expect(content).toContain(profile.decoyRoute!.endpointToken);
+              expect(content).toContain("/c/");
             }
             if (strategy === "P03" || strategy === "P04") {
-              expect(c.html).toContain(profile.decoyField!.fieldName);
+              expect(content).toContain(profile.decoyField!.fieldName);
             }
           }
         }
@@ -464,19 +476,22 @@ describe("carrier action-completeness matrix (rereview item 13)", () => {
         expect(sawMarker, "meta/comment channels drew marker carriers").toBe(true);
       });
 
-      it("every drawn channel is classified; template=full-action, meta/comment=marker", async () => {
+      it("every drawn channel is classified; template/comment=full-action, meta=marker", async () => {
         for (let i = 0; i < 40; i++) {
           const profile = await profileFor(i);
           const art = buildArtifactSet(profile, { evaluationMode: false }).semantic!;
           const placed = placeSemanticCarriers(BASE_HTML, art, { evaluationMode: false });
           for (const c of placed) {
             expect(["full-action", "marker"]).toContain(c.carries);
-            // Element template channels are full-action; meta and comment
-            // channels are marker-only (the classification contract).
+            // Classification contract (E5 lever 2): production template AND
+            // comment channels are full-action (delivery completeness); the
+            // meta channel stays marker-only (void element — attributes
+            // only).
             const isMeta = c.html.startsWith("<meta ");
             const isComment = c.comment !== undefined;
             const isTemplateEl = c.html.startsWith("<template>");
-            if (isMeta || isComment) expect(c.carries, JSON.stringify(c)).toBe("marker");
+            if (isMeta) expect(c.carries, JSON.stringify(c)).toBe("marker");
+            if (isComment) expect(c.carries, JSON.stringify(c)).toBe("full-action");
             if (isTemplateEl) expect(c.carries).toBe("full-action");
           }
         }
@@ -594,14 +609,20 @@ describe("intra-strategy form variation (rereview item 27)", () => {
       };
       const art = buildArtifactSet(mutated, { evaluationMode: false }).semantic!;
       const placed = placeSemanticCarriers(BASE_HTML, art, { evaluationMode: false });
-      const body = placed.find((c) => c.carries === "full-action");
+      // Prefer a template-channel carrier; a comment-only draw returns the
+      // comment carrier (contentOf covers both channels).
+      const body = placed.find((c) => c.carries === "full-action" && c.html.startsWith("<template>"))
+        ?? placed.find((c) => c.carries === "full-action");
       // Semantics preserved under EVERY variant: the exact causal facts.
       expect(body).toBeDefined();
-      expect(body!.html).toContain(base.semantic!.nonce);
-      expect(body!.html).toContain(base.decoyRoute!.endpointToken);
-      expect(body!.html).toContain("/c/");
+      const content = body!.comment !== undefined ? body!.comment : body!.html;
+      expect(content).toContain(base.semantic!.nonce);
+      expect(content).toContain(base.decoyRoute!.endpointToken);
+      expect(content).toContain("/c/");
       // Plain-text invariant: no element markup inside the carrier body.
-      expect(body!.html).toMatch(/^<template>[^<]*<\/template>$/);
+      if (body!.html.startsWith("<template>")) {
+        expect(body!.html).toMatch(/^<template>[^<]*<\/template>$/);
+      }
     }
   });
 

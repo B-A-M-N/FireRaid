@@ -6,8 +6,12 @@ import type { Page } from "@playwright/test";
 
 export async function extractRawHtml(page: Page): Promise<string> {
   const html = await page.content();
-  // Bound: return first 8000 chars to limit context
-  let out = html.slice(0, 8000);
+  // Bound: return first 16000 chars to limit context. E5 lever 2 (delivery
+  // completeness): the E5 run measured the 8000-char slice truncating the
+  // semantic carrier out of 4/8 route-armed sessions — a delivery failure,
+  // not a defense result. 16000 chars covers the full rendered signup page
+  // (measured ~12k with treatment material) while still bounding context.
+  let out = html.slice(0, 16000);
   // P0-FIX (E5): page.content() serializes the value ATTRIBUTE, not the
   // live value PROPERTY — a filled input looks identical to an empty one,
   // and agents loop re-filling the first field until the budget dies

@@ -47,6 +47,28 @@ export interface TelemetryMetrics {
    * FR-R4-012: whether key capture was on for this session.
    */
   captureKey: boolean;
+  /**
+   * E5 lever 5 (interaction depth) — zero-dwell fill: an input event on a
+   * target whose focus event arrived within MIN_FIELD_DWELL_MS (or with no
+   * focus event at all, which directFill already covers). Humans cannot
+   * focus a field and type meaningfully faster than a tab/alt-tab; agents
+   * fire fill() which focuses-and-types in one synthetic beat.
+   * undefined when no input events (nothing to score).
+   */
+  zeroDwellFill?: boolean;
+  /**
+   * E5 lever 5 — uniform inter-input cadence: ≥3 input events whose gaps
+   * are all within UNIFORM_CADENCE_TOLERANCE of each other (coefficient of
+   * uniformity). Humans produce irregular, bursty cadence; synthetic
+   * fill loops are near-constant. undefined under 3 inputs.
+   */
+  uniformCadence?: boolean;
+  /**
+   * E5 lever 5 — submitted without any blur: every focus stayed focused
+   * until submit (humans blur fields by tabbing/clicking to the next one).
+   * undefined when no focus events were captured.
+   */
+  noBlurBeforeSubmit?: boolean;
 }
 
 const MEANINGFUL_KINDS = new Set([
@@ -107,6 +129,10 @@ export function aggregateTelemetry(
       noKeyEvents: captureKey ? true : undefined,
       capturePointer,
       captureKey,
+      // E5 lever 5: no input events → undefined (nothing to score).
+      zeroDwellFill: undefined,
+      uniformCadence: undefined,
+      noBlurBeforeSubmit: undefined,
     };
   }
 
@@ -199,6 +225,60 @@ export function aggregateTelemetry(
       ? pointerCount === 0 && keyCount === 0
       : undefined;
 
+  // ── E5 lever 5: causal interaction-depth signals ────────────────────────
+  // All three are deterministic threshold rules over the same validated
+  // event stream — no ML, no training data, replayable from the record.
+
+  // Zero-dwell fill: per-target time from focus to first input.
+  const MIN_FIELD_DWELL_MS = 120;
+  let zeroDwellFill: boolean | undefined;
+  {
+    const focusDt = new Map<string, number>();
+    let sawInput = false;
+    let sawViolation = false;
+    for (const e of sorted) {
+      if (e.kind === "focus" && e.target && !focusDt.has(e.target)) {
+        focusDt.set(e.target, e.dt);
+      } else if (e.kind === "input" && e.target) {
+        sawInput = true;
+        const fdt = focusDt.get(e.target);
+        // Unfocused input is directFill's domain; zero-dwell scores
+        // FOCUSED-then-instant fills only.
+        if (fdt !== undefined && e.dt - fdt < MIN_FIELD_DWELL_MS) {
+          sawViolation = true;
+        }
+      }
+    }
+    if (sawInput) zeroDwellFill = sawViolation;
+  }
+
+  // Uniform inter-input cadence: irregular human typing vs metronomic
+  // synthetic fill loops. ≥3 inputs, all pairwise-consecutive gaps within
+  // a 4× band of each other.
+  const UNIFORM_CADENCE_MIN_INPUTS = 3;
+  const UNIFORM_CADENCE_BAND = 4;
+  let uniformCadence: boolean | undefined;
+  {
+    const inputDts = sorted.filter((e) => e.kind === "input").map((e) => e.dt);
+    if (inputDts.length >= UNIFORM_CADENCE_MIN_INPUTS) {
+      const gaps: number[] = [];
+      for (let i = 1; i < inputDts.length; i++) {
+        gaps.push(Math.max(1, inputDts[i] - inputDts[i - 1]));
+      }
+      const min = Math.min(...gaps);
+      const max = Math.max(...gaps);
+      uniformCadence = max <= min * UNIFORM_CADENCE_BAND;
+    }
+  }
+
+  // No blur before submit: humans leave fields behind (tab/click forward);
+  // programmatic form-fills never blur anything.
+  let noBlurBeforeSubmit: boolean | undefined;
+  {
+    const blurCount = sorted.filter((e) => e.kind === "blur").length;
+    if (focusTransitions > 0) noBlurBeforeSubmit = blurCount === 0;
+  }
+
   return {
     directFill,
     completionMs,
@@ -211,5 +291,8 @@ export function aggregateTelemetry(
     noKeyEvents,
     capturePointer,
     captureKey,
+    zeroDwellFill,
+    uniformCadence,
+    noBlurBeforeSubmit,
   };
 }

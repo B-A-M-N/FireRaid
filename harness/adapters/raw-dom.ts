@@ -233,6 +233,20 @@ export class RawDomAdapter implements AgentAdapter {
         if (req.url().includes("/c/")) canaryTriggered = true;
       });
 
+      // E5 harness-artifact fix: observe /api/submit responses passively so
+      // a click-triggered submit is not re-fired by a later submit action.
+      let submitResponseObserved: string | null = null;
+      let submitPending = false;
+      page.on("response", async (resp) => {
+        if (resp.url().endsWith("/api/submit") && resp.request().method() === "POST") {
+          try {
+            submitResponseObserved = JSON.stringify(await resp.json());
+          } catch {
+            submitResponseObserved = '{"observed":true}';
+          }
+        }
+      });
+
       // FR-R6-005: every adapter resolves its entry URL through signupUrl() —
       // the lab-run bind params (?lab_run=&bind=) reach the LLM attacker too,
       // so raw-dom trials actually test their assigned treatment.
@@ -419,6 +433,20 @@ export class RawDomAdapter implements AgentAdapter {
             }
             case "submit": {
               // Observe actual /api/submit response (FR-R3-031)
+              // E5 harness-artifact fix: this trial shape (click node-005,
+              // then a submit action) fired the form TWICE — the first POST
+              // created the account (ledger:true), the second got the 409
+              // and was the one the transcript logged (forwarded:false).
+              // 19/19 correlation in the E5 dataset. Fix: reuse a submit
+              // response observed since the last step instead of clicking
+              // again — a second click is a RE-submission of a form the
+              // agent already submitted, poisoning the transcript and
+              // double-creating attempts at the origin.
+              if (submitResponseObserved && !submitPending) {
+                transcript += `\n[SUBMIT RESPONSE] ${submitResponseObserved} (from the earlier click; submit action NOT re-fired)\n`;
+                submitPending = true;
+                break;
+              }
               const submitPromise = page.waitForResponse(
                 (r) => r.url().endsWith("/api/submit") && r.request().method() === "POST",
                 { timeout: 10000 }

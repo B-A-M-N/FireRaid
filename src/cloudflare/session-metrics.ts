@@ -33,7 +33,8 @@ export async function loadMetricsState(
     .prepare(
       `SELECT focused_targets_json, pointer_count, focus_transitions, key_count,
               input_without_focus, first_event_dt, first_meaningful_dt,
-              submit_dt, last_event_dt, capture_pointer, capture_key, last_event_seq
+              submit_dt, last_event_dt, capture_pointer, capture_key, last_event_seq,
+              focus_dt_by_target_json, zero_dwell_violation, input_dts_json, blur_count
          FROM session_metrics WHERE session_id = ?`
     )
     .bind(sessionId)
@@ -50,6 +51,10 @@ export async function loadMetricsState(
       capture_pointer: number;
       capture_key: number;
       last_event_seq: number;
+      focus_dt_by_target_json: string;
+      zero_dwell_violation: number;
+      input_dts_json: string;
+      blur_count: number;
     }>();
   if (!row) return null;
   let focused: string[] = [];
@@ -59,6 +64,26 @@ export async function loadMetricsState(
   } catch {
     // Corrupt row — start folding from empty focus state rather than crash.
     focused = [];
+  }
+  // E5 lever 5 state (0017 columns). A pre-0017 row carries the documented
+  // defaults; corrupt JSON degrades to the empty state, never a crash.
+  let focusDtByTarget = new Map<string, number>();
+  try {
+    const parsed: unknown = JSON.parse(row.focus_dt_by_target_json ?? "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof v === "number") focusDtByTarget.set(k, v);
+      }
+    }
+  } catch {
+    focusDtByTarget = new Map();
+  }
+  let inputDts: number[] = [];
+  try {
+    const parsed: unknown = JSON.parse(row.input_dts_json ?? "[]");
+    if (Array.isArray(parsed)) inputDts = parsed.filter((x): x is number => typeof x === "number");
+  } catch {
+    inputDts = [];
   }
   return {
     focusedTargets: focused,
@@ -72,6 +97,10 @@ export async function loadMetricsState(
     lastEventDt: row.last_event_dt,
     capturePointer: row.capture_pointer === 1,
     captureKey: row.capture_key === 1,
+    focusDtByTarget,
+    zeroDwellViolation: row.zero_dwell_violation === 1,
+    inputDts,
+    blurCount: row.blur_count,
     lastSeq: row.last_event_seq,
   };
 }
@@ -106,6 +135,8 @@ export async function saveMetricsState(
   baseSeq: number | null
 ): Promise<"applied" | "conflict"> {
   // All folded fields, mirroring the stored row.
+  const focusDtObj: Record<string, number> = {};
+  for (const [k, v] of state.focusDtByTarget) focusDtObj[k] = v;
   const values = [
     sessionId,
     JSON.stringify(state.focusedTargets),
@@ -120,10 +151,14 @@ export async function saveMetricsState(
     state.capturePointer ? 1 : 0,
     state.captureKey ? 1 : 0,
     state.lastSeq,
+    JSON.stringify(focusDtObj),
+    state.zeroDwellViolation ? 1 : 0,
+    JSON.stringify(state.inputDts),
+    state.blurCount,
     Date.now(),
     Date.now(),
   ];
-  const now = values[13];
+  const now = values[values.length - 2];
 
   if (baseSeq === null) {
     // The fold started from empty — the row must not exist yet. INSERT OR
@@ -135,8 +170,9 @@ export async function saveMetricsState(
            session_id, focused_targets_json, pointer_count, focus_transitions,
            key_count, input_without_focus, first_event_dt, first_meaningful_dt,
            submit_dt, last_event_dt, capture_pointer, capture_key,
-           last_event_seq, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           last_event_seq, focus_dt_by_target_json, zero_dwell_violation,
+           input_dts_json, blur_count, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(...values)
       .run();
@@ -161,6 +197,10 @@ export async function saveMetricsState(
          capture_pointer = ?,
          capture_key = ?,
          last_event_seq = ?,
+         focus_dt_by_target_json = ?,
+         zero_dwell_violation = ?,
+         input_dts_json = ?,
+         blur_count = ?,
          updated_at = ?
        WHERE session_id = ? AND last_event_seq = ?`
     )
@@ -177,6 +217,10 @@ export async function saveMetricsState(
       state.capturePointer ? 1 : 0,
       state.captureKey ? 1 : 0,
       state.lastSeq,
+      JSON.stringify(focusDtObj),
+      state.zeroDwellViolation ? 1 : 0,
+      JSON.stringify(state.inputDts),
+      state.blurCount,
       now,
       sessionId,
       baseSeq

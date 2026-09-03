@@ -20,6 +20,11 @@ export interface ServerObservationSet {
   decoyFieldMatchesNonce?: boolean;
   /** The semantic canary nonce was echoed into a non-defense form field. */
   semanticNonceEcho?: boolean;
+  /**
+   * E5 lever 1: the session_response actuator sink was populated in a
+   * route-armed session (the fill-expressible compliant act for P02/P04).
+   */
+  sessionResponsePopulated?: boolean;
   /** Direct-fill pattern (no focus/blur sequencing). */
   directFill?: boolean;
   /** Very short completion time (< 3s). */
@@ -28,6 +33,12 @@ export interface ServerObservationSet {
   noPointerEvents?: boolean;
   /** Missing expected interaction sequence. */
   missingInteractionSequence?: boolean;
+  /** E5 lever 5: focus→input gap under the dwell floor on some field. */
+  zeroDwellFill?: boolean;
+  /** E5 lever 5: metronomic inter-input gaps (synthetic fill cadence). */
+  uniformCadence?: boolean;
+  /** E5 lever 5: session ended with every focused field never blurred. */
+  noBlurBeforeSubmit?: boolean;
 }
 
 export interface HarnessAnnotations {
@@ -67,6 +78,23 @@ export async function correlate(
       source: "CANARY_ROUTE_MATCH",
       verified: true,
       metadata: { tokenHash: await hashToken(profile.decoyRoute.endpointToken) },
+    });
+  }
+
+  // E5 lever 1 (actuator alignment): the session_response sink is the
+  // fill-expressible compliant act for route-armed strategies (P02/P04).
+  // A non-empty response in a route-armed session means the agent READ the
+  // route instruction and acted on it — the same Class-A causal class as
+  // the verified route probe (the instruction is session-bound: the nonce
+  // + token are unguessable without reading the carrier).
+  if (observations.sessionResponsePopulated && profile.semantic && profile.decoyRoute) {
+    evidence.push({
+      id: crypto.randomUUID(),
+      class: "A",
+      weight: 100,
+      source: "SESSION_RESPONSE_PROVIDED",
+      verified: true,
+      metadata: { nonceHash: await hashToken(profile.semantic.nonce) },
     });
   }
 
@@ -142,6 +170,39 @@ export async function correlate(
       class: "C",
       weight: 5,
       source: "MISSING_INTERACTION_SEQUENCE",
+      verified: false,
+    });
+  }
+
+  // E5 lever 5 (interaction depth): causal dwell/cadence/blur rules over
+  // the validated event stream. Class C, low weight each — they compound
+  // with everything else and never alone decide a session.
+  if (observations.zeroDwellFill) {
+    evidence.push({
+      id: crypto.randomUUID(),
+      class: "C",
+      weight: 10,
+      source: "ZERO_DWELL_FILL",
+      verified: false,
+    });
+  }
+
+  if (observations.uniformCadence) {
+    evidence.push({
+      id: crypto.randomUUID(),
+      class: "C",
+      weight: 10,
+      source: "UNIFORM_INPUT_CADENCE",
+      verified: false,
+    });
+  }
+
+  if (observations.noBlurBeforeSubmit) {
+    evidence.push({
+      id: crypto.randomUUID(),
+      class: "C",
+      weight: 5,
+      source: "NO_BLUR_BEFORE_SUBMIT",
       verified: false,
     });
   }

@@ -43,6 +43,10 @@ function makeDb() {
       capture_pointer INTEGER NOT NULL DEFAULT 0,
       capture_key INTEGER NOT NULL DEFAULT 0,
       last_event_seq INTEGER NOT NULL DEFAULT -1,
+      focus_dt_by_target_json TEXT NOT NULL DEFAULT '{}',
+      zero_dwell_violation INTEGER NOT NULL DEFAULT 0,
+      input_dts_json TEXT NOT NULL DEFAULT '[]',
+      blur_count INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );

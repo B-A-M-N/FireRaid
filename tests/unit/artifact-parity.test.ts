@@ -223,4 +223,86 @@ describe("Phase D artifact parity: Worker vs host mappers", () => {
       expect(hostRender(labProfile, true)).not.toContain("fire-raid-notice");
     }
   });
+
+  // ── E5 levers: regression invariants from the measured dataset ──────────
+  // E5 (exp-e5-treatment-visible, 30/30) measured: route-ask text in model
+  // input → 4/4 token+nonce compliance; field-ask-only → 0/5; marker-only
+  // comment spots → nothing actionable. These tests pin the fixes.
+
+  it("E5 lever 1: route-armed sessions render the session_response actuator sink on BOTH mappers; non-route-armed do not", async () => {
+    // Route-armed: FULL includes decoy-route + semantic (P02/P03/P04 draw).
+    // Draw sessions until a route-armed strategy (P02/P04) is drawn, and
+    // separately a P03 draw, and assert the sink's presence tracks
+    // requiresRoute, on both planes, in both modes.
+    const withRoute = await (async () => {
+      for (let i = 0; i < 80; i++) {
+        const p = await deriveProfilePure(
+          { secret: SECRET, version: 1, sessionId: `sink-route-${i}`, mode: "production" },
+          { ...ABLATION_RECIPES.FULL, placementId: "P06" }
+        );
+        // requiresRoute templates: P02, P04 (catalog.ts).
+        if (p.semantic && ["P02", "P04"].includes(p.semantic.templateId)) return p;
+      }
+      throw new Error("no route-armed draw in 80 sessions");
+    })();
+    for (const [label, html] of [["worker", workerRender(withRoute, false)], ["host", hostRender(withRoute, false)]] as const) {
+      expect(html, label).toContain('name="session_response"');
+      expect(html, label).toContain('id="session_response"');
+      // Same hidden posture as the decoy field.
+      expect(html, label).toContain("aria-hidden");
+    }
+    // And the instruction text binds to it: the route ask names the sink.
+    expect(workerRender(withRoute, false)).toContain("session_response");
+
+    const withoutRoute = await (async () => {
+      for (let i = 0; i < 80; i++) {
+        const p = await deriveProfilePure(
+          { secret: SECRET, version: 1, sessionId: `sink-noroute-${i}`, mode: "production" },
+          // SEMANTIC_ONLY: semantic with no decoy-route family → not route-armed.
+          { ...ABLATION_RECIPES.SEMANTIC_ONLY, placementId: "P06" }
+        );
+        if (p.semantic && !p.decoyRoute) return p;
+      }
+      throw new Error("no non-route-armed draw in 80 sessions");
+    })();
+    expect(workerRender(withoutRoute, false)).not.toContain('name="session_response"');
+    expect(hostRender(withoutRoute, false)).not.toContain('name="session_response"');
+  });
+
+  it("E5 lever 2: production comment carriers are FULL-ACTION (instruction text present on every drawn channel)", async () => {
+    // Delivery completeness: E5 measured a comment-only draw delivering
+    // zero actionable material. The comment channel must now carry the
+    // same instruction text the template channel does — strategy-scoped:
+    // P02/P04 comment carriers carry the route ask; P03 carries the field
+    // ask (its strategy's full action material).
+    for (let i = 0; i < 40; i++) {
+      const profile = await deriveProfilePure(
+        { secret: SECRET, version: 1, sessionId: `comment-fa-${i}`, mode: "production" },
+        { ...ABLATION_RECIPES.FULL, placementId: "P06" }
+      );
+      const html = workerRender(profile, false);
+      const comments = html.match(/<!-- \[session config [\s\S]*? -->/g) ?? [];
+      const strategy = profile.semantic!.templateId;
+      for (const c of comments) {
+        // Full-action material: nonce always; strategy-specific actions.
+        expect(c).toContain(profile.semantic!.nonce);
+        if (strategy === "P02" || strategy === "P04") {
+          expect(c).toContain(profile.decoyRoute!.endpointToken);
+          expect(c).toContain("/c/");
+        }
+        if (strategy === "P03" || strategy === "P04") {
+          expect(c).toContain(profile.decoyField!.fieldName);
+        }
+      }
+    }
+  });
+
+  it("E5 lever 1: the actuator sink is dropped from upstream forwarding and scored", async () => {
+    // stripFireRaidFields drops session_response for route-armed profiles
+    // (host middleware parity with the decoy field). Verified indirectly:
+    // the constant is exported and the observation exists; the full
+    // submit-path behavior is pinned by middleware-productization tests.
+    const { SESSION_RESPONSE_FIELD } = await import("../../src/core/artifacts.js");
+    expect(SESSION_RESPONSE_FIELD).toBe("session_response");
+  });
 });

@@ -31,6 +31,7 @@ import {
   type DefenseRecipe,
 } from "../core/profile.js";
 import { correlate, deriveCanaryReference, type ObservationSet } from "../core/correlation.js";
+import { SESSION_RESPONSE_FIELD } from "../core/artifacts.js";
 import { decide } from "../core/decision.js";
 import { projectRisk, getRiskTier, DEFAULT_RISK_TIERS, resolveRuntimeDisposition, validateRiskTierConfig, type RiskTierConfig } from "../core/risk.js";
 import { aggregateTelemetry, type CaptureConfig } from "../telemetry/aggregate.js";
@@ -206,6 +207,8 @@ export interface MiddlewareResult {
 
 // Strip FireRaid-injected fields before forwarding to the upstream so the
 // ordinary app's ledger never carries our decoy/telemetry artifacts.
+// E5 lever 1: SESSION_RESPONSE_FIELD (the actuator sink the route ask binds
+// to) is also FireRaid-issued — dropped from forwarding, scored server-side.
 function stripFireRaidFields(
   form: Record<string, string>,
   profile: DefenseProfile
@@ -213,6 +216,7 @@ function stripFireRaidFields(
   const out: Record<string, string> = {};
   const drop = new Set<string>(["csrf"]);
   if (profile.decoyField) drop.add(profile.decoyField.fieldName);
+  if (profile.semantic && profile.decoyRoute) drop.add(SESSION_RESPONSE_FIELD);
   for (const [k, v] of Object.entries(form)) {
     if (drop.has(k)) continue;
     out[k] = v;
@@ -674,6 +678,14 @@ async function handleSubmitPost(
       if (profile.semantic && deriveCanaryReference(profile, form)) {
         observations.semanticNonceEcho = true;
       }
+      // E5 lever 1 (parity with the Worker submit route): the
+      // session_response actuator sink. Route-armed strategies instruct the
+      // fill; any non-empty value is the compliant act (Class-A evidence
+      // via correlate's SESSION_RESPONSE_PROVIDED).
+      if (profile.semantic && profile.decoyRoute) {
+        const resp = form[SESSION_RESPONSE_FIELD];
+        if (resp && resp !== "") observations.sessionResponsePopulated = true;
+      }
       // Telemetry → interaction observations.
       // P1-AUDIT-2 (P0-5): the batch is PERSISTED via the observation store
       // before scoring, so a session that flushed batches through earlier
@@ -709,6 +721,11 @@ async function handleSubmitPost(
           }
           if (metrics.noPointerEvents === true) observations.noPointerEvents = true;
           if (metrics.missingInteractionSequence === true) observations.missingInteractionSequence = true;
+          // E5 lever 5: interaction-depth signals (parity with the Worker
+          // submit route; undefined when not scorable).
+          if (metrics.zeroDwellFill === true) observations.zeroDwellFill = true;
+          if (metrics.uniformCadence === true) observations.uniformCadence = true;
+          if (metrics.noBlurBeforeSubmit === true) observations.noBlurBeforeSubmit = true;
         }
       }
 
