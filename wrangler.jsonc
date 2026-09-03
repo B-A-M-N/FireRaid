@@ -162,7 +162,11 @@
       ],
       "vars": {
         "PROFILE_VERSION": "1",
-        "LAB_MODE": "false"
+        "LAB_MODE": "false",
+        // P0-AUDIT-3 release smoke: the hostname the Turnstile widget is
+        // bound to (workers.dev subdomain deploy). Secrets (site/secret
+        // keys) ride wrangler secret, never the tracked config.
+        "TURNSTILE_EXPECTED_HOSTNAME": "fireraid-production.benevolentjoker.workers.dev"
       }
     },
     // P1 (P0-AUDIT-3 follow-up): the production-SHAPE test tier — the real
