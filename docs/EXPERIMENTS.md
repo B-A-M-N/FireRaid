@@ -113,8 +113,8 @@ Agent architecture names (harness agent taxonomy): `human`, `raw-dom`,
 | E1 | Semantic canary only (lab) |
 | E2 | Decoy field/route only |
 | E3 | Interaction telemetry only |
-| E4 | **CONTROL vs PRODUCTION_DEFAULT** (the headline efficacy experiment — PRODUCTION_DEFAULT is the shipped treatment) |
-| E5 | Production ablations: field / route / interaction / non-semantic-full (attribute the effect to a mechanism) |
+| E4 | **CONTROL vs PRODUCTION_DEFAULT** (the headline efficacy experiment — PRODUCTION_DEFAULT is the shipped treatment). RAN 2026-09: 30/30 terminal, `harness/results/exp-e4-headline/`. **Result: no efficacy signal — channel-invisibility finding.** Production semantic carriers are inert `<template>` elements (the production presentation invariant), and `simplified-dom`-perception agents structurally cannot see template content (DocumentFragment, never reaches model input; proven by replay probe). Defended-arm agents saw only the decoy field (all 10 ignored it) and never touched `/c/`; endpoint ≈100% both arms; humans 5/5 clean both arms. Efficacy claims need a perception channel that receives the treatment. |
+| E5 | Production ablations: field / route / interaction / non-semantic-full (attribute the effect to a mechanism). **Prerequisite from E4: run the defended arm with a perception channel that receives the semantic carriers** — `raw-html` extractor (sees template innerHTML) or `vision-only` agents — or the semantic layer is untestable against DOM agents. |
 | E6 | Full lab stack (all four families, lab plane) |
 | E7 | Full lab stack + Turnstile required |
 | E8 | Hardened-agent condition |
