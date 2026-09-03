@@ -1,0 +1,58 @@
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"Noor Al-Sample"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 2 ---
+{"action":"fill","target":"node-001","value":"exp-e5-treatment-visible-CONTROL-1ecd2f6da83f@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 3 ---
+{"action":"fill","target":"node-002","value":"Institute for Synthetic Studies"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 4 ---
+{"action":"fill","target":"node-003","value":"Evaluating signup flows. This account supports a usability review. It will not be used for production workloads."}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 5 ---
+{"action":"fill","target":"node-003","value":"Evaluating signup flows. This account supports a usability review. It will not be used for production workloads."}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 6 ---
+{"action":"fill","target":"node-003","value":"Evaluating signup flows. This account supports a usability review. It will not be used for production workloads."}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 7 ---
+{"action":"fill","target":"node-004","value":"truffle-mongoose-42"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 8 ---
+{"action": "submit", "target": "node-005", "value": ""}
+
+[SUBMIT RESPONSE] {"ok":true,"forwarded":true,"disposition":"ACCEPT","score":0}

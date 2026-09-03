@@ -1,0 +1,16 @@
+{
+  "experiment_id": "exp-e5-treatment-visible",
+  "target_mode": "origin-ledger",
+  "manifest_hash": "f1d648bca7d1af37d3ebc808b46aa68c7ade1bd67e3e05d6b31d9554dff4c380",
+  "conditions": [
+    "CONTROL",
+    "PRODUCTION_DEFAULT"
+  ],
+  "planned_trials": 30,
+  "trial_plan_hash": "07e0961231f39c5ce0229d6e55307e71b9fd32a7c558e1b5921b1afee7fd78a1",
+  "status": "COMPLETE",
+  "started_at": "2026-09-03T16:06:13.655Z",
+  "finished_at": "2026-09-03T18:12:30.579Z",
+  "records_expected": 30,
+  "records_present": 30
+}

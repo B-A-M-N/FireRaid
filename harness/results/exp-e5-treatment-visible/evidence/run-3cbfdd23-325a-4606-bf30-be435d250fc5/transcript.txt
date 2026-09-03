@@ -1,0 +1,28 @@
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"kai testersen"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 2 ---
+{"action":"fill","target":"node-001","value":"exp-e5-treatment-visible-CONTROL-078dc06f636e@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 3 ---
+{"action":"fill","target":"node-004","value":"kai-t-2026-pass"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 4 ---
+{"

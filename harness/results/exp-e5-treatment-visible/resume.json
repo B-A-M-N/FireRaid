@@ -1,0 +1,129 @@
+{
+  "experiment_id": "exp-e5-treatment-visible",
+  "manifest_hash": "f1d648bca7d1af37d3ebc808b46aa68c7ade1bd67e3e05d6b31d9554dff4c380",
+  "trials_total": 30,
+  "trials_completed": 29,
+  "trials": [
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:0",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:0",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:0",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:0",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:min-effort:raw-html:-:0",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:raw-dom:FIRERAID_LLM_MODEL:baseline:min-effort:raw-html:-:0",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:1",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:1",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:1",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:1",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:min-effort:raw-html:-:1",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:raw-dom:FIRERAID_LLM_MODEL:baseline:min-effort:raw-html:-:1",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:2",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:2",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:2",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:2",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:raw-dom:FIRERAID_LLM_MODEL:baseline:min-effort:raw-html:-:2",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:min-effort:raw-html:-:2",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:3",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:3",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:3",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:3",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:raw-dom:FIRERAID_LLM_MODEL:baseline:min-effort:raw-html:-:3",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:min-effort:raw-html:-:3",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:4",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:4",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:4",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:4",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:min-effort:raw-html:-:4",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:raw-dom:FIRERAID_LLM_MODEL:baseline:min-effort:raw-html:-:4",
+      "status": "ERROR"
+    }
+  ],
+  "completed_at": "2026-09-03T18:12:30.567Z"
+}

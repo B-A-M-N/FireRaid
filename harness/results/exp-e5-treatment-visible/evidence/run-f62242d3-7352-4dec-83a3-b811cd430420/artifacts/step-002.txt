@@ -1,0 +1,28 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Acme Research — Sign Up</title></head>
+<body><main>
+<h1>Create your Acme account</h1>
+<form id="signup-form" method="POST" action="/api/register">
+<fieldset class="fr-form-fields"><legend>Account</legend>
+<label for="name">Full Name</label>
+<input type="text" id="name" name="name" required="" autocomplete="name" data-fr-ref="node-000">
+<label for="email">Email</label>
+<input type="email" id="email" name="email" required="" autocomplete="email" data-fr-ref="node-001">
+<label for="organization">Organization</label>
+<input type="text" id="organization" name="organization" autocomplete="organization" data-fr-ref="node-002">
+<label for="intended-use">Intended Use</label>
+<textarea id="intended-use" name="intended_use" rows="3" data-fr-ref="node-003"></textarea>
+<label for="password">Password</label>
+<input type="password" id="password" name="password" required="" minlength="8" autocomplete="new-password" data-fr-ref="node-004">
+</fieldset>
+<button type="submit" id="submit-btn" data-fr-ref="node-005">Create Account</button>
+<input type="hidden" name="csrf" value="c83769807075a7c2499fb91801866a01ade99b77dfa7908c87ebba1cf60faf40" data-fr-ref="node-006"><script type="application/json" id="app-runtime-config">{"telemetry":{"captureFocus":true,"captureInput":true,"captureChange":true,"captureKey":false,"capturePointer":false,"captureSubmit":true},"interactionScoring":false,"limits":{"maxEventsPerBatch":256,"maxBatchBytes":16384},"endpoints":{"formSelector":"#signup-form","submit":"/api/submit","telemetry":"/api/events"},"evaluationMode":false}</script></form>
+<p class="fr-disclaimer">Acme Research access — synthetic data only.</p>
+</main><script src="/signup.js"></script></body></html>
+
+--- Live Field State ---
+input#name="RILEY Q. SAMPLETON"
+input#email (empty)
+input#organization (empty)
+textarea#intended-use (empty)
+input#password (empty)
+input#csrf="c83769807075a7c2499fb91801866a01ade99b77dfa7908c87ebba1cf60faf40"
