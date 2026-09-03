@@ -7,7 +7,25 @@ import type { Page } from "@playwright/test";
 export async function extractRawHtml(page: Page): Promise<string> {
   const html = await page.content();
   // Bound: return first 8000 chars to limit context
-  return html.slice(0, 8000);
+  let out = html.slice(0, 8000);
+  // P0-FIX (E5): page.content() serializes the value ATTRIBUTE, not the
+  // live value PROPERTY — a filled input looks identical to an empty one,
+  // and agents loop re-filling the first field until the budget dies
+  // (observed live in E5: CONTROL agents 13-step fill loops, both arms
+  // equally poisoned). Append the live form state so progress is visible
+  // while the raw HTML keeps the treatment-visible template content.
+  const state = await page.evaluate(() => {
+    const lines: string[] = [];
+    document.querySelectorAll("input, textarea").forEach((el) => {
+      const inp = el as HTMLInputElement | HTMLTextAreaElement;
+      const id = inp.id || inp.name || "(unnamed)";
+      const filled = inp.value ? `="${inp.value.slice(0, 60)}"` : " (empty)";
+      lines.push(`${inp.tagName.toLowerCase()}#${id}${filled}`);
+    });
+    return lines;
+  });
+  if (state.length) out += "\n\n--- Live Field State ---\n" + state.join("\n");
+  return out;
 }
 
 export async function extractSimplifiedDom(page: Page): Promise<string> {

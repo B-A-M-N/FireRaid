@@ -148,7 +148,7 @@
         ]
       },
       // FR-R6-001: production MUST have a distinct database from public-lab —
-      // swap database_id (`wrangler d1 create fireraid-production`).
+      // created 2026-09-03 (ENAM region).
 "triggers": {
         // FR-P0-15: retention sweep cron (see top-level note).
         "crons": ["41 4 * * *"]
@@ -157,7 +157,7 @@
         {
           "binding": "DB",
           "database_name": "fireraid-production",
-          "database_id": "REPLACE_AFTER_CREATE"
+          "database_id": "d69ea0ad-3635-4ebe-ada4-f585c0124f1b"
         }
       ],
       "vars": {
