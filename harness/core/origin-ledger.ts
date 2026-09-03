@@ -43,6 +43,7 @@
  *         reports the actually-bound ports. shutdown() awaits both closes.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { makeCsrf, ReferenceSessionAdapter, referenceInject, ReferenceVerificationAdapter, ReferenceTelemetryAdapter, ReferenceCanaryStore, type HostEnforcementAdapter } from "../../src/host-adapter/index.js";
 import { admitEvaluation, type EvaluationMiddlewareDeps } from "../../src/eval/evaluation-middleware.js";
@@ -413,7 +414,14 @@ export async function startOriginLedgerRuntime(opts: {
 
 /** The synthetic per-trial email — unique, trial-identity-bound. */
 export function trialEmail(experimentId: string, trialKey: string): string {
-  return `${experimentId}.${trialKey.replace(/[^a-z0-9]+/gi, "-")}@ledger-probe.invalid`;
+  // P0-FIX (E4): the email must stay inside the simplified-dom extractor's
+  // 80-char attribute cap. The trial key alone is unambiguous — the
+  // experiment id prefix is provenance carried by the record, not needed
+  // inside the address — and a 12-hex digest keeps uniqueness without a
+  // readable monster that the agent sees truncated, "fixes", and loops on
+  // (byte-identical observation every step). 33 + 12 + 21 = 66 chars max.
+  const digest = createHash("sha256").update(`${experimentId}:${trialKey}`).digest("hex").slice(0, 12);
+  return `${trialKey.replace(/[^a-z0-9]+/gi, "-").slice(0, 32)}-${digest}@ledger-probe.invalid`;
 }
 
 export { makeCsrf };

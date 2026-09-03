@@ -96,7 +96,19 @@ function isTransientLlmError(err: unknown): boolean {
   // HTTP 408/429/5xx from the router; timeouts; empty-router responses.
   const status = err.message.match(/^LLM error: (\d{3})$/);
   if (status) return ["408", "429", "500", "502", "503", "504"].includes(status[1]);
-  return err.message === "MODEL_TIMEOUT" || err.message === "LLM_EMPTY_REPLY";
+  if (err.message === "MODEL_TIMEOUT" || err.message === "LLM_EMPTY_REPLY") return true;
+  // P0-FIX (E4): network-layer failures (DNS hiccup, connection reset,
+  // TLS error, socket hang-up — "fetch failed" with a `cause`) are the
+  // same free-tier transport flakiness as a 503 and MUST retry/rotate,
+  // not abort the trial. Node surfaces these as TypeError with a cause.
+  if (err.message === "fetch failed") return true;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    const c = cause.message;
+    // undici send/drainer codes + the classic socket phrases.
+    return /ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|ETIMEDOUT|EPIPE|EHOSTUNREACH|socket hang ?up|other side closed|aborted/.test(c);
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
