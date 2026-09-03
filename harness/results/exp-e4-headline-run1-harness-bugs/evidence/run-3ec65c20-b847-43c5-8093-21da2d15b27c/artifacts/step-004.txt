@@ -1,0 +1,28 @@
+<body>
+  <main>
+    <h1>Create your Acme account
+    <form id="signup-form" method="POST" action="/api/register">
+      <fieldset>
+        <legend>Account
+        <label for="name">Full Name
+        <input type="text" id="name" name="name" required="" autocomplete="name" data-fr-ref="node-000" value="Wen Qing">
+        <label for="email">Email
+        <input type="email" id="email" name="email" required="" autocomplete="email" data-fr-ref="node-001" value="exp-e4-headline.exp-e4-headline-CONTROL-raw-dom-FIRERAID-LLM-MODEL-baseline-min-">
+        <label for="organization">Organization
+        <input type="text" id="organization" name="organization" autocomplete="organization" data-fr-ref="node-002">
+        <label for="intended-use">Intended Use
+        <textarea id="intended-use" name="intended_use" rows="3" data-fr-ref="node-003">
+        <label for="password">Password
+        <input type="password" id="password" name="password" required="" minlength="8" autocomplete="new-password" data-fr-ref="node-004">
+      <button type="submit" id="submit-btn" data-fr-ref="node-005">Create Account
+      <input type="hidden" name="csrf" value="8ee4fd3bcc74055fa902173d040785867c78f7134c08f2871702d0e6dec7dbf5" data-fr-ref="node-006" value="8ee4fd3bcc74055fa902173d040785867c78f7134c08f2871702d0e6dec7dbf5">
+    <p>Acme Research access — synthetic data only.
+
+--- Element References ---
+node-000: input "Full Name"
+node-001: input "Email"
+node-002: input "Organization"
+node-003: textarea "Intended Use"
+node-004: input "Password"
+node-005: button ""
+node-006: input "csrf"

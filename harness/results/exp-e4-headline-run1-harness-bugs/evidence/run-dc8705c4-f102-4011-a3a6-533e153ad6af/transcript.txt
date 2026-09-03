@@ -1,0 +1,11 @@
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"Tariq Ibn-Test"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
