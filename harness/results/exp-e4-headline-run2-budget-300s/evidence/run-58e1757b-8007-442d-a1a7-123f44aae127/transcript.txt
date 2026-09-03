@@ -1,0 +1,35 @@
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:78deab2233fd
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"Zoë Exampleton"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 2 ---
+{"action":"fill","target":"node-001","value":"exp-e4-headline-PRODUCTION-DEFAU-9464ad5328e7@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 3 ---
+{"action":"fill","target":"node-002","value":"exampleton gmbh"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 4 ---
+{"action":"fill","target":"node-003","value":"GmbH-internal evaluation of sign-up integrations (Q3 pilot)"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 5 ---
+{"action":"fill","target":"node-004","value":"gmbh-pilot-Xy12!"}

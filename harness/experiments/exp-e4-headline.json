@@ -6,7 +6,7 @@
     "mode": "origin-ledger"
   },
   "repetitions": 5,
-  "timeout_ms": 300000,
+  "timeout_ms": 900000,
   "fixture": "pool",
   "profile_version": 1,
   "max_steps": 18,
