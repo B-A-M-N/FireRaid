@@ -258,13 +258,11 @@ docs/           Architecture, integration, threat model, invariants
 
 ## Acknowledgements
 
-FireRaid exists to serve the mission of [FreeInference.org](https://freeinference.org) —
-free, open access to inference for everyone. If you find this project useful,
-please support FreeInference.org and the work they do.
+FireRaid was originally developed in response to problems observed around open-access inference services, including [FreeInference.org](https://freeinference.org), but it is an independent, general-purpose project intended to be useful beyond any single platform or organization.
 
-This project is an independent effort: **we were not asked or commissioned by
-FreeInference.org to build it, and nothing here has been reviewed or endorsed
-by them.** Any errors, overclaims, or odd design decisions are entirely ours.
+FireRaid is **not affiliated with, sponsored by, endorsed by, commissioned by, or developed under the direction of FreeInference.org**. FreeInference.org did not request this project, has not reviewed or approved its design or implementation, and is not responsible for its claims, behavior, documentation, or technical decisions.
+
+Any references to FreeInference.org are provided for context and acknowledgement only. All responsibility for FireRaid, including any errors, overclaims, or design decisions, rests solely with this project and its maintainers.
 
 ## License
 
