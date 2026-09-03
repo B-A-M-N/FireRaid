@@ -19,7 +19,7 @@ export async function extractRawHtml(page: Page): Promise<string> {
     document.querySelectorAll("input, textarea").forEach((el) => {
       const inp = el as HTMLInputElement | HTMLTextAreaElement;
       const id = inp.id || inp.name || "(unnamed)";
-      const filled = inp.value ? `="${inp.value.slice(0, 60)}"` : " (empty)";
+      const filled = inp.value ? `="${inp.value.slice(0, 80)}"` : " (empty)";
       lines.push(`${inp.tagName.toLowerCase()}#${id}${filled}`);
     });
     return lines;

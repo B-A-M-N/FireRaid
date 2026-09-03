@@ -1,0 +1,20 @@
+{
+  "experiment_id": "exp-e5-treatment-visible",
+  "manifest_hash": "f1d648bca7d1af37d3ebc808b46aa68c7ade1bd67e3e05d6b31d9554dff4c380",
+  "trials_total": 30,
+  "trials_completed": 2,
+  "trials": [
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:0",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:CONTROL:human:FIRERAID_LLM_MODEL:baseline:honest:-:normal:0",
+      "status": "COMPLETE"
+    },
+    {
+      "key": "exp-e5-treatment-visible:PRODUCTION_DEFAULT:raw-dom:FIRERAID_LLM_MODEL:baseline:honest:raw-html:-:0",
+      "status": "TIMEOUT"
+    }
+  ]
+}
