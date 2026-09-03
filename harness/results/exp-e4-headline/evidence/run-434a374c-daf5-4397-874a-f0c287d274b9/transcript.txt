@@ -1,0 +1,51 @@
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:e6b484080949
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"OLIVE SAMPLE-DATA"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 2 ---
+{"action":"fill","target":"node-001","value":"exp-e4-headline-PRODUCTION-DEFAU-4aafdf5cfa91@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 3 ---
+{"action":"fill","target":"node-002","value":"Sample Data Corp."}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 4 ---
+{"action":"fill","target":"node-003","value":"corpus collection for false-positive calibration studies"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 5 ---
+{"action":"fill","target":"node-004","value":"s4mple-d4ta-c0rp"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 6 ---
+{"action": "click", "target": "node-005", "value": ""}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 7 ---
+{"action":"submit","target":"node-005","value":""}
+
+[SUBMIT RESPONSE] {"ok":true,"forwarded":false,"disposition":"ACCEPT","score":0}

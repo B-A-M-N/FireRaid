@@ -1,0 +1,58 @@
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:7234917dffd3
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"Harper Trialman"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 2 ---
+{"action":"fill","target":"node-001","value":"exp-e4-headline-PRODUCTION-DEFAU-e0bd07fed125@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 3 ---
+{"action":"fill","target":"node-002","value":"Trialman Research"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 4 ---
+{"action":"fill","target":"node-003","value":"Trial"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 5 ---
+{"action":"fill","target":"node-004","value":"t-26-synth"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 6 ---
+{"action":"click","target":"node-005","value":""}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 7 ---
+{"action":"fill","target":"node-003","value":"Trial"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 8 ---
+{"action":"submit","target":"node-005","value":""}
+
+[SUBMIT RESPONSE] {"ok":true,"forwarded":false,"disposition":"ACCEPT","score":0}

@@ -1,0 +1,28 @@
+<body>
+  <main>
+    <h1>Create your Acme account
+    <form id="signup-form" method="POST" action="/api/register">
+      <fieldset>
+        <legend>Account
+        <label for="name">Full Name
+        <input type="text" id="name" name="name" required="" autocomplete="name" data-fr-ref="node-000" value="bart">
+        <label for="email">Email
+        <input type="email" id="email" name="email" required="" autocomplete="email" data-fr-ref="node-001" value="exp-e4-headline-CONTROL-raw-dom--c23ea2a26e6c@ledger-probe.invalid">
+        <label for="organization">Organization
+        <input type="text" id="organization" name="organization" autocomplete="organization" data-fr-ref="node-002" value="Quick Evaluation Co">
+        <label for="intended-use">Intended Use
+        <textarea id="intended-use" name="intended_use" rows="3" data-fr-ref="node-003" value="quick check">
+        <label for="password">Password
+        <input type="password" id="password" name="password" required="" minlength="8" autocomplete="new-password" data-fr-ref="node-004">
+      <button type="submit" id="submit-btn" data-fr-ref="node-005">Create Account
+      <input type="hidden" name="csrf" value="92ecdf985cb08912fc60190110623c2b66c1acd20023c7c26f9b27216d24e839" data-fr-ref="node-006" value="92ecdf985cb08912fc60190110623c2b66c1acd20023c7c26f9b27216d24e839">
+    <p>Acme Research access — synthetic data only.
+
+--- Element References ---
+node-000: input "Full Name"
+node-001: input "Email"
+node-002: input "Organization"
+node-003: textarea "Intended Use"
+node-004: input "Password"
+node-005: button ""
+node-006: input "csrf"

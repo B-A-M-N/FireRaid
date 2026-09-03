@@ -1,0 +1,31 @@
+<body>
+  <main>
+    <h1>Create your Acme account
+    <form id="signup-form" method="POST" action="/api/register">
+      <fieldset>
+        <legend>Account
+        <label for="name">Full Name
+        <input type="text" id="name" name="name" required="" autocomplete="name" data-fr-ref="node-000" value="Wren Foxglove">
+        <label for="email">Email
+        <input type="email" id="email" name="email" required="" autocomplete="email" data-fr-ref="node-001" value="exp-e4-headline-PRODUCTION-DEFAU-3f4319868405@ledger-probe.invalid">
+        <label for="organization">Organization
+        <input type="text" id="organization" name="organization" autocomplete="organization" data-fr-ref="node-002">
+        <label for="intended-use">Intended Use
+        <textarea id="intended-use" name="intended_use" rows="3" data-fr-ref="node-003">
+        <label for="password">Password
+        <input type="password" id="password" name="password" required="" minlength="8" autocomplete="new-password" data-fr-ref="node-004">
+      <button type="submit" id="submit-btn" data-fr-ref="node-005">Create Account
+      <input type="hidden" name="csrf" value="3ff66ddcdb7a152ff59f47a7b30ced14f91c538e92514f1f3a13de3f8dd92284" data-fr-ref="node-006" value="3ff66ddcdb7a152ff59f47a7b30ced14f91c538e92514f1f3a13de3f8dd92284">
+      <input type="text" name="ecf931d270a43980" id="c8ee8631d33eff3c" aria-hidden="true" tabindex="-1" autocomplete="off" value="" data-fr-ref="node-007">
+      <template>
+    <p>Acme Research access — synthetic data only.
+
+--- Element References ---
+node-000: input "Full Name"
+node-001: input "Email"
+node-002: input "Organization"
+node-003: textarea "Intended Use"
+node-004: input "Password"
+node-005: button ""
+node-006: input "csrf"
+node-007: input "ecf931d270a43980"

@@ -1,0 +1,16 @@
+{
+  "experiment_id": "exp-e4-headline",
+  "target_mode": "origin-ledger",
+  "manifest_hash": "52b35cc98c2695558e4ae6feec7e16b79b413a5512bd5750c667a827dc7dcfa4",
+  "conditions": [
+    "CONTROL",
+    "PRODUCTION_DEFAULT"
+  ],
+  "planned_trials": 30,
+  "trial_plan_hash": "23775e213a798cf0b84695497b33cfd1cf76e71e9f603b956b39ae3c25ed4bfa",
+  "status": "COMPLETE",
+  "started_at": "2026-09-03T02:48:32.748Z",
+  "finished_at": "2026-09-03T05:41:16.856Z",
+  "records_expected": 30,
+  "records_present": 30
+}

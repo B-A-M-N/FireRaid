@@ -1,0 +1,28 @@
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"Wen Qing"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 2 ---
+{"action":"fill","target":"node-001","value":"exp-e4-headline-CONTROL-raw-dom--50f9a70e2377@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 3 ---
+{"action":"fill","target":"node-004","value":"synth-wq-2026-key"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 4 ---
+{"action":"submit","target":"node-00
