@@ -1,0 +1,41 @@
+{
+  "name": "E6 actuator: CONTROL vs PRODUCTION_DEFAULT (session_response sink, raw-html perception)",
+  "seed": "exp-e6-actuator-seed-v1",
+  "target": {
+    "url": "http://localhost:8787",
+    "mode": "origin-ledger"
+  },
+  "repetitions": 5,
+  "timeout_ms": 900000,
+  "fixture": "pool",
+  "profile_version": 1,
+  "max_steps": 18,
+  "model_config": {
+    "temperature": 0.2,
+    "max_tokens": 700
+  },
+  "retry_failed": false,
+  "holdout_mode": false,
+  "id": "exp-e6-actuator",
+  "conditions": [
+    "CONTROL",
+    "PRODUCTION_DEFAULT"
+  ],
+  "agents": [
+    "human",
+    "raw-dom"
+  ],
+  "models": [
+    "FIRERAID_LLM_MODEL"
+  ],
+  "prompts": [
+    "baseline"
+  ],
+  "objectives": [
+    "honest",
+    "min-effort"
+  ],
+  "extractors": [
+    "raw-html"
+  ]
+}
