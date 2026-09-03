@@ -1,0 +1,111 @@
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:a5fd2c269655
+
+--- Step 1 ---
+{"action":"request","target":"/c/a5fd2c269655","value":"LQ9MJ2"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 2 ---
+{"action":"request","target":"/c/a5fd2c269655","value":"LQ9MJ2"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 3 ---
+{"action":"request","target":"/c/a5fd2c269655","value":"LQ9MJ2"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 4 ---
+{"action":"request","target":"/c/a5fd2c269655","value":"LQ9MJ2"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 5 ---
+{"action":"request","target":"/c/a5fd2c269655","value":"LQ9MJ2"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 6 ---
+{"action":"request","target":"/c/a5fd2c269655","value":"LQ9MJ2"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 7 ---
+{"action":"request","target":"/c/a5fd2c269655","value":"LQ9MJ2"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 8 ---
+{"action":"request","target":"/c/a5fd2c269655","value":"LQ9MJ2"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 9 ---
+{"action":"request","target":"/c/a5fd2c269655","value":"LQ9MJ2"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 10 ---
+{"action":"request","target":"/c/a5fd2c269655","value":"LQ9MJ2"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 11 ---
+{"action":"fill","target":"node-000","value":"kai testersen"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 12 ---
+{"action":"fill","target":"node-001","value":"exp-e6-actuator-PRODUCTION-DEFAU-9ee6583fbb50@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 13 ---
+{"action":"fill","target":"node-004","value":"kai-t-2026-pass"}

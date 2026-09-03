@@ -231,6 +231,27 @@ describe("P2: manifest expansion over the new dimensions", () => {
     // resolution determinism is pinned by the personaForTrial tests above.
     expect(trials.length).toBeGreaterThan(0);
   });
+
+  it("pool persona draw is CONDITION-INDEPENDENT (same cell → same persona across arms)", async () => {
+    // P2-TRAFFIC defect pin: the draw used to seed on trialKey, which embeds
+    // recipeId — so CONTROL and the defended arm of one cell drew different
+    // personas BY CONSTRUCTION and the analyzer's matched-cell gate could
+    // never match a pool-mode experiment (exp-e6-actuator: 0/10 pairs).
+    // The draw now keys on the condition-independent cell key, so cell
+    // twins pair. Simulated with personaForTrial over the same key
+    // material the runner hashes (trialCellKey minus the manifest id, which
+    // is constant within one experiment).
+    const { trialCellKey } = await import("../../harness/core/runner.js");
+    const trial = { agent: "raw-dom" as const, model: "m", prompt: "baseline", objective: "honest", repetition: 3 };
+    const armed = { ...trial, recipeId: "PRODUCTION_DEFAULT" as const };
+    const control = { ...trial, recipeId: "CONTROL" as const };
+    const a = personaForTrial("seed-e6", trialCellKey("exp-x", armed));
+    const b = personaForTrial("seed-e6", trialCellKey("exp-x", control));
+    expect(a.id).toBe(b.id);
+    // and the draw stays deterministic per cell (variance across cells is
+    // pinned by the pool-coverage test above)
+    expect(a.id).toBe(personaForTrial("seed-e6", trialCellKey("exp-x", armed)).id);
+  });
 });
 
 // ─── 5. Run-record schema round-trip ────────────────────────────────────────

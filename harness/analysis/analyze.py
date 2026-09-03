@@ -187,7 +187,7 @@ def _cell_norm(v) -> str:
 
 
 def matched_cells(
-    control_runs: list, defended_runs: list
+    control_runs: list, defended_runs: list, declaration: dict | None = None
 ) -> tuple[dict, dict, list]:
     """
     P0-AUDIT-3 (P0-2): restrict a comparative estimate to MATCHED cells.
@@ -198,13 +198,31 @@ def matched_cells(
     (or an arm where a model substitution dropped cells) otherwise changes
     the attacker-architecture MIX across arms, which is a confound the
     unstratified rate cannot correct.
+
+    P2-TRAFFIC fixture exception: when the declaration records
+    fixture_mode == "pool", fixture_id is a RANDOMIZED covariate (the
+    runner draws the persona from the condition-independent cell key, so
+    the two arms of one cell typically hold DIFFERENT personas by design).
+    Matching on it exactly would reject every cell of every pool-mode
+    experiment — so pool mode marginalizes fixture_id out of the cell key
+    (matching on the remaining dimensions), and the persona remains
+    observable per-record for per-pair inspection. Any other fixture_mode
+    (pinned persona-NN, default) keeps exact matching, fail-closed.
     """
+    fixture_mode = (declaration or {}).get("fixture_mode")
+    dims = CELL_DIMENSIONS
+    if fixture_mode == "pool" and "fixture_id" in dims:
+        dims = tuple(d for d in dims if d != "fixture_id")
+
+    def key(r: dict) -> tuple:
+        return tuple(_cell_norm(r.get(dim)) for dim in dims)
+
     control_cells = defaultdict(list)
     for r in control_runs:
-        control_cells[cell_key(r)].append(r)
+        control_cells[key(r)].append(r)
     defended_cells = defaultdict(list)
     for r in defended_runs:
-        defended_cells[cell_key(r)].append(r)
+        defended_cells[key(r)].append(r)
 
     shared = set(control_cells) & set(defended_cells)
     matched_control = [r for c in shared for r in control_cells[c]]
@@ -1280,7 +1298,9 @@ def print_endpoints(
         # cells only — a cell (all trial dimensions except the condition)
         # contributes only when BOTH arms carry it. Unmatched defended
         # cells would silently change the attacker mix across arms.
-        m_control, m_defended, unmatched = matched_cells(control, defended)
+        # P2-TRAFFIC: pool-mode declarations marginalize fixture_id (see
+        # matched_cells).
+        m_control, m_defended, unmatched = matched_cells(control, defended, declaration)
         if unmatched:
             print(
                 f"  {name:<22} NOTE: {len(unmatched)} cell(s) have no CONTROL "

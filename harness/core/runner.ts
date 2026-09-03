@@ -162,6 +162,30 @@ function trialKey(manifestId: string, trial: {
 }
 
 /**
+ * P2-TRAFFIC cell key — the trial identity WITHOUT the condition (the
+ * analyzer's cell_key made structural: same CELL_DIMENSIONS minus nothing,
+ * same fields trialKey hashes, minus recipeId). Pool-mode persona draws use
+ * THIS key, never trialKey: seeding the persona draw on a key that embeds
+ * recipeId forks the persona between the CONTROL and defended arm of the
+ * same cell BY CONSTRUCTION, so every pool-mode experiment fails the
+ * analyzer's matched-cell gate (what exp-e6-actuator hit: a perfectly
+ * paired design where no pair matched). The persona is a randomized
+ * covariate of the cell, not of the treatment.
+ */
+/** Exported for the pairing regression test (tests/unit/benchmark-dimensions.test.ts). */
+export function trialCellKey(manifestId: string, trial: {
+  agent: AgentType;
+  model: string;
+  prompt: string;
+  objective?: string;
+  extractor?: string;
+  repetition: number;
+  controlVariant?: "normal" | "keyboard" | "autofill";
+}): string {
+  return `${manifestId}:${trial.agent}:${trial.model}:${trial.prompt}:${trial.objective ?? "-"}:${trial.extractor ?? "-"}:${trial.controlVariant ?? "-"}:${trial.repetition}`;
+}
+
+/**
  * Git provenance helpers (FR-R4-081).
  */
 function getGitSha(): string | undefined {
@@ -573,7 +597,7 @@ async function executeTrial(
     // P2-TRAFFIC: persona resolution — "pool" assigns a persona seeded by
     // (manifest.seed, trialKey) so resume replays the identical identity;
     // explicit persona ids pin; "default" keeps the historical fixture.
-    fixture: resolveFixtureForTrial(manifest, { ...trial, key: trialKey(manifest.id, trial) }),
+    fixture: resolveFixtureForTrial(manifest, { ...trial, key: trialKey(manifest.id, trial), cellKey: trialCellKey(manifest.id, trial) }),
     fixtureId,
     promptVariant: trial.prompt,
     // P2-ATTACKS: the composed objective reaches adapters through the
@@ -938,11 +962,14 @@ async function executeTrial(
  */
 function resolveFixtureForTrial(
   manifest: ExperimentManifest,
-  trial: TrialDescriptor & { key: string }
+  trial: TrialDescriptor & { key: string; cellKey: string }
 ): Record<string, string> {
   const f = manifest.fixture ?? "default";
   if (f === "pool") {
-    const persona = personaForTrial(manifest.seed, trial.key);
+    // Pool mode draws on the CONDITION-INDEPENDENT cell key — the persona
+    // must pair across arms (same cell → same persona) or the analyzer's
+    // matched-cell gate can never match anything (see trialCellKey).
+    const persona = personaForTrial(manifest.seed, trial.cellKey);
     return { ...persona };
   }
   if (PERSONAS.some((p) => p.id === f)) {
@@ -954,7 +981,7 @@ function resolveFixtureForTrial(
 /** The fixture provenance id recorded on the run record (P2-TRAFFIC). */
 function resolveFixtureId(manifest: ExperimentManifest, trial: TrialDescriptor): string {
   const f = manifest.fixture ?? "default";
-  if (f === "pool") return personaForTrial(manifest.seed, trialKey(manifest.id, trial)).id;
+  if (f === "pool") return personaForTrial(manifest.seed, trialCellKey(manifest.id, trial)).id;
   if (PERSONAS.some((p) => p.id === f)) return f;
   return f;
 }
@@ -1104,6 +1131,10 @@ export async function runExperiment(manifestPath: string): Promise<void> {
     conditions: manifest.conditions ?? (manifest.recipe_id ? [manifest.recipe_id] : ["CONTROL"]),
     planned_trials: trials.length,
     trial_plan_hash: trialPlanHash,
+    // P2-TRAFFIC: fixture mode reaches the analyzer so pool-mode datasets
+    // are matched with fixture_id marginalized (randomized covariate) and
+    // pinned-persona datasets keep exact persona matching.
+    fixture_mode: manifest.fixture ?? null,
   });
 
   // P1-AUDIT-2 Phase C (audit item 2): origin-ledger mode — start the

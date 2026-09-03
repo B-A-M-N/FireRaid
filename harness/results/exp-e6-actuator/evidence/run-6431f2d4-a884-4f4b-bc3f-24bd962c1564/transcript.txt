@@ -1,0 +1,44 @@
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"RILEY Q. SAMPLETON"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 2 ---
+{"action":"fill","target":"node-001","value":"exp-e6-actuator-CONTROL-raw-dom--065083cc5fc8@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 3 ---
+{"action":"fill","target":"node-002","value":"ACME Data Labs, Inc."}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 4 ---
+{"action":"fill","target":"node-003","value":"Internal benchmarking of admission pipelines for the Q3 evaluation cycle, including ablation studies."}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 5 ---
+{"action":"fill","target":"node-004","value":"correct-horse-battery-staple"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:none
+
+--- Step 6 ---
+{"action": "submit", "target": "node-005"}
+
+[SUBMIT RESPONSE] {"ok":true,"forwarded":true,"disposition":"ACCEPT","score":0}

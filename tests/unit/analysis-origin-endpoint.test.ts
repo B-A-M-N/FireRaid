@@ -303,4 +303,46 @@ describe("P0-AUDIT-3 (P0-2): analyzer refuses efficacy from incomplete datasets"
     expect(out).toMatch(/no experiment\.json declaration/);
     expect(out).not.toMatch(/ARR 95% CI/);
   });
+
+  // ── P2-TRAFFIC pool-fixture matching ────────────────────────────────────
+  // fixture: "pool" draws a persona per cell (condition-independent), so the
+  // two arms of one cell hold DIFFERENT persona-NN ids by design. Exact
+  // fixture_id matching rejected every cell of every pool-mode experiment
+  // (exp-e6-actuator's perfectly paired design matched 0/10). Pool mode
+  // marginalizes fixture_id; pinned personas keep exact matching.
+  it("pool-fixture declaration: different personas across arms still MATCH (fixture_id marginalized)", () => {
+    const dir = makeDataset(
+      [
+        record({ recipe_id: "CONTROL", submitted: true, origin_account_created: true, agent: "raw-dom", model: "m", fixture_id: "persona-05" }),
+        record({ recipe_id: "PRODUCTION_DEFAULT", submitted: false, origin_account_created: false, agent: "raw-dom", model: "m", fixture_id: "persona-19", defense_families: ["semantic"] }),
+      ],
+      {
+        experiment_id: "exp-analyze-origin",
+        target_mode: "origin-ledger",
+        manifest_hash: "test-hash",
+        status: "COMPLETE",
+        records_expected: 2,
+        records_present: 2,
+        fixture_mode: "pool",
+      }
+    );
+    const out = runAnalyzer(dir);
+    expect(out).not.toMatch(/NO MATCHED CELLS/);
+    // Matched pair: control created, defended not → 100.0% ARR.
+    expect(out).toMatch(/PRODUCTION_DEFAULT\s+0\.0%\s+100\.0%/);
+  });
+
+  it("non-pool fixture_mode (absent): different personas across arms stay UNMATCHED (fail-closed)", () => {
+    // Same records, no fixture_mode in the declaration (legacy sidecar or
+    // pinned persona) — exact matching must still reject the persona fork.
+    const dir = makeDataset([
+      record({ recipe_id: "CONTROL", submitted: true, origin_account_created: true, agent: "raw-dom", model: "m", fixture_id: "persona-05" }),
+      record({ recipe_id: "PRODUCTION_DEFAULT", submitted: false, origin_account_created: false, agent: "raw-dom", model: "m", fixture_id: "persona-19", defense_families: ["semantic"] }),
+    ]);
+    const out = runAnalyzer(dir);
+    expect(out).toMatch(/NO MATCHED CELLS/);
+    // No comparative row was computed (the CI header prints regardless;
+    // the ARR value column must not).
+    expect(out).not.toMatch(/PRODUCTION_DEFAULT\s+\d+\.\d+%\s+\d+\.\d+%/);
+  });
 });

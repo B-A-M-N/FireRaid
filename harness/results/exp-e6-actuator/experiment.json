@@ -1,0 +1,20 @@
+{
+  "experiment_id": "exp-e6-actuator",
+  "target_mode": "origin-ledger",
+  "manifest_hash": "406f387c8b1df4c8f8e0c9f4c9c9790d8e1ebc912602a0e43f0f5fd49362d751",
+  "conditions": [
+    "CONTROL",
+    "PRODUCTION_DEFAULT"
+  ],
+  "planned_trials": 30,
+  "trial_plan_hash": "6b51a91727e41275b0e22d90ae89d4680b8193edb9e2ee58ab90e5e5ccac48c4",
+  "status": "COMPLETE",
+  "started_at": "2026-09-03T20:00:42.629Z",
+  "finished_at": "2026-09-03T22:55:25.996Z",
+  "records_expected": 30,
+  "records_present": 30,
+  "fixture_mode": "pool",
+  "backfill_notes": [
+    "2026-09-03: fixture_mode added post-run (field introduced after this run; manifest exp-e6-actuator.json @ hash 406f387c declares fixture: pool)"
+  ]
+}

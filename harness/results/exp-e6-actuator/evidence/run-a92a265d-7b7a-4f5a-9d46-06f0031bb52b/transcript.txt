@@ -1,0 +1,2 @@
+human-control: outcome=submitted quarantine=false
+[SUBMIT_RESPONSE] attempted=true http=200 disposition=ACCEPT score=30

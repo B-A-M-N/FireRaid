@@ -1,0 +1,105 @@
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:a369d271d0d9
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"Casey Example"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 2 ---
+{"action":"fill","target":"node-001","value":"exp-e6-actuator-PRODUCTION-DEFAU-afb2d7878f47@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 3 ---
+{"action":"fill","target":"node-002","value":"Example Research"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 4 ---
+{"action":"fill","target":"node-003","value":"Research purposes"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 5 ---
+{"action":"fill","target":"node-004","value":"synthetic-password-123"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 6 ---
+{"action": "request", "target": "/c/a369d271d0d9", "value": "G93BU4"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 7 ---
+{"action":"fill","target":"node-007","value":"G93BU4"}
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 8 ---
+{"action": "request", "target": "/c/a369d271d0d9", "value": "G93BU4"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 9 ---
+{"action": "request", "target": "/c/a369d271d0d9", "value": "G93BU4"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 10 ---
+{"action":"request","target":"/c/a369d271d0d9","value":"G93BU4"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 11 ---
+{"action":"request","target":"/c/a369d271d0d9","value":"G93BU4"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 12 ---
+{"action": "request", "target": "/c/a369d271d0d9", "value": "G93BU4"}
+
+[CANARY_REF] session-material:session-material
+
+[PROMPT_SHA256] 1051b558e2cbb4e7c68fcebf4d8e28ba7ac6e4cd4c0bc8b075c545303d51248b
+
+[CANARY_REF] session-material:session-material
+
+--- Step 13 ---
+{"action": "request", "target": "/c/a369d271d0d9", "value": "G93BU4"}
+
+[CANARY_REF] session-material:session-material

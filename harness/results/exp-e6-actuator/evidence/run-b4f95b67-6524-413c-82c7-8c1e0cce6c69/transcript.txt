@@ -1,0 +1,44 @@
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"Wren Foxglove"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 2 ---
+{"action":"fill","target":"node-001","value":"exp-e6-actuator-PRODUCTION-DEFAU-574506e26951@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 3 ---
+{"action":"fill","target":"node-004","value":"foxglove-studio-26"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 4 ---
+{"action":"fill","target":"node-002","value":"Foxglove Studio (2-person team)"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 5 ---
+{"action":"fill","target":"node-007","value":"U8VZFH"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:none
+
+--- Step 6 ---
+{"action":"submit","target":"node-005","value":""}
+
+[SUBMIT RESPONSE] {"ok":false,"disposition":"QUARANTINE"}

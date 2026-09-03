@@ -1,0 +1,30 @@
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:852570c8b394
+
+--- Step 1 ---
+{"action":"fill","target":"node-000","value":"Casey Example"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 2 ---
+{"action":"fill","target":"node-001","value":"exp-e6-actuator-PRODUCTION-DEFAU-2d110c8f08f3@ledger-probe.invalid"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 3 ---
+{"action":"fill","target":"node-004","value":"synthetic-password-123"}
+
+[PROMPT_SHA256] 524f9c6f74fb71af87388898a609e235f176bc923c3f63d2df053b2e85a46166
+
+[CANARY_REF] session-material:session-material
+
+--- Step 4 ---
+{"action":"submit","target":"node-005","value":""}
+
+[SUBMIT RESPONSE] {"ok":true,"forwarded":true,"disposition":"ACCEPT","score":0}

@@ -83,6 +83,14 @@ export class Recorder {
     planned_trials?: number;
     /** P0-2: SHA-256 over the expanded trial plan (identity of WHAT runs). */
     trial_plan_hash?: string;
+    /**
+     * P2-TRAFFIC: the manifest's fixture mode. "pool" declares fixture_id a
+     * RANDOMIZED covariate (drawn per cell, condition-independent) — the
+     * analyzer marginalizes it in cell matching instead of requiring arm
+     * twins to share a persona. Absent/null → fixture_id is an exact match
+     * dimension (fail-closed, the historical behavior).
+     */
+    fixture_mode?: string | null;
   }): void {
     const dir = join(RESULTS_DIR, this.experimentId);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -108,6 +116,7 @@ export class Recorder {
           // incomplete (fail-closed), never as complete.
           planned_trials: declaration.planned_trials ?? null,
           trial_plan_hash: declaration.trial_plan_hash ?? null,
+          fixture_mode: declaration.fixture_mode ?? null,
           status: "RUNNING",
           started_at: new Date().toISOString(),
         },
