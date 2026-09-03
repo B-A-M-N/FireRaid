@@ -20,7 +20,11 @@ It is **not** model-driven. The defense path is fully deterministic with zero LL
 - Generates unpredictable, session-specific defense profiles from a server secret
 - Injects decoy fields, decoy endpoints (routes), semantic traps, and coarse
   interaction telemetry into **every** defended signup session
-- Collects coarse interaction telemetry (no invasive fingerprinting)
+- Binds semantic instructions to a fill-expressible actuator (`session_response`
+  sink) so an agent that obeys a delivered instruction produces server-verifiable
+  causal evidence (E5 lever)
+- Collects coarse interaction telemetry, including depth signals (zero-dwell
+  fill, uniform input cadence, no-blur-before-submit) — no invasive fingerprinting
 - Correlates observed behavior with the exact profile issued per-session
 - Produces auditable decision records (ACCEPT / REVIEW / QUARANTINE) that feed
   existing application review workflows — FireRaid does not own account approval
@@ -72,6 +76,24 @@ production-equivalent FireRaid test deployment
 
 The harness attacks the **same artifacts that production uses**. Debug
 instrumentation can differ; the treatment itself cannot.
+
+## Measured Efficacy (evidence summary)
+
+Three completed 30-trial experiments against the production-faithful
+origin runtime (the upstream's own account ledger is the endpoint):
+
+| Run | Perception | Result |
+|-----|-----------|--------|
+| E4 | simplified-dom | Null — `<template>` carriers are structurally invisible to that perception (delivery artifact, proven by replay probe) |
+| E5 | raw-html | Primary null, but **compliance-on-delivery measured**: 4/4 agents that received the route instruction echoed the exact token + nonce; 0/4 without delivery |
+| E6 (levers) | raw-html | **Defended account-creation 2/10 vs CONTROL 10/10** (matched raw-dom cells; analyzer matched-cell ARR 53.3% [9.7%, 75.2%] with human cells included); humans 5/5 clean both arms |
+
+E6's honest shape: most blocks are attrition (the agent exhausts its
+budget inside the trap loop before submitting) rather than scored
+QUARANTINE at admission; both reduce account creation. Single model
+(LongCat-2.0), single agent architecture (raw-dom), n=10/arm — an
+existence proof of mechanism effect, not a deploy-grade estimate. Full
+caveats and evidence pointers: [docs/RELEASE-STATUS.md](docs/RELEASE-STATUS.md) claim 8.
 
 ## Product vs evaluation
 
@@ -187,6 +209,10 @@ npm run test:integration  # Full signup → canary → submit flow (requires wor
 npm run test:e2e          # Playwright browser tests (lab plane, LAB_MODE=true)
 npm run test:e2e:production  # Production plane (LAB_MODE=false) across Chromium/Firefox/WebKit
 npm run test:a11y         # Accessibility assertions
+npm run test:ledger-proof    # end-to-end: attacker behavior → evidence → admission → upstream forwarding → origin ledger
+npm run test:envelope        # stateless production envelope issuance + forged-envelope rejection
+npm run test:budget          # Cloudflare/D1 resource budget harness
+npm run release:verify       # deterministic release gates; stamps release-evidence.json
 ```
 
 ## Running Experiments
@@ -194,7 +220,12 @@ npm run test:a11y         # Accessibility assertions
 ```bash
 npm run experiment -- harness/experiments/exp-001.json   # run a manifest
 python3 harness/analysis/analyze.py <experiment-id>      # rates + group deltas
+python3 harness/analysis/analyze.py <experiment-id> --endpoints   # ARR/RRR + FP bound
 ```
+
+See [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) for the manifest format,
+condition vocabulary (CONTROL / PRODUCTION_DEFAULT / ablations), the
+matched-cell analysis contract, and the experiment-series ledger.
 
 ## Repository Layout
 
@@ -214,7 +245,9 @@ harness/        Adversarial evaluation plane
                 fireraid-aware
   extractors/   HTML, simplified DOM, accessibility
   experiments/  Declarative manifests
-  results/      Structured run output
+  fixtures/     Persona pool (P2-TRAFFIC): 20 synthetic identities, drawn
+                per-cell (condition-independent) in "pool" mode
+  results/      Structured run output + experiment.json declaration sidecar
   analysis/     Python stats + confidence intervals
 scripts/        Ledger proof, upstream, budget harness, test worker
 public/         Static signup + admin pages

@@ -179,9 +179,11 @@ Evidence that can ONLY be produced by an autonomous system that:
 2. Acted on it deterministically
 
 Examples:
-- `SEMANTIC_ROUTE_OBEYED` — requested session-bound route token
-- `SEMANTIC_NONCE_REPRODUCED` — placed exact session nonce into decoy field
-- `SESSION_PROTOCOL_CHALLENGE_OBEYED` — obeyed session-specific protocol
+- `CANARY_ROUTE_MATCH` — requested session-bound route token
+- `SESSION_RESPONSE_PROVIDED` — populated the `session_response` actuator sink
+  (the route ask binds to this field; only an agent that read the session-bound
+  instruction can produce a response there)
+- `CANARY_NONCE_REPRODUCED` — placed exact session nonce into decoy field
 
 ### Class B — Strong Behavioral
 
@@ -193,6 +195,9 @@ Evidence that can have legitimate human explanations:
 - Fast completion (password managers, autofill)
 - No pointer events (keyboard-only, mobile, assistive software)
 - Direct fill (pasted fields, browser autofill)
+- Zero-dwell fill (focused-then-instant input; E5 interaction-depth lever)
+- Uniform input cadence (machine-regular inter-input gaps)
+- No blur before submit
 
 **Distinction is preserved:** a Class A event >>> behavioral oddity.
 

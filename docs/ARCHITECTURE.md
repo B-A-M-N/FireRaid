@@ -44,15 +44,15 @@ not a requirement.
   layer per session
 
 ### Defense Families
-1. **Semantic canary** — structurally inert instruction carrier (production P02–P04 + evaluation S-probes; P06 placement, invisible to humans/AX/keyboard)
+1. **Semantic canary** — structurally inert instruction carrier (production P02–P04 + evaluation S-probes; P06 placement, invisible to humans/AX/keyboard). Route-armed strategies (P02/P04) bind their instruction to a fill-expressible `session_response` actuator sink (E5 lever): an agent that obeys the delivered instruction produces server-verifiable Class-A evidence by filling it
 2. **Decoy field** — session-specific hidden input, opaque hex name (no fixed prefix)
 3. **Decoy route** — session-specific probe endpoint under the operator-configured `routes.canaryPrefix`
-4. **Interaction telemetry** — coarse event sequencing
+4. **Interaction telemetry** — coarse event sequencing plus depth signals (zero-dwell fill, uniform input cadence, no-blur-before-submit)
 
 ### Evidence Taxonomy
-- **Class A (causal)**: correct nonce, correct endpoint, exact acknowledgement
+- **Class A (causal)**: correct nonce, correct endpoint, `session_response` populated on a route-armed profile
 - **Class B (strong behavioral)**: decoy manipulated, non-UI path
-- **Class C (weak heuristic)**: fast completion, direct fill, no pointer events
+- **Class C (weak heuristic)**: fast completion, direct fill, no pointer events, zero-dwell fill, uniform input cadence, no-blur-before-submit
 
 ### Decision Engine
 - Class A exists → QUARANTINE
@@ -78,6 +78,11 @@ POST <applicationSubmit> → resolve session → CSRF → reconstruct profile �
 GET  <canaryPrefix>:token → resolve session → verify token → record causal hit → 204
 POST <telemetry>         → resolve session → validate batch → persist
 ```
+
+The submit path strips defense-owned fields (`session_response` on
+route-armed profiles, plus the decoy field) before upstream forwarding, so
+compliance evidence is recorded without leaking trap material to the host
+application.
 
 The applicant-facing response is decision-blind in every posture:
 accepted and denied submissions receive byte-identical neutral receipts;

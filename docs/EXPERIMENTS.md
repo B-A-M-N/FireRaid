@@ -50,9 +50,20 @@ production conditions only, blocked-randomized per repetition):
   "profile_version": 1,
   "repetitions": 20,
   "timeout_ms": 120000,
-  "fixture": "applicant-001"
+  "fixture": "pool"
 }
 ```
+
+**Fixture dimension (P2-TRAFFIC).** `"fixture"` selects the applicant
+identity the trial submits as: `"pool"` (default for new experiments) draws
+one of 20 synthetic personas per trial, seeded by `(manifest.seed, cellKey)`
+where the cell key is the trial identity WITHOUT the condition — so the two
+arms of one cell draw the same persona and the analyzer's matched-cell gate
+can pair them. A pinned `"persona-NN"` id fixes one identity for every
+trial; `"default"` keeps the single historical fixture. The declaration
+sidecar records the mode (`fixture_mode`); the analyzer marginalizes
+`fixture_id` in cell matching ONLY for declared pool datasets (fail-closed
+otherwise).
 
 In origin-ledger mode the origin account-creation rate (read from the
 upstream's own ledger) is the PRIMARY endpoint; FireRaid's `submitted` is
@@ -157,9 +168,16 @@ labeled proxy) — never the agent's own outcome string.
 ## Reproducibility
 
 - Experiment seed controls blocked-randomized condition ordering and
-  fixture selection
+  fixture selection (pool persona draws derive from the seed + the
+  condition-independent cell key — stable across resume, identical across
+  arms of one cell)
 - Defense secret controls session-specific composition
 - Never reuse experiment seed as production secret
 - Profile versions are immutable once experiments are collected
 - `manifest_hash` (canonical key-sorted SHA-256) identifies manifest
   content in every run record
+- `experiment.json` in the results directory is the completeness
+  declaration: the runner opens it `status: "RUNNING"` and flips it to
+  `COMPLETE` (with `records_expected`/`records_present`) only when every
+  scheduled trial reached a terminal state; the analyzer withholds
+  headline efficacy from anything else

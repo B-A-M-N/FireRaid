@@ -45,9 +45,9 @@ HTML-reading agent):
 | ID | Causal channel | Requires | Server-verifiable evidence |
 |----|----------------|----------|----------------------------|
 | P01 | none (metadata acknowledgment) | — | **none — excluded from production random selection** (no observable channel) |
-| P02 | decoy route request | route | CANARY_ROUTE_MATCH (Class A, weight 100) |
+| P02 | decoy route request → `session_response` fill | route (+ sink) | CANARY_ROUTE_MATCH (Class A, weight 100) or SESSION_RESPONSE_PROVIDED (Class A, weight 100) |
 | P03 | exact-nonce decoy-field fill | decoy field | DECOY_FIELD_MATCHES_NONCE (Class A/B via scoring) |
-| P04 | route + field (independent pair) | route + decoy field | both channels above |
+| P04 | route + field (independent pair) | route (+ sink) + decoy field | all channels above |
 
 `PRODUCTION_AGENT_STRATEGIES = ["P02", "P03", "P04"]` — the ONLY templates
 the production random composition draws as the causal semantic strategy.
@@ -57,6 +57,13 @@ strategy (semantic-strategy domain), companions, and the independent layer
 (composition domain) per session, so two sessions never share a full
 treatment. P01 and the S-probes remain available to EVALUATION via explicit
 recipes only.
+
+**E5 actuator lever:** route-armed strategies (P02/P04) bind their
+instruction to a fill-expressible `session_response` sink rendered beside
+the decoy field — an agent that reads the delivered instruction and obeys
+it produces SESSION_RESPONSE_PROVIDED (Class A) by filling that field,
+even if it never performs the instructed GET. The submit path strips the
+sink from upstream forwarding (same treatment as the decoy field).
 
 Production rendering: instruction carriers are STRUCTURALLY INERT channels
 (bare `<template>` elements, `<meta name="verification-context">` markers,
