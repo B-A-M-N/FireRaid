@@ -272,6 +272,18 @@ If FireRaid is useful to you, or if you share that view, please consider sponsor
 
 ## License
 
-Defined in [./LICENSE](LICENSE): FireRaid is provided as-is for academic and
-educational purposes — copyright (c) 2026, FireRaid Contributors. See the
-Research Use Notice at the end of that file.
+**Source available under the [FireRaid Community Source License 1.0](LICENSE).**
+Free production use is permitted for qualifying inference providers,
+educational and research institutions, public-sector organizations, and
+other permitted service operators. Other uses may require separate
+authorization.
+
+In plain terms: FireRaid is intended to be freely usable by organizations
+operating legitimate inference and online services, including academic and
+public-interest providers. The license is structured to prevent use by
+deceptive or unauthorized inference-resale operations — misrepresenting
+infrastructure or service, reselling without upstream authorization,
+brokering credentials, circumventing access controls, or deceptively
+hiding that a service is a proxy — while keeping the source available for
+inspection, research, modification, and contribution. Aggregation and
+routing are not prohibited as such; deception and unauthorized resale are.

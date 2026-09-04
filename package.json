@@ -47,5 +47,6 @@
     "typescript-eslint": "^8.15.0",
     "vitest": "^3.0.0",
     "wrangler": "^4.0.0"
-  }
+  },
+  "license": "LicenseRef-FireRaid-Community-Source-1.0"
 }

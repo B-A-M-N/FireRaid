@@ -1,31 +1,129 @@
-# FireRaid — License
-
-This is a research prototype provided as-is for academic and educational purposes.
+# FireRaid Community Source License 1.0
 
 Copyright (c) 2026 — FireRaid Contributors
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+## 1. Definitions
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+**"Software"** means this software, its source code, and associated
+documentation files.
+
+**"Licensor"** means the FireRaid project maintainers, or their successor
+in interest to the copyright of the Software.
+
+**"Inference"** means providing computational access to machine-learning
+models, including but not limited to language models, to end users or to
+other software, whether as a primary service or as a component of another
+service.
+
+**"Inference Provider"** means a party that operates, leases, or otherwise
+controls the compute infrastructure used to provide Inference.
+
+**"Production Use"** means use of the Software to protect a service that is
+offered to real end users, as distinguished from research, evaluation,
+development, and testing use.
+
+**"Upstream Provider"** means any third party that provides Inference,
+access credentials, or service terms to another party.
+
+## 2. Grant of Rights
+
+Subject to the conditions in Section 3, the Licensor hereby grants, free of
+charge, to any person obtaining a copy of the Software, the rights to use,
+copy, modify, merge, publish, distribute, and sublicense the Software, and
+to permit persons to whom the Software is furnished to do so.
+
+## 3. Permitted Uses
+
+The rights granted in Section 2 include — without limitation — the
+following. Use of the Software, including Production Use, is permitted for:
+
+a. **Educational, research, and public institutions**: universities, public
+   research institutions, nonprofits, and government entities;
+
+b. **Inference Providers**: parties that operate, lease, or otherwise
+   control the compute infrastructure used to provide Inference;
+
+c. **Authorized service providers**: parties that obtain Inference from an
+   Upstream Provider while holding that provider's authorization to
+   provide, resell, or integrate that service;
+
+d. **Self-protective use**: software developers and organizations using the
+   Software to protect their own services, whatever those services provide;
+
+e. **General research and development**: research, evaluation,
+   development, and testing of the Software and of defenses generally,
+   including by parties that would need separate authorization for
+   Production Use.
+
+Nothing in this Section restricts the right to inspect, study, modify, or
+contribute to the Software.
+
+## 4. Restricted Uses
+
+Production Use of the Software is **not** permitted where the protected
+service:
+
+a. **Misrepresents its infrastructure**: falsely represents that it
+   operates models or infrastructure that it does not operate;
+
+b. **Misrepresents the service**: falsely represents the source, identity,
+   capabilities, pricing, availability, or provenance of the Inference it
+   provides;
+
+c. **Resells without authorization**: resells or brokers access to
+   Inference in violation of an Upstream Provider's terms, or without
+   authorization that provider requires;
+
+d. **Brokers credentials**: sells, transfers, brokers, or pools accounts or
+   credentials contrary to an Upstream Provider's authorization;
+
+e. **Circumvents access controls**: uses the Software in connection with
+   circumventing another provider's access controls, rate limits,
+   eligibility requirements, or account restrictions;
+
+f. **Deceptively proxies**: materially conceals the fact that it is merely
+   proxying another service, where that omission would make its
+   representations misleading.
+
+For clarity: aggregation, routing, and brokering of Inference are NOT
+prohibited as such. Legitimate aggregators, routers, gateways, managed
+hosting services, and authorized resellers remain permitted under
+Sections 3(b)–(d). What Sections 4(c)–(f) prohibit is unauthorized resale,
+misrepresentation, credential brokering, and deceptive proxying.
+
+## 5. Authorization for Other Uses
+
+Uses not permitted under this License may be authorized separately in
+writing by the Licensor. This includes commercial licensing arrangements
+for parties whose use case does not fit the categories above.
+
+## 6. Conditions
+
+The above copyright notice and this license notice shall be included in
+all copies or substantial portions of the Software.
+
+## 7. No Warranty
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+IN THE SOFTWARE.
+
+## 8. Use Notice
+
+FireRaid is a deterministic agent-admission defense middleware designed for
+studying autonomous-agent behavior and for production deployment behind
+existing application review workflows. It is not a universal bot detection
+system. Users are responsible for ensuring their use complies with
+applicable laws, regulations, and platform terms of service.
 
 ---
 
-**Use Notice**: FireRaid is a deterministic agent-admission defense middleware
-designed for studying autonomous-agent behavior and for production deployment
-behind existing application review workflows. It is not a universal bot
-detection system. Users are responsible for ensuring their use complies
-with applicable laws, regulations, and platform terms of service.
+*This is the FireRaid Community Source License 1.0. It is a
+source-available license, not an open-source license under the Open Source
+Definition. If you are uncertain whether your use qualifies under Section 3
+or 4, contact the project maintainers regarding authorization under
+Section 5.*
