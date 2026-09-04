@@ -264,6 +264,12 @@ FireRaid is **not affiliated with, sponsored by, endorsed by, commissioned by, o
 
 Any references to FreeInference.org are provided for context and acknowledgement only. All responsibility for FireRaid, including any errors, overclaims, or design decisions, rests solely with this project and its maintainers.
 
+## Supporting Public Inference
+
+We believe providing inference to the public is a vital and increasingly necessary resource. Capable models are becoming part of writing, research, education, software, and ordinary problem-solving, but public access is still too easy to overlook or dismiss. Public inference gives more people room to learn, experiment, build, and participate. Its value is often clearest only after access disappears.
+
+If FireRaid is useful to you, or if you share that view, please consider sponsoring [FreeInference.org](https://freeinference.org).
+
 ## License
 
 Defined in [./LICENSE](LICENSE): FireRaid is provided as-is for academic and
