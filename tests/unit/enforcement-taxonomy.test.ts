@@ -246,8 +246,9 @@ describe("P0-8: middleware receipt policy", () => {
       // a host callback that can return anything at runtime.
       const enforcement = { allow: async (): Promise<unknown> => shape, deny: () => {} };
       const r = await submitResult(baseDeps(), enforcement);
-      // undefined/null/throw fall through to the EVAL_ERROR deny; every
-      // other malformed shape becomes forward-failed. NEITHER is admit.
+      // undefined/null/throw surface as the operational-error path
+      // (FR-P0-03 — infrastructure, not the applicant's fault); every other
+      // malformed shape becomes forward-failed. NEITHER is admit.
       expect(r.kind, JSON.stringify(shape)).not.toBe("admit");
     }
   });

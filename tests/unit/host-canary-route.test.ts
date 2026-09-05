@@ -137,7 +137,12 @@ describe("host canary route (audit item 6)", () => {
     expect(res.disposition).toBe("NO_SESSION");
   });
 
-  it("store failure on a VERIFIED token → deny CANARY_PERSIST_FAILED (fail-closed)", async () => {
+  it("store failure on a VERIFIED token → operational error (fail-closed, 5xx — FR-P0-03)", async () => {
+    // FR-P0-03: a canary-store outage is a SERVER failure, not an applicant
+    // rejection. The old classification returned kind:"deny" (a 403 on the
+    // runtime projection) — misattributing an outage to the client. Fail-
+    // closed is preserved (kind "error" never reports attacker success and
+    // the hit is not recorded); only the classification changed.
     const d = deps();
     const store = d.canaryStore as ReferenceCanaryStore;
     const cookie = await issueSessionCookie(d);
@@ -154,8 +159,10 @@ describe("host canary route (audit item 6)", () => {
       d,
       async () => HTML
     );
-    expect(res.kind).toBe("deny");
-    expect(res.disposition).toBe("CANARY_PERSIST_FAILED");
+    expect(res.kind).toBe("error");
+    expect(res.operationalReason).toBe("CANARY_PERSIST_FAILED");
+    // Fail-closed: the failed persist must NOT have recorded a verified hit.
+    expect(await store.readVerified(sid)).toBe(false);
   });
 
   it("missing canaryStore on the dispatch path FAILS CLOSED (deny, never fall through to signup)", async () => {

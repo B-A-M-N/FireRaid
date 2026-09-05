@@ -148,7 +148,10 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     expect(enforcement.allowed).toBe(0);
   });
 
-  it("fail-closed: verification adapter throwing denies, never forwards", async () => {
+  it("fail-closed: verification adapter throwing is an OPERATIONAL ERROR, never forwards (FR-P0-03)", async () => {
+    // A verifier outage is FireRaid/host infrastructure failing — the
+    // forward must not happen (fail closed), but the classification is a
+    // 5xx operational error, not an applicant-facing deny/403.
     const enforcement = new FakeEnforcement();
     const d = deps({
       enforcement,
@@ -157,7 +160,8 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     const sessionId = await d.session.createSession();
     const req = await postRequest(sessionId, { form: { name: "A" } });
     const res = await admitEvaluation(req, d, htmlLoader);
-    expect(res.kind).toBe("deny");
+    expect(res.kind).toBe("error");
+    expect(res.operationalReason).toBe("SUBMIT_EVAL_ERROR");
     expect(enforcement.allowed).toBe(0);
   });
 

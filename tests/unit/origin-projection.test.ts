@@ -62,6 +62,8 @@ function boot(opts: {
   enforcement: "stub-created" | "reference";
   enforcementMode: "advisory" | "enforcement";
   onAssessment?: (a: OriginAssessment) => void | Promise<void>;
+  verification?: { verificationMode: "host-owned"; verify: () => Promise<boolean> };
+  failCanaryStore?: boolean;
 }): Promise<number> {
   const enforcement =
     opts.enforcement === "stub-created"
@@ -74,10 +76,12 @@ function boot(opts: {
       upstreamRegisterUrl: "http://127.0.0.1:1/register",
       session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
       render: { inject: referenceInject },
-      verification: { verificationMode: "host-owned" as const, verify: async () => true },
       telemetry: new ReferenceTelemetryAdapter(),
+      verification: opts.verification ?? { verificationMode: "host-owned" as const, verify: async () => true },
       enforcement,
-      canaryStore: new ReferenceCanaryStore(),
+      canaryStore: opts.failCanaryStore
+        ? Object.assign(new ReferenceCanaryStore(), { failStore: true })
+        : new ReferenceCanaryStore(),
       submissionStore: new ReferenceSubmissionStore(),
       enforcementMode: opts.enforcementMode,
       routes: ROUTES,
@@ -137,6 +141,65 @@ describe("P1-11: security headers on every branch", () => {
     expect(res.status).toBe(405);
     expect(res.headers.get("allow")).toBe("GET, POST");
     assertSecurityHeaders(res.headers, "405");
+  });
+});
+
+describe("FR-P0-03: infrastructure failure ≠ applicant rejection", () => {
+  it("a verifier outage surfaces as 5xx with the generic body — never a 403 deny", async () => {
+    // The pre-FR-P0-03 projection: a throwing verifier became kind:"deny"
+    // EVAL_ERROR → HTTP 403, telling the client THE REQUEST was forbidden
+    // when the server was the failure. Fail-closed is preserved (no
+    // forward), but the wire now says 5xx with the generic internal body.
+    const port = await boot({
+      enforcement: "stub-created",
+      enforcementMode: "enforcement",
+      verification: {
+        verificationMode: "host-owned" as const,
+        verify: async () => {
+          throw new Error("provider outage");
+        },
+      },
+    });
+    const base = `http://127.0.0.1:${port}`;
+    const page = await fetch(`${base}/signup`);
+    const cookie = (page.headers.get("set-cookie") ?? "").split(";")[0];
+    const csrf = (await page.text()).match(/name="csrf" value="([^"]+)"/)?.[1] ?? "";
+    const res = await fetch(`${base}/signup`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ csrf, form: { name: "H", email: "h@example.invalid", password: "p-123456" } }),
+    });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toBe("Internal Server Error");
+    assertSecurityHeaders(res.headers, "verifier outage 500");
+  });
+
+  it("a canary-store outage on a VERIFIED route hit is 204→500, not a client-visible denial", async () => {
+    const port = await boot({
+      enforcement: "stub-created",
+      enforcementMode: "enforcement",
+      failCanaryStore: true,
+    });
+    const base = `http://127.0.0.1:${port}`;
+    const page = await fetch(`${base}/signup`);
+    const cookie = (page.headers.get("set-cookie") ?? "").split(";")[0];
+    // Derive the session's route token the same way the middleware does.
+    const { deriveProfilePure } = await import("../../src/core/profile.js");
+    const sid = decodeURIComponent(cookie).match(/fr1\.([A-Za-z0-9_-]+)/)?.[1] ?? "";
+    // The session id is INSIDE the envelope payload; derive with the sid the
+    // runtime issued by asking the middleware's own path — instead, probe a
+    // token derived from the session the GET created (parse via decode).
+    const payload = JSON.parse(Buffer.from(sid, "base64url").toString()) as { sid: string };
+    const profile = await deriveProfilePure(
+      { secret: SECRET, version: VERSION, sessionId: payload.sid, mode: "production" }
+    );
+    const token = profile.decoyRoute?.endpointToken;
+    if (!token) return; // profile drew no route — nothing to probe
+    const res = await fetch(`${base}/c/${token}`, { headers: { cookie } });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toBe("Internal Server Error");
   });
 });
 

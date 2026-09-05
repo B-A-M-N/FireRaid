@@ -175,6 +175,16 @@ export interface EvaluationControls {
 export interface MiddlewareResult {
   /** "get" | "admit" | "deny" | "forward-failed" | "canary-verified" | "ingest" | "error" | "not-handled". */
   kind: "get" | "admit" | "deny" | "forward-failed" | "canary-verified" | "ingest" | "error" | "not-handled";
+  /**
+   * FR-P0-03: INTERNAL-ONLY reason when kind === "error" — a FireRaid or
+   * host-infrastructure failure (store outage, evaluation exception). Never
+   * serialized to applicants: the runtime projects kind "error" to a generic
+   * 5xx, and the reason exists so hosts can log/alert on the class of
+   * failure. Distinct from "deny" (an applicant/precondition fact → 4xx or a
+   * neutral decision receipt) and "forward-failed" (the upstream transport
+   * → 502).
+   */
+  operationalReason?: string;
   /** The HTML to return on GET (kind === "get"). */
   html?: string;
   /** Set-Cookie header(s) to return. */
@@ -642,10 +652,20 @@ async function handleCanaryGet(
       return { kind: "deny", disposition: "INVALID_TOKEN" };
     }
     const persisted = await store.record(sessionId, token, expected);
-    if (!persisted) return { kind: "deny", disposition: "CANARY_PERSIST_FAILED" };
+    // FR-P0-03: a canary-store outage is a SERVER failure, not an applicant
+    // rejection. Fail closed (never report attacker success) but classify it
+    // as an operational error — the Worker plane already returns 500 here,
+    // and a 403-style deny would misattribute an outage to the client.
+    if (!persisted) {
+      reportOperationalError(deps, "canaryStore.record", new Error("persist returned false"));
+      return { kind: "error", operationalReason: "CANARY_PERSIST_FAILED" };
+    }
     return { kind: "canary-verified", disposition: "CANARY_VERIFIED" };
-  } catch {
-    return { kind: "deny", disposition: "EVAL_ERROR" };
+  } catch (err) {
+    // FR-P0-03: an evaluation/storage exception is FireRaid's own failure —
+    // 5xx, not an applicant-facing denial.
+    reportOperationalError(deps, "handleCanaryGet.evaluate", err);
+    return { kind: "error", operationalReason: "CANARY_EVAL_ERROR" };
   }
 }
 
@@ -709,7 +729,7 @@ async function handleInjectGet(
     // integration bug (bad fixture, render contract violation) and must be
     // diagnosable from logs.
     console.error("FireRaid middleware: GET inject failed:", err instanceof Error ? err.message : err);
-    return { kind: "error" };
+    return { kind: "error", operationalReason: "GET_INJECT_FAILED" };
   }
 }
 
@@ -883,6 +903,10 @@ async function handleSubmitPost(
         requestUrl: req.url,
       };
       const allowed = await deps.verification.verify(profile, verificationInput);
+      // FR-P0-03: `false` from the adapter is the provider's OWN answer about
+      // this applicant — a genuine deny. A verifier OUTAGE throws, and the
+      // outer catch now classifies that as an operational error (5xx) rather
+      // than blaming the applicant.
       if (!allowed) return { kind: "deny", disposition: "VERIFICATION_FAILED" };
 
       // Build server-verifiable observations from the submitted form.
@@ -1152,9 +1176,12 @@ async function handleSubmitPost(
       } catch (completeErr) {
         reportOperationalError(deps, "submissionStore.complete(eval_error)", completeErr);
       }
+      // FR-P0-03: the exception is FireRaid/host infrastructure failing —
+      // an operational error (5xx), never an applicant-facing denial. The
+      // account is not created (fail closed preserved); the classification
+      // no longer lies about whose fault it was.
       reportOperationalError(deps, "handleSubmitPost.evaluate", err);
-      // Fail-closed: never forward on an evaluation error.
-      return { kind: "deny", disposition: "EVAL_ERROR" };
+      return { kind: "error", operationalReason: "SUBMIT_EVAL_ERROR" };
     }
 }
 
