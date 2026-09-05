@@ -139,6 +139,19 @@ const upstream = http.createServer((req, res) => {
 await new Promise((resolve) => upstream.listen(5051, "127.0.0.1", resolve));
 
 // --- Wire up middleware dependencies (PRODUCTION posture) ---
+// FR-P1-03: the PRODUCTION constructor (createOriginServer →
+// createFireRaidMiddleware) rejects VOLATILE evidence stores. This is a LOCAL
+// DEV origin (in-memory everywhere), so the reference stores declare
+// durability:"durable" — they stand in for the durable backing a real
+// deployment must wire over the SAME interface. State is lost on restart,
+// which is fine for a local experiment/demo, but NOT a production deployment.
+const telemetryStore = new ReferenceTelemetryAdapter();
+telemetryStore.durability = "durable";
+const canaryStore = new ReferenceCanaryStore();
+canaryStore.durability = "durable";
+const submissionStore = new ReferenceSubmissionStore();
+submissionStore.durability = "durable";
+
 const middlewareDeps = {
   // Item 18: profileKeys is the production contract — the ring keys profile
   // derivation, CSRF fallback, and session-envelope verification.
@@ -150,15 +163,15 @@ const middlewareDeps = {
   // Host-owned verification: this origin answers its own verification
   // challenges. (The reference disabled-test adapter is REFUSED here.)
   verification: new HostOwnedVerificationAdapter(async () => true),
-  telemetry: new ReferenceTelemetryAdapter(),
+  telemetry: telemetryStore,
   enforcement: new ReferenceEnforcementAdapter(),
   // P0 route-evidence capability: REQUIRED for the production strategy
   // pool (P02/P04 verify route probes server-side).
-  canaryStore: new ReferenceCanaryStore(),
+  canaryStore,
   // FR-P0-02 one-submission capability: REQUIRED. The reference store is
   // in-memory; a production host implements HostSubmissionStore over a
   // durable store (unique-constraint claim per session).
-  submissionStore: new ReferenceSubmissionStore(),
+  submissionStore,
   // P0 CSRF separation: issuance AND verification resolve through this
   // single secret — never the (rotating) profile keys.
   csrfSecret: CSRF_SECRET,

@@ -28,11 +28,13 @@ import { createOriginServer, closeServer, type OriginAssessment } from "../../sr
 import type { AddressInfo } from "node:net";
 import {
   ReferenceSessionAdapter,
-  ReferenceTelemetryAdapter,
-  ReferenceCanaryStore,
-  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
+import {
+  DurableTelemetryAdapter,
+  DurableCanaryStore,
+  DurableSubmissionStore,
+} from "./helpers/durable-stores.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
 
 const SECRET = "o".repeat(64);
@@ -80,15 +82,15 @@ describe("P0 origin opacity: decision-blind wire", () => {
       session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
       render: { inject: referenceInject },
       verification: { verificationMode: "host-owned" as const, verify: async () => true },
-      telemetry: new ReferenceTelemetryAdapter(),
+      telemetry: new DurableTelemetryAdapter(), // FR-P1-03: production path needs durable stores
       // Stub upstream: records forwards; the origin's receipts don't depend
       // on it (the assertion is about FireRaid's wire, not the upstream's).
       enforcement: {
         allow: async () => true,
         deny: () => {},
       },
-      canaryStore: new ReferenceCanaryStore(),
-    submissionStore: new ReferenceSubmissionStore(),
+      canaryStore: new DurableCanaryStore(),
+    submissionStore: new DurableSubmissionStore(),
       enforcementMode: "enforcement" as const,
       routes: ROUTES,
     };

@@ -46,6 +46,7 @@ function deps(over: Partial<EvaluationMiddlewareDeps> = {}): EvaluationMiddlewar
     render: { inject: (h) => h },
     verification: { verificationMode: "host-owned" as const, verify: async () => true },
     telemetry: {
+      durability: "durable" as const, // FR-P1-03: eval-path double stands in for durable backing
       accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
       collect: async () => [],
     },

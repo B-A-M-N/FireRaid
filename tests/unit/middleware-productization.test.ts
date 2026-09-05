@@ -21,12 +21,11 @@ import {
   MiddlewareConfigError,
   ReferenceRenderError,
   ReferenceSessionAdapter,
-  ReferenceCanaryStore,
-  ReferenceSubmissionStore,
   referenceInject,
   type MiddlewareDeps,
   type MiddlewareRouteConfig,
 } from "../../src/host-adapter/index.js";
+import { DurableCanaryStore, DurableSubmissionStore } from "./helpers/durable-stores.js";
 import {
   admitEvaluation,
   createEvaluationMiddleware,
@@ -53,12 +52,13 @@ function baseDeps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
     render: { inject: (h, p, c, l, o) => referenceInject(h, p, c, l, o) },
     verification: { verificationMode: "host-owned" as const, verify: async () => true },
     telemetry: {
+      durability: "durable", // FR-P1-03: production path demands durable evidence stores
       accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
       collect: async () => [],
     },
     enforcement: { allow: async () => true, deny: () => {} },
-    canaryStore: new ReferenceCanaryStore(),
-    submissionStore: new ReferenceSubmissionStore(),
+    canaryStore: new DurableCanaryStore(), // durability:"durable"
+    submissionStore: new DurableSubmissionStore(), // durability:"durable"
     enforcementMode: "enforcement",
     ...over,
   };
@@ -126,7 +126,7 @@ describe("route table dispatch (audit item 14)", () => {
   });
 
   it("GET /c/<token> with the session's canary token → canary-verified", async () => {
-    const store = new ReferenceCanaryStore();
+    const store = new DurableCanaryStore();
     const d = createFireRaidMiddleware(baseDeps({
       routes: ROUTES,
       canaryStore: store,
@@ -164,7 +164,7 @@ describe("custom canaryPrefix full causal chain (audit P0)", () => {
   };
 
   it("GET → emitted route uses the resolved prefix; GET that URL verifies; POST sees CANARY_ROUTE_MATCH", async () => {
-    const store = new ReferenceCanaryStore();
+    const store = new DurableCanaryStore();
     const enforcement = { denied: 0, allowed: 0 };
     const evalDeps: EvaluationMiddlewareDeps = {
       ...createFireRaidMiddleware(baseDeps({
@@ -408,6 +408,39 @@ describe("createFireRaidMiddleware factory (audit item 17 + Batch 1/2)", () => {
     expect(result.version).toBe(VERSION);
   });
 
+  // ── FR-P1-03: durability is a FORMAL production capability ─────────────
+  it("a VOLATILE telemetry store is rejected by the PRODUCTION factory (not warned)", () => {
+    const d = baseDeps({
+      routes: ROUTES,
+      telemetry: {
+        durability: "volatile", // in-memory — the production contract forbids it
+        accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
+        collect: async () => [],
+      },
+    });
+    expect(() => createFireRaidMiddleware(d)).toThrow(/VOLATILE telemetry/);
+  });
+
+  it("a VOLATILE canary store is rejected by the PRODUCTION factory", () => {
+    const d = baseDeps({
+      routes: ROUTES,
+      canaryStore: {
+        durability: "volatile",
+        record: async () => true,
+        readVerified: async () => false,
+      } as unknown as MiddlewareDeps["canaryStore"],
+    });
+    expect(() => createFireRaidMiddleware(d)).toThrow(/VOLATILE canaryStore/);
+  });
+
+  it("the production factory does NOT reject a DURABLE store (already proven by every test above)", () => {
+    // baseDeps wires DurableCanary/Submission/Telemetry (see helpers) — a
+    // durable wiring passes the factory. Re-assert positively so the gate is
+    // pinned in BOTH directions.
+    const d = baseDeps({ routes: ROUTES });
+    expect(() => createFireRaidMiddleware(d)).not.toThrow();
+  });
+
   // ── Batch 2: the production factory REFUSES evaluation overrides ────────
   it("labMode smuggled into the production factory throws", () => {
     const d = baseDeps({ routes: ROUTES });
@@ -452,6 +485,31 @@ describe("createEvaluationMiddleware (evaluation surface)", () => {
   it("still validates structure (missing canaryStore throws)", () => {
     const { canaryStore: _omitted, ...rest } = baseDeps({ routes: ROUTES });
     expect(() => createEvaluationMiddleware(rest as unknown as EvaluationMiddlewareDeps)).toThrow(/canaryStore/);
+  });
+
+  it("FR-P1-03: the EVALUATION constructor PERMITS volatile stores (production rejects them)", () => {
+    // The audit: "make the production constructor throw for volatile adapters.
+    // The evaluation constructor can continue allowing them." Local/integration
+    // wiring uses the reference (volatile) stores through the eval plane.
+    const d = baseDeps({
+      routes: ROUTES,
+      telemetry: {
+        durability: "volatile",
+        accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
+        collect: async () => [],
+      },
+      canaryStore: {
+        durability: "volatile",
+        record: async () => true,
+        readVerified: async () => false,
+      } as unknown as MiddlewareDeps["canaryStore"],
+      submissionStore: {
+        durability: "volatile",
+        claim: async () => ({ kind: "claimed" as const, claimId: "c1", idempotencyKey: "k" }),
+        complete: async () => {},
+      } as unknown as MiddlewareDeps["submissionStore"],
+    });
+    expect(() => createEvaluationMiddleware(d as unknown as EvaluationMiddlewareDeps)).not.toThrow();
   });
 });
 

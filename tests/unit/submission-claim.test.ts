@@ -13,7 +13,6 @@ import {
   admit,
   createFireRaidMiddleware,
   ReferenceSessionAdapter,
-  ReferenceCanaryStore,
   ReferenceSubmissionStore,
   referenceInject,
   type MiddlewareDeps,
@@ -22,6 +21,7 @@ import {
 import { ReferenceEnforcementAdapter } from "../../src/host-adapter/reference-adapters.js";
 import { submissionIdempotencyKey } from "../../src/host-adapter/interface.js";
 import type { EnforcementResult } from "../../src/host-adapter/interface.js";
+import { DurableCanaryStore, DurableSubmissionStore } from "./helpers/durable-stores.js";
 import { createServer } from "node:http";
 
 const SECRET = "s".repeat(64);
@@ -43,12 +43,13 @@ function baseDeps(): MiddlewareDeps {
     render: { inject: referenceInject },
     verification: { verificationMode: "host-owned" as const, verify: async () => true },
     telemetry: {
+      durability: "durable", // FR-P1-03: the production path demands durable evidence stores
       accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
       collect: async () => [],
     },
     enforcement: new ReferenceEnforcementAdapter(),
-    canaryStore: new ReferenceCanaryStore(),
-    submissionStore: new ReferenceSubmissionStore(),
+    canaryStore: new DurableCanaryStore(), // durability:"durable" — see helpers/durable-stores
+    submissionStore: new DurableSubmissionStore(), // durability:"durable"
     enforcementMode: "enforcement" as const,
     routes: ROUTES,
   } as MiddlewareDeps;

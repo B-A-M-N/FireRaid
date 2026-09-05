@@ -1279,7 +1279,8 @@ function requireMethod(obj: unknown, name: string, label: string): void {
  * Refuses smuggled lab/recipe configuration outright.
  */
 export function createFireRaidMiddleware(
-  deps: MiddlewareDeps
+  deps: MiddlewareDeps,
+  options?: { allowVolatile?: boolean }
 ): MiddlewareDeps {
   // AUDIT (P0 product/lab boundary): the production factory accepts NO
   // evaluation overrides. A smuggled labMode/recipe/handle would let a
@@ -1461,25 +1462,34 @@ export function createFireRaidMiddleware(
     );
   }
 
-  // P1-8: volatile reference stores in a production wiring are named, not
-  // silently accepted — telemetry/canary evidence that evaporates on
-  // restart cannot anchor review decisions. (A WARNING, not a rejection:
-  // local integration legitimately uses the reference stores, and
-  // durability is a deployment property the factory cannot prove.)
-  for (const [label, store] of [
+  // FR-P1-03: durability is a FORMAL capability, and the production
+  // constructor FAILS, not warns, on volatile stores. Evidence that
+  // disappears on a restart cannot anchor production review decisions, and
+  // a volatile submission store would lose its FR-P0-02 claim on restart and
+  // re-run an irreversible forward. Local development/integration uses the
+  // reference (volatile) stores through the EVALUATION constructor, which
+  // still permits them — a production wiring that knowingly accepts an
+  // in-memory evidence store is a configuration error, not a policy choice.
+  const evidenceStores: Array<[string, HostTelemetryAdapter | HostCanaryStore | HostSubmissionStore | undefined]> = [
     ["telemetry", deps.telemetry],
     ["canaryStore", deps.canaryStore],
-  ] as const) {
-    if (
-      store &&
-      (store as { durability?: string }).durability === "volatile"
-    ) {
-      console.warn(
-        `FireRaid middleware: ${label} is a VOLATILE reference store ` +
-        `(in-memory, lost on restart). Acceptable for local development ` +
-        `and integration; production deployments must wire a durable ` +
-        `adapter (INTEGRATION.md).`
-      );
+    ["submissionStore", deps.submissionStore],
+  ];
+  for (const [label, store] of evidenceStores) {
+    if (store && store.durability === "volatile") {
+      // FR-P1-03: the PRODUCTION constructor rejects volatile evidence
+      // stores by default. The EVALUATION constructor (createEvaluation-
+      // Middleware) opts in via `{ allowVolatile: true }` — it is the
+      // sanctioned home of in-memory integration/experiment wiring.
+      if (!options?.allowVolatile) {
+        throw new MiddlewareConfigError(
+          `createFireRaidMiddleware (production) rejects a VOLATILE ${label} ` +
+            `(durability:"${store.durability}", in-memory, lost on restart). ` +
+            `Production review evidence and the one-submission claim must survive ` +
+            `restarts; wire a durable adapter (D1/R2/Postgres/…; INTEGRATION.md). ` +
+            `Volatile reference stores are the EVALUATION constructor's domain.`
+        );
+      }
     }
   }
 

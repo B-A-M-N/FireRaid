@@ -81,6 +81,12 @@ try {
 
     // 5. Minimal runtime smoke: construct the middleware and run one
     //    GET (page + envelope cookie) and one POST (submit) admission.
+    const __telemetry = new adapters.ReferenceTelemetryAdapter();
+    __telemetry.durability = "durable"; // FR-P1-03: production factory rejects volatile
+    const __canary = new adapters.ReferenceCanaryStore();
+    __canary.durability = "durable";
+    const __submission = new adapters.ReferenceSubmissionStore();
+    __submission.durability = "durable";
     const deps = root.createFireRaidMiddleware({
       profileKeys: { current: { id: "default", secret: "a".repeat(64) } },
       version: 1,
@@ -88,13 +94,14 @@ try {
       session: new adapters.ReferenceSessionAdapter("k".repeat(64)),
       render: { inject: adapters.referenceInject },
       verification: new adapters.HostOwnedVerificationAdapter(async () => true),
-      telemetry: new adapters.ReferenceTelemetryAdapter(),
+      telemetry: __telemetry,
       // P0-8: stub enforcement — the smoke has no live upstream, and the
       // real reference adapter now honestly reports transport-failure for
       // one (the runtime would 502). The contract under test is the
       // admission round-trip, not upstream reachability.
       enforcement: { allow: async () => ({ kind: "created" }), deny: () => {} },
-      canaryStore: new adapters.ReferenceCanaryStore(),
+      canaryStore: __canary,
+      submissionStore: __submission, // FR-P0-02: REQUIRED for the production factory
     });
     const page = await root.admit(new Request("http://localhost/signup"), deps, async () => '<html><body><form id="signup-form"></form></body></html>');
     if (page.kind !== "get" || !page.setCookie?.startsWith("__Host-fr_")) throw new Error("GET did not issue the signed envelope cookie");

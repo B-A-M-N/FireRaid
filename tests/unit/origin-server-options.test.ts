@@ -18,12 +18,14 @@ import { createOriginServer, closeServer } from "../../src/runtime/node.js";
 import type { AddressInfo } from "node:net";
 import {
   ReferenceSessionAdapter,
-  ReferenceTelemetryAdapter,
   ReferenceEnforcementAdapter,
-  ReferenceCanaryStore,
-  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
+import {
+  DurableTelemetryAdapter,
+  DurableCanaryStore,
+  DurableSubmissionStore,
+} from "./helpers/durable-stores.js";
 import type { MiddlewareDeps } from "../../src/host-adapter/middleware.js";
 
 const SECRET = "s".repeat(64);
@@ -44,10 +46,10 @@ function deps(): MiddlewareDeps {
     session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
     render: { inject: referenceInject },
     verification: { verificationMode: "host-owned" as const, verify: async () => true },
-    telemetry: new ReferenceTelemetryAdapter(),
+    telemetry: new DurableTelemetryAdapter(), // FR-P1-03: production path needs durable stores
     enforcement: new ReferenceEnforcementAdapter(),
-    canaryStore: new ReferenceCanaryStore(),
-    submissionStore: new ReferenceSubmissionStore(),
+    canaryStore: new DurableCanaryStore(),
+    submissionStore: new DurableSubmissionStore(),
     enforcementMode: "advisory" as const,
     routes: ROUTES,
   } as MiddlewareDeps;

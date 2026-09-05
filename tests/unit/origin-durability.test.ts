@@ -14,11 +14,13 @@ import { createOriginServer, closeServer } from "../../src/runtime/node.js";
 import type { AddressInfo } from "node:net";
 import {
   ReferenceSessionAdapter,
-  ReferenceTelemetryAdapter,
-  ReferenceCanaryStore,
-  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
+import {
+  DurableTelemetryAdapter,
+  DurableCanaryStore,
+  DurableSubmissionStore,
+} from "./helpers/durable-stores.js";
 import type { OriginAssessment } from "../../src/runtime/node.js";
 
 const SECRET = "s".repeat(64);
@@ -53,10 +55,10 @@ describe("P0-5: onAssessment durability", () => {
       session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
       render: { inject: referenceInject },
       verification: { verificationMode: "host-owned" as const, verify: async () => true },
-      telemetry: new ReferenceTelemetryAdapter(),
+      telemetry: new DurableTelemetryAdapter(), // FR-P1-03: production path needs durable stores
       enforcement: { allow: async () => true, deny: () => {} },
-      canaryStore: new ReferenceCanaryStore(),
-    submissionStore: new ReferenceSubmissionStore(),
+      canaryStore: new DurableCanaryStore(),
+    submissionStore: new DurableSubmissionStore(),
       enforcementMode: "enforcement" as const,
       routes: ROUTES,
     };

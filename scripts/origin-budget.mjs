@@ -34,6 +34,7 @@ const {
   ReferenceTelemetryAdapter,
   ReferenceEnforcementAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
   referenceInject,
 } = await import("../src/host-adapter/index.js");
 const { createFireRaidMiddleware } = await import("../src/host-adapter/middleware.js");
@@ -72,6 +73,16 @@ function startUpstreamSink() {
 }
 
 function buildDeps() {
+  // FR-P1-03: the production constructor rejects VOLATILE evidence stores.
+  // This budget gate exercises the real middleware with in-memory reference
+  // stores as __stand-ins__ for durable backing — mark them durable so the
+  // factory accepts them (a real deployment wires durable adapters).
+  const telemetry = new ReferenceTelemetryAdapter();
+  telemetry.durability = "durable";
+  const canaryStore = new ReferenceCanaryStore();
+  canaryStore.durability = "durable";
+  const submissionStore = new ReferenceSubmissionStore();
+  submissionStore.durability = "durable";
   return createFireRaidMiddleware({
     profileKeys: { current: { id: "default", secret: SECRET } },
     version: VERSION,
@@ -79,9 +90,10 @@ function buildDeps() {
     session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
     render: { inject: referenceInject },
     verification: new HostOwnedVerificationAdapter(async () => true),
-    telemetry: new ReferenceTelemetryAdapter(),
+    telemetry,
     enforcement: new ReferenceEnforcementAdapter(),
-    canaryStore: new ReferenceCanaryStore(),
+    canaryStore,
+    submissionStore, // FR-P0-02: REQUIRED for the production factory
     enforcementMode: "advisory",
     routes: ROUTES,
   });

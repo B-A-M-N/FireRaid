@@ -280,6 +280,14 @@ export type HostTelemetryIngest =
 
 export interface HostTelemetryAdapter {
   /**
+   * FR-P1-03: durability is a formal part of the contract, not a comment.
+   * "volatile" names an in-memory store (lost on restart); "durable" names
+   * one that survives restarts/region moves (D1, R2, Postgres, …). The
+   * PRODUCTION constructor rejects volatile adapters: interaction evidence
+   * that evaporates on restart cannot anchor a review decision.
+   */
+  readonly durability: "durable" | "volatile";
+  /**
    * Validate + persist one client batch under the Worker's watermark
    * semantics (see HostTelemetryIngest). A structurally invalid batch
    * returns kind:"invalid" — the middleware treats that as a deny (an
@@ -420,6 +428,13 @@ export type FinalSubmissionOutcome =
 
 export interface HostSubmissionStore {
   /**
+   * FR-P1-03: the one-submission authority MUST be durable. A volatile
+   * submission store would lose a claim on restart and re-run an
+   * irreversible upstream forward — the exact FR-P0-02 failure. The
+   * PRODUCTION constructor rejects volatile submission stores.
+   */
+  readonly durability: "durable" | "volatile";
+  /**
    * Atomically claim the session's single forward slot. Implementations
    * MUST be durable and atomic (a unique constraint or conditional UPDATE,
    * never check-then-insert).
@@ -469,6 +484,12 @@ export interface RiskAnnotation {
  * attacker success); `readVerified` throwing denies admission.
  */
 export interface HostCanaryStore {
+  /**
+   * FR-P1-03: Class-A causal evidence (verified route hits) that evaporates
+   * on restart loses the strongest signing channel the system owns. The
+   * PRODUCTION constructor rejects volatile canary stores.
+   */
+  readonly durability: "durable" | "volatile";
   /**
    * Persist one verified route hit. Idempotent replays MUST return true
    * (mirrors the Worker's INSERT OR IGNORE). Return false ONLY on a real

@@ -225,7 +225,9 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
       recipe: LAB_FULL,
       telemetry: {
         // Canonical validation + watermark-gated in-memory persistence
-        // (P0-5 + P0-2 contract).
+        // (P0-5 + P0-2 contract). FR-P1-03: declared durable — eval-path
+        // doubles stand in for durable backing.
+        durability: "durable" as const,
         accept: async (sid: string, b: unknown) => {
           const check = validateTelemetryBatch(b);
           if (!check.ok) return { kind: "invalid" as const, code: check.code };
@@ -273,7 +275,9 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
       recipe: LAB_FULL,
       telemetry: {
         // Canonical validation + watermark-gated in-memory persistence
-        // (P0-5 + P0-2 contract).
+        // (P0-5 + P0-2 contract). FR-P1-03: declared durable — eval-path
+        // doubles stand in for durable backing.
+        durability: "durable" as const,
         accept: async (sid: string, b: unknown) => {
           const check = validateTelemetryBatch(b);
           if (!check.ok) return { kind: "invalid" as const, code: check.code };

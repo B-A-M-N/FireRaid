@@ -15,13 +15,12 @@ import { describe, it, expect } from "vitest";
 import { ReferenceEnforcementAdapter } from "../../src/host-adapter/reference-adapters.js";
 import { admit } from "../../src/host-adapter/middleware.js";
 import { createFireRaidMiddleware } from "../../src/host-adapter/middleware.js";
+import { ReferenceSessionAdapter, referenceInject } from "../../src/host-adapter/index.js";
 import {
-  ReferenceSessionAdapter,
-  ReferenceTelemetryAdapter,
-  ReferenceCanaryStore,
-  ReferenceSubmissionStore,
-  referenceInject,
-} from "../../src/host-adapter/index.js";
+  DurableTelemetryAdapter,
+  DurableCanaryStore,
+  DurableSubmissionStore,
+} from "./helpers/durable-stores.js";
 import type { MiddlewareDeps } from "../../src/host-adapter/middleware.js";
 import type { EnforcementResult } from "../../src/host-adapter/interface.js";
 import type { Server } from "node:http";
@@ -158,10 +157,10 @@ describe("P0-8: middleware receipt policy", () => {
       session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
       render: { inject: referenceInject },
       verification: { verificationMode: "host-owned" as const, verify: async () => true },
-      telemetry: new ReferenceTelemetryAdapter(),
+      telemetry: new DurableTelemetryAdapter(), // durability:"durable" — FR-P1-03
       enforcement: new ReferenceEnforcementAdapter(),
-      canaryStore: new ReferenceCanaryStore(),
-      submissionStore: new ReferenceSubmissionStore(),
+      canaryStore: new DurableCanaryStore(), // durability:"durable"
+      submissionStore: new DurableSubmissionStore(), // durability:"durable"
       enforcementMode: "enforcement" as const,
       routes: ROUTES,
     }) as unknown as MiddlewareDeps;

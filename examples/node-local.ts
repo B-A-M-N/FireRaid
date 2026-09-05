@@ -1,18 +1,27 @@
 /**
- * P1-22: Compile-tested production example fixture.
+ * P1-22: compile-tested LOCAL/DEMO example fixture (NOT a production wiring).
  * This file is type-checked as part of the docs/examples gate.
- * Run: tsc --noEmit examples/node-production.ts
+ * Run: tsc --noEmit examples/node-local.ts
  *
- * P1-2: a PRODUCTION example must not compile an accept-all verifier —
- * people copy examples. The verifier below is therefore a hard stub:
- * constructing this example without wiring a real verifier THROWS at
- * startup (fail closed), and the placeholder callback makes the failure
- * explicit rather than silently admitting everyone. Runnable (permissive)
- * examples live in origin-server.mjs under explicit dev-mode flags.
+ * P1-2: an example must not silently admit everyone — people copy examples.
+ * The verifier below is therefore a hard stub: constructing this example
+ * without wiring a real verifier THROWS at startup (fail closed), and the
+ * placeholder callback makes the failure explicit rather than admitting
+ * everyone. Runnable (permissive) examples live in origin-server.mjs under
+ * explicit dev-mode flags.
+ *
+ * P1-4: renamed from `node-production.ts` to `node-local.ts`. It wires the
+ * Reference (VOLATILE, in-memory) stores — telemetry, canary, submission —
+ * so it is a LOCAL/INTEGRATION wiring, never a production deployment. Under
+ * FR-P1-03, `createFireRaidMiddleware` (the PRODUCTION constructor) REJECTS
+ * volatile evidence stores at startup. This example therefore routes through
+ * the EVALUATION constructor, `createEvaluationMiddleware` ({ allowVolatile:
+ * true } under the hood), which is the sanctioned home of non-durable wiring.
+ * A real production host must substitute DURABLE adapters (D1/R2/Postgres/…)
+ * over the SAME interface, then use `createFireRaidMiddleware`.
  */
 
 import {
-  createFireRaidMiddleware,
   ReferenceSessionAdapter,
   referenceInject,
   ReferenceTelemetryAdapter,
@@ -21,6 +30,7 @@ import {
   ReferenceSubmissionStore,
   HostOwnedVerificationAdapter,
 } from "../src/host-adapter/index.js";
+import { createEvaluationMiddleware } from "../src/eval/evaluation-middleware.js";
 import { createOriginServer, closeServer } from "../src/runtime/node.js";
 import type { OriginServerOptions } from "../src/runtime/node.js";
 import type { MiddlewareDeps } from "../src/host-adapter/middleware.js";
@@ -31,13 +41,12 @@ import type { VerificationInput } from "../src/host-adapter/interface.js";
 const PROFILE_SECRET = process.env.FIRERAID_PROFILE_SECRET;
 const CSRF_SECRET = process.env.FIRERAID_CSRF_SECRET;
 
-// P1-2: production secrets come from the environment, never defaults.
+// Secrets come from the environment, never defaults.
 if (!PROFILE_SECRET || !CSRF_SECRET) {
   throw new Error(
-    "node-production example requires FIRERAID_PROFILE_SECRET and " +
-    "FIRERAID_CSRF_SECRET in the environment (production secrets are " +
-    "never defaulted — a deployment that starts with a placeholder " +
-    "secret is worse than one that refuses to start)."
+    "node-local example requires FIRERAID_PROFILE_SECRET and " +
+    "FIRERAID_CSRF_SECRET in the environment (a deployment that starts with " +
+    "a placeholder secret is worse than one that refuses to start)."
   );
 }
 
@@ -60,7 +69,7 @@ async function verifyHuman(
   );
 }
 
-const middlewareDeps: MiddlewareDeps = {
+const middlewareDeps = {
   profileKeys: { current: { id: "default", secret: PROFILE_SECRET } },
   version: 1,
   csrfSecret: CSRF_SECRET,
@@ -78,15 +87,21 @@ const middlewareDeps: MiddlewareDeps = {
   canaryStore: new ReferenceCanaryStore(),
   // FR-P0-02: one session → one irreversible forward. The reference store is
   // in-memory (volatile — restarts lose claim history); a production host
-  // implements HostSubmissionStore over its own database.
+  // implements HostSubmissionStore over its own DURABLE database.
   submissionStore: new ReferenceSubmissionStore(),
   verification: new HostOwnedVerificationAdapter(verifyHuman),
 };
 
 async function main(): Promise<void> {
-  const validatedDeps = createFireRaidMiddleware({
+  // FR-P1-03/P1-4: LOCAL wiring of volatile reference stores — the EVALUATION
+  // constructor permits these; the PRODUCTION constructor (createFireRaid-
+  // Middleware) would reject them. A production deploy must wire durable
+  // adapters and call createFireRaidMiddleware.
+  const validatedDeps = createEvaluationMiddleware({
     ...middlewareDeps,
     routes: middlewareDeps.routes,
+    // No lab conditions: this is the production SHAPE, just with in-memory
+    // (non-durable) stores. Equivalent to a local integration harness.
   });
 
   const htmlLoader = async (): Promise<string> => {
@@ -96,8 +111,11 @@ async function main(): Promise<void> {
   // P1-1: createOriginServer CONSTRUCTS the server; the host owns binding.
   // (The old `port` option was dead configuration — accepted, never used.)
   const PORT = Number(process.env.PORT ?? 8443);
+  // Evaluation deps are structurally the production shape plus the (empty)
+  // eval override surface; the origin server consumes the MiddlewareDeps
+  // portion — cast asserts that known-safe subset.
   const options: OriginServerOptions = {
-    middlewareDeps: validatedDeps,
+    middlewareDeps: validatedDeps as unknown as MiddlewareDeps,
     htmlLoader,
     routes: middlewareDeps.routes!,
     // P0-6: behind a reverse proxy, pin the public origin so a spoofed

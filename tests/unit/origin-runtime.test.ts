@@ -15,12 +15,14 @@ import { createOriginServer, closeServer } from "../../src/runtime/node.js";
 import type { AddressInfo } from "node:net";
 import {
   ReferenceSessionAdapter,
-  ReferenceTelemetryAdapter,
   ReferenceEnforcementAdapter,
-  ReferenceCanaryStore,
-  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
+import {
+  DurableTelemetryAdapter,
+  DurableCanaryStore,
+  DurableSubmissionStore,
+} from "./helpers/durable-stores.js";
 
 const SECRET = "s".repeat(64);
 const VERSION = 1;
@@ -43,10 +45,10 @@ function buildDeps() {
     session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
     render: { inject: referenceInject },
     verification: { verificationMode: "host-owned" as const, verify: async () => true },
-    telemetry: new ReferenceTelemetryAdapter(),
+    telemetry: new DurableTelemetryAdapter(), // durability:"durable" — FR-P1-03
     enforcement: new ReferenceEnforcementAdapter(),
-    canaryStore: new ReferenceCanaryStore(),
-    submissionStore: new ReferenceSubmissionStore(),
+    canaryStore: new DurableCanaryStore(),
+    submissionStore: new DurableSubmissionStore(),
     enforcementMode: "advisory" as const,
     routes: ROUTES,
   };

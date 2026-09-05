@@ -202,14 +202,14 @@ export function resolveScoringPolicy(
  */
 export class ReferenceTelemetryAdapter implements HostTelemetryAdapter {
   /**
-   * P1-8: unmistakably NON-PRODUCTION durability. This store is an
-   * in-process Map — evidence evaporates on restart, and evidence that
-   * evaporates cannot anchor a review decision. `durability` names that
-   * fact on the type (production adapters declare "durable"; the
-   * production factory logs loudly when handed a reference store, and
-   * INTEGRATION.md's production wiring uses a durable adapter).
+   * P1-8 / FR-P1-03: NON-PRODUCTION durability. This store is an in-process
+   * Map — evidence evaporates on restart, and evidence that evaporates
+   * cannot anchor a review decision. `durability` names that fact on the
+   * type (production adapters declare "durable"; the production factory
+   * rejects a volatile store). Mutable so a test/demo double can declare a
+   * durable backing it represents; the reference default is always volatile.
    */
-  readonly durability = "volatile" as const;
+  durability: "durable" | "volatile" = "volatile";
   /** sessionId → events in seq order (deduplicated by the watermark gate). */
   private readonly streams = new Map<string, ValidatedEvent[]>();
 
@@ -406,7 +406,7 @@ export class ReferenceCanaryStore implements HostCanaryStore {
    * durable production storage. Causal evidence (Class-A canary hits) that
    * evaporates on restart cannot anchor an admission decision.
    */
-  readonly durability = "volatile" as const;
+  durability: "durable" | "volatile" = "volatile";
   private readonly hits = new Set<string>();
   /** When true, record() fails (simulates a real storage outage). */
   failStore = false;
@@ -463,7 +463,7 @@ export class ReferenceCanaryStore implements HostCanaryStore {
  * tests, and as the behavioral specification for a durable implementation.
  */
 export class ReferenceSubmissionStore implements HostSubmissionStore {
-  readonly durability = "volatile" as const;
+  durability: "durable" | "volatile" = "volatile";
   /** sessionId → claim state. A completed claim holds its outcome forever. */
   private readonly claims = new Map<
     string,

@@ -19,11 +19,13 @@ import { createOriginServer, closeServer } from "../../src/runtime/node.js";
 import type { AddressInfo } from "node:net";
 import {
   ReferenceSessionAdapter,
-  ReferenceTelemetryAdapter,
-  ReferenceCanaryStore,
-  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
+import {
+  DurableTelemetryAdapter,
+  DurableCanaryStore,
+  DurableSubmissionStore,
+} from "./helpers/durable-stores.js";
 import type { OriginAssessment } from "../../src/runtime/node.js";
 
 const SECRET = "s".repeat(64);
@@ -76,13 +78,13 @@ function boot(opts: {
       upstreamRegisterUrl: "http://127.0.0.1:1/register",
       session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
       render: { inject: referenceInject },
-      telemetry: new ReferenceTelemetryAdapter(),
+      telemetry: new DurableTelemetryAdapter(), // durability:"durable" — FR-P1-03
       verification: opts.verification ?? { verificationMode: "host-owned" as const, verify: async () => true },
       enforcement,
       canaryStore: opts.failCanaryStore
-        ? Object.assign(new ReferenceCanaryStore(), { failStore: true })
-        : new ReferenceCanaryStore(),
-      submissionStore: new ReferenceSubmissionStore(),
+        ? Object.assign(new DurableCanaryStore(), { failStore: true })
+        : new DurableCanaryStore(),
+      submissionStore: new DurableSubmissionStore(),
       enforcementMode: opts.enforcementMode,
       routes: ROUTES,
       // deno-lint-ignore no-explicit-any
