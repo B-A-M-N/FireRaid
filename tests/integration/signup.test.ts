@@ -46,15 +46,10 @@ describe("integration: signup flow", () => {
     // is the smoke that a real deployment missing a migration would fail.
     const resp = await fetch(`${BASE}/readyz`);
     expect(resp.status).toBe(200);
-    const body = (await resp.json()) as {
-      ok: boolean;
-      ready: boolean;
-      missingTables: string[];
-      missingColumns: string[];
-    };
+    // Closure 8: the external body is opaque — exactly {ok, ready}.
+    const body = (await resp.json()) as { ok: boolean; ready: boolean };
     expect(body.ready).toBe(true);
-    expect(body.missingTables).toEqual([]);
-    expect(body.missingColumns).toEqual([]);
+    expect(Object.keys(body).sort()).toEqual(["ok", "ready"]);
   });
 
   it("GET /signup sets secure cookies and renders form", async () => {

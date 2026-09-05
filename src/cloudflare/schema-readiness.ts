@@ -23,10 +23,17 @@
  * while probing the newest coupling catches the drift that actually breaks a
  * deploy.
  */
-import { now } from "../core/session.js";
 
-/** Tables every deployment must have. */
-const REQUIRED_TABLES = [
+
+/**
+ * Closure 8 (FR-P1-09): PRODUCT vs LAB schema requirements are DIFFERENT
+ * planes. The production Worker never reads lab_runs/experiments/harness_runs
+ * (they are the evaluation control plane's tables), so a production
+ * deployment must not fail readiness over them — nor should its readiness
+ * probe reveal the full evaluation schema. Conversely the lab fixture needs
+ * both sets.
+ */
+const PRODUCT_REQUIRED_TABLES = [
   "sessions",
   "event_batches",
   "canary_hits",
@@ -34,12 +41,20 @@ const REQUIRED_TABLES = [
   "submission_evidence",
   "verification_attempts",
   "session_metrics",
+] as const;
+
+const LAB_ONLY_TABLES = [
   "review_queue",
   "review_calibration",
   "lab_runs",
   "experiments",
   "harness_runs",
 ] as const;
+
+/** Tables every deployment must have (product base +, for lab, the lab plane). */
+function requiredTablesFor(labMode: boolean): readonly string[] {
+  return labMode ? [...PRODUCT_REQUIRED_TABLES, ...LAB_ONLY_TABLES] : PRODUCT_REQUIRED_TABLES;
+}
 
 /** Critical, version-anchored columns per table (the newest-migration probe). */
 const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
@@ -92,8 +107,15 @@ function notReady(p: Partial<SchemaReadiness>): SchemaReadiness {
  * current code requires. FAIL-CLOSED: on any D1 error, readiness is false with
  * the error surfaced — a schema we cannot inspect is not a schema we can serve
  * on.
+ *
+ * Closure 8: `labMode` selects the plane's schema contract (production never
+ * requires the evaluation control-plane tables).
  */
-export async function checkSchemaReadiness(db: D1Database): Promise<SchemaReadiness> {
+export async function checkSchemaReadiness(
+  db: D1Database,
+  labMode = false
+): Promise<SchemaReadiness> {
+  const REQUIRED_TABLES = requiredTablesFor(labMode);
   const missingTables: string[] = [];
   const missingColumns: string[] = [];
   try {
@@ -135,21 +157,31 @@ export async function checkSchemaReadiness(db: D1Database): Promise<SchemaReadin
 
 /**
  * Wrap the readiness probe in the /readyz response. 200 ready, 503 not-ready
- * (schema drift or DB check unavailable) — the 503 body carries exactly what
- * is missing so an operator turning a deployment green sees the migration gap.
+ * (schema drift or DB check unavailable).
+ *
+ * Closure 8 (FR-P1-09): the EXTERNAL body is OPAQUE — {"ok","ready"} and
+ * nothing else. The probe is unauthenticated; its prior body enumerated the
+ * schema manifest (missing tables/columns, the raw D1 error string) to any
+ * anonymous caller — an attacker's schema map. The operator-facing detail
+ * (exactly what is missing, the underlying error) goes to the SERVER LOG,
+ * where the person turning a deployment green already has access.
  */
-export async function readyzResponse(db: D1Database): Promise<Response> {
-  const check = await checkSchemaReadiness(db);
+export async function readyzResponse(
+  db: D1Database,
+  labMode = false
+): Promise<Response> {
+  const check = await checkSchemaReadiness(db, labMode);
   const status = check.ready ? 200 : 503;
-  return Response.json(
-    {
-      ok: check.ready,
-      ready: check.ready,
-      checkedAt: now(),
-      missingTables: check.missingTables,
-      missingColumns: check.missingColumns,
-      error: check.error,
-    },
-    { status }
-  );
+  if (!check.ready) {
+    // Operator detail lives in logs only — never in the anonymous response.
+    console.error(
+      "readiness NOT ready:",
+      JSON.stringify({
+        missingTables: check.missingTables,
+        missingColumns: check.missingColumns,
+        error: check.error,
+      })
+    );
+  }
+  return Response.json({ ok: check.ready, ready: check.ready }, { status });
 }

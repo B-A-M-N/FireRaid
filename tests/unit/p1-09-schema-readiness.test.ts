@@ -98,7 +98,7 @@ describe("FR-P1-09: schema readiness", () => {
       tables: ALL_TABLES,
       columnsByTable: { session_metrics: META_COLS, sessions: SESSIONS_COLS },
     });
-    const check = await checkSchemaReadiness(db);
+    const check = await checkSchemaReadiness(db, true);
     expect(check.ready).toBe(true);
     expect(check.missingTables).toEqual([]);
     expect(check.missingColumns).toEqual([]);
@@ -108,14 +108,13 @@ describe("FR-P1-09: schema readiness", () => {
   it("not ready when a required table is absent (stale migration); /readyz is 503", async () => {
     const missing = ALL_TABLES.filter((t) => t !== "harness_runs");
     const db = fakeD1({ tables: missing });
-    const check = await checkSchemaReadiness(db);
+    const check = await checkSchemaReadiness(db, true);
     expect(check.ready).toBe(false);
     expect(check.missingTables).toContain("harness_runs");
-    const resp = await readyzResponse(db as unknown as D1Database);
+    const resp = await readyzResponse(db as unknown as D1Database, true);
     expect(resp.status).toBe(503);
-    const body = (await resp.json()) as { ok: boolean; missingTables: string[] };
+    const body = (await resp.json()) as { ok: boolean };
     expect(body.ok).toBe(false);
-    expect(body.missingTables).toContain("harness_runs");
   });
 
   it("not ready when the NEWEST 0017 interaction-depth column is missing", async () => {
@@ -127,7 +126,7 @@ describe("FR-P1-09: schema readiness", () => {
       tables: ALL_TABLES,
       columnsByTable: { session_metrics: shallow, sessions: SESSIONS_COLS },
     });
-    const check = await checkSchemaReadiness(db);
+    const check = await checkSchemaReadiness(db, true);
     expect(check.ready).toBe(false);
     expect(check.missingColumns).toContain("session_metrics:blur_count");
     expect(check.missingTables).toEqual([]);
@@ -135,7 +134,7 @@ describe("FR-P1-09: schema readiness", () => {
 
   it("not ready when 0014 sessions.causal_route_hit is missing", async () => {
     const db = fakeD1({ tables: ALL_TABLES, columnsByTable: { session_metrics: META_COLS, sessions: [] } });
-    const check = await checkSchemaReadiness(db);
+    const check = await checkSchemaReadiness(db, true);
     expect(check.ready).toBe(false);
     expect(check.missingColumns).toContain("sessions:causal_route_hit");
   });
@@ -146,10 +145,66 @@ describe("FR-P1-09: schema readiness", () => {
       columnsByTable: { session_metrics: META_COLS, sessions: SESSIONS_COLS },
       throwOn: "sqlite_master",
     });
-    const check = await checkSchemaReadiness(db);
+    const check = await checkSchemaReadiness(db, true);
     expect(check.ready).toBe(false);
     expect(check.error).toMatch(/simulated D1 error/);
-    const resp = await readyzResponse(db as unknown as D1Database);
+    const resp = await readyzResponse(db as unknown as D1Database, true);
     expect(resp.status).toBe(503);
+  });
+});
+// ── Closure 8 (FR-P1-09): plane-specific schema + opaque external body ───
+
+describe("closure 8: product/lab plane split + opaque readyz body", () => {
+  it("PRODUCTION readiness does NOT require the evaluation control-plane tables", async () => {
+    // A production D1 with ONLY the product tables is READY — lab_runs /
+    // experiments / harness_runs / review_* belong to the lab plane.
+    const productOnly = [
+      "sessions",
+      "event_batches",
+      "canary_hits",
+      "submissions",
+      "submission_evidence",
+      "verification_attempts",
+      "session_metrics",
+    ];
+    const db = fakeD1({
+      tables: productOnly,
+      columnsByTable: { session_metrics: META_COLS, sessions: SESSIONS_COLS },
+    });
+    const check = await checkSchemaReadiness(db, false);
+    expect(check.ready).toBe(true);
+    expect(check.missingTables).toEqual([]);
+  });
+
+  it("PRODUCTION readiness still fails on a missing PRODUCT table", async () => {
+    const noMetrics = ALL_TABLES.filter((t) => t !== "session_metrics");
+    const db = fakeD1({ tables: noMetrics });
+    const check = await checkSchemaReadiness(db, false);
+    expect(check.ready).toBe(false);
+    expect(check.missingTables).toEqual(["session_metrics"]);
+  });
+
+  it("the EXTERNAL /readyz body is OPAQUE: only {ok, ready} — never the schema manifest", async () => {
+    // The probe is unauthenticated; the prior body enumerated missing
+    // tables/columns and the raw D1 error to any anonymous caller.
+    const missing = ALL_TABLES.filter((t) => t !== "harness_runs");
+    const db = fakeD1({ tables: missing });
+    const resp = await readyzResponse(db as unknown as D1Database, true);
+    expect(resp.status).toBe(503);
+    const body = (await resp.json()) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(["ok", "ready"]);
+    expect(body.ready).toBe(false);
+  });
+
+  it("the READY body is likewise exactly {ok, ready}", async () => {
+    const db = fakeD1({
+      tables: ALL_TABLES,
+      columnsByTable: { session_metrics: META_COLS, sessions: SESSIONS_COLS },
+    });
+    const resp = await readyzResponse(db as unknown as D1Database, true);
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(["ok", "ready"]);
+    expect(body.ready).toBe(true);
   });
 });

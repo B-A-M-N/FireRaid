@@ -11,7 +11,7 @@
  */
 import { json, withSecurityHeaders } from "../security/headers.js";
 import type { Env } from "../env.js";
-import { profileVersion } from "../env.js";
+import { profileVersion, isLabMode } from "../env.js";
 import { readyzResponse } from "../cloudflare/schema-readiness.js";
 
 export async function health(_req: Request, env: Env): Promise<Response> {
@@ -19,6 +19,9 @@ export async function health(_req: Request, env: Env): Promise<Response> {
 }
 
 export async function readyz(_req: Request, env: Env): Promise<Response> {
-  const resp = await readyzResponse(env.DB);
+  // Closure 8: the plane selects the schema contract (production never
+  // requires the evaluation control-plane tables) and the external body is
+  // opaque {"ok","ready"} — detail goes to the operator's logs.
+  const resp = await readyzResponse(env.DB, isLabMode(env));
   return withSecurityHeaders(resp);
 }
