@@ -25,6 +25,7 @@
  *
  * Usage:
  *   node scripts/predeploy-production.mjs            # read-only preflight
+ *   node scripts/predeploy-production.mjs --json     # machine-readable checks
  *   npm run predeploy:production
  */
 import { spawnSync } from "node:child_process";
@@ -36,6 +37,10 @@ import { parse as parseJsonc } from "jsonc-parser";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG = join(ROOT, "wrangler.jsonc");
 const PLACEHOLDER = "REPLACE_AFTER_CREATE";
+// FR-P1-13: `--json` emits the check array machine-readable so the release
+// gate can fold this preflight into release evidence and compute deploy_ready
+// precisely (no human-output parsing).
+const JSON_MODE = process.argv.includes("--json");
 
 const errors = [];
 const warnings = [];
@@ -52,6 +57,10 @@ function skip(name, msg) {
   checks.push({ name, status: "SKIP", detail: msg });
   warnings.push(msg);
 }
+const by = (s) => checks.filter((c) => c.status === s).length;
+const passCount = () => by("PASS");
+const skipCount = () => by("SKIP");
+const failCount = () => by("FAIL");
 
 function run(cmd, args) {
   const r = spawnSync(cmd, args, { cwd: ROOT, encoding: "utf-8", timeout: 30_000 });
@@ -171,14 +180,20 @@ if (!token) {
 
 // ── Report ───────────────────────────────────────────────────────────────
 
-console.log("\nFR-P0-05 production preflight");
-for (const c of checks) {
-  console.log(`  [${c.status}] ${c.name} — ${c.detail}`);
+if (JSON_MODE) {
+  // Machine-readable: the raw check array plus the aggregate counts. Exit
+  // code still reflects FAILs (callers rely on it either way).
+  process.stdout.write(JSON.stringify({ checks, passed: passCount(), skipped: skipCount(), failed: failCount() }) + "\n");
+} else {
+  console.log("\nFR-P0-05 production preflight");
+  for (const c of checks) {
+    console.log(`  [${c.status}] ${c.name} — ${c.detail}`);
+  }
+  console.log(`\n${checks.filter((c) => c.status === "PASS").length} passed, ` +
+    `${checks.filter((c) => c.status === "SKIP").length} skipped, ` +
+    `${checks.filter((c) => c.status === "FAIL").length} failed`);
+  for (const w of warnings) console.log(`  ⚠ ${w}`);
 }
-console.log(`\n${checks.filter((c) => c.status === "PASS").length} passed, ` +
-  `${checks.filter((c) => c.status === "SKIP").length} skipped, ` +
-  `${checks.filter((c) => c.status === "FAIL").length} failed`);
-for (const w of warnings) console.log(`  ⚠ ${w}`);
 
 if (errors.length > 0) {
   console.error("\npredeploy FAILED — refusing to deploy. Fix the errors above, then re-run.");

@@ -81,6 +81,50 @@ runGate("origin-budget", "npm", ["run", "test:origin-budget"]);
 // must not certify a production artifact that bundles the evaluation plane.
 runGate("production-graph", "npm", ["run", "check:production-graph"]);
 
+// ── FR-P1-13: deterministic production preflight in the release evidence ──
+// release_candidate above attests the LOCALLY VERIFIED source/package tier.
+// "deploy-ready" additionally requires the deterministic production preflight
+// (config gates, production-graph, prod dry-run) to pass AND the deploy-
+// verifiable remote-migration check to not be skipped. With no Cloudflare
+// token the remote check SKIPs, so deploy_ready stays false — a deploy cannot
+// be certified deploy-ready against an unverifiable live database.
+let preflight = { checks: [], passed: 0, skipped: 0, failed: 0, exit: -1 };
+{
+  const t0 = Date.now();
+  const r = spawnSync("node", ["scripts/predeploy-production.mjs", "--json"], {
+    cwd: ROOT,
+    encoding: "utf-8",
+    timeout: 5 * 60_000,
+    shell: false,
+  });
+  try {
+    preflight = JSON.parse(r.stdout);
+    preflight.exit = r.status;
+  } catch {
+    // Preflight did not emit parseable JSON — treat as a failed gate.
+    preflight = { checks: [], passed: 0, skipped: 0, failed: 0, exit: r.status };
+  }
+  // FR-P1-13: a DEPLOY gate, not a source/package gate. It is recorded in the
+  // evidence and drives deploy_ready, but does NOT pull release_candidate: a
+  // bad deploy config (a placeholder edge-limiter, an unlabelled env) must be
+  // an operator action, not a false "the source is not a release candidate".
+  // The code-bound halves of preflight (production-graph, prod dry-run) are
+  // ALSO independently gated above/below so a code defect still fails the
+  // release, not just the deploy.
+  gates.push({
+    name: "production-preflight",
+    deploy_gate: true,
+    command: "node scripts/predeploy-production.mjs --json",
+    status: r.status === 0 && preflight.failed === 0 ? "PASS" : "FAIL",
+    exit_code: r.status,
+    duration_ms: Date.now() - t0,
+    detail: `${preflight.passed} passed, ${preflight.skipped} skipped, ${preflight.failed} failed`,
+  });
+  console.log(`[${preflight.failed === 0 ? "PASS" : "FAIL"}] production-preflight (deploy gate) (${preflight.passed}p/${preflight.skipped}s/${preflight.failed}f)`);
+}
+const preflightLocalClean = preflight.failed === 0; // no FAIL in local determinism
+const preflightNoSkips = preflight.skipped === 0;   // no SKIP (remote verified)
+
 // --- full gates (only in full mode) ---
 runGate("unit", "npm", ["run", "test:unit"], { slow: true });
 runGate("product-boundary", "npm", ["run", "test:product"], { slow: true });
@@ -98,7 +142,13 @@ runGate("e2e:production", "npm", ["run", "test:e2e:production"], { slow: true })
 runGate("a11y", "npm", ["run", "test:a11y"], { slow: true });
 runGate("examples", "npx", ["tsc", "--noEmit"], { slow: true });
 
-const allPassed = gates.every((g) => g.status === "PASS");
+// FR-P1-13: release_candidate / exit code reflect the SOURCE/PACKAGE gates
+// only. A deploy-gate (production-preflight) FAIL records in evidence and
+// drives deploy_ready but does not make "the locally verified source is not a
+// release candidate" — deploy config is an operator decision at deploy time.
+const sourceGates = gates.filter((g) => !g.deploy_gate);
+const allPassed = sourceGates.every((g) => g.status === "PASS");
+const preflightGate = gates.find((g) => g.name === "production-preflight");
 
 // P2: the claim registry lives in docs/evidence-ledger.json (validated by
 // tests/unit/evidence-ledger.test.ts). This run only attests the
@@ -124,15 +174,38 @@ try {
   ledgerSummary = null;
 }
 
+// FR-P1-13 distinction: release_candidate is the LOCALLY VERIFIED source/
+// package tier — a full clean local gate for this SHA. deploy_ready is a
+// STRONGER claim: it additionally requires the deterministic production
+// preflight to fully pass (no FAIL) AND no preflight SKIP — meaning the
+// deploy-verifiable remote-migration state was actually checked (a live
+// CLOUDFLARE_API_TOKEN), so this SHA is safe to deploy against the current
+// live database. Without a token, deploy_ready is false even though the local
+// candidate is sound: a deploy's permissions are decided at deploy time.
+const deployReady =
+  MODE === "full" && !dirty && allPassed &&
+  preflightLocalClean && preflightNoSkips;
+
 const evidence = {
-  schema: "fireraid-release-evidence/2",
+  schema: "fireraid-release-evidence/3",
   mode: MODE,
   generated_at: new Date().toISOString(),
   git: {
     sha,
     dirty,
-    // P1-13: only `full` mode may produce release_candidate:true
+    // Only `full` mode may produce release_candidate:true.
     release_candidate: MODE === "full" && !dirty && allPassed,
+  },
+  // FR-P1-13: local source/package candidate vs deploy-ready against the live
+  // database are now distinct, machine-readable facts.
+  production: {
+    deploy_ready: deployReady,
+    preflight_checks: preflight.checks,
+    preflight_local_clean: preflightLocalClean,
+    preflight_no_skips: preflightNoSkips,
+    note: deployReady
+      ? "deterministic preflight passed AND remote migration state verified against the live database"
+      : "release_candidate attests the locally-verified source/package tier; deploy_ready additionally requires a fully-passing production preflight with the remote migration check run (CLOUDFLARE_API_TOKEN).",
   },
   gates,
   claim_tiers: {
@@ -150,7 +223,15 @@ const outPath = join(ROOT, "release-evidence.json");
 writeFileSync(outPath, JSON.stringify(evidence, null, 2) + "\n");
 console.log(`\nevidence: ${outPath}`);
 console.log(`mode: ${MODE}`);
-console.log(`gates: ${gates.filter((g) => g.status === "PASS").length}/${gates.length} passed` +
-  (MODE === "fast" ? ` (${gates.filter((g) => g.skipped).length} skipped in fast mode)` : ""));
+console.log(`gates: ${sourceGates.filter((g) => g.status === "PASS").length}/${sourceGates.length} source/package gates passed` +
+  (preflightGate ? `; production-preflight (deploy gate): ${preflightGate.status}` : "") +
+  (MODE === "fast" ? ` (${sourceGates.filter((g) => g.skipped).length} skipped in fast mode)` : ""));
 console.log(`release_candidate: ${evidence.git.release_candidate}`);
+let deployReadyNote = "full mode required";
+if (MODE === "full") {
+  if (!preflightLocalClean) deployReadyNote = "production preflight has FAILs";
+  else if (!preflightNoSkips) deployReadyNote = "preflight passed; remote migration check SKIPPED (no CLOUDFLARE_API_TOKEN)";
+  else deployReadyNote = "preflight passed + remote migrations verified";
+}
+console.log(`deploy_ready: ${deployReady} (${deployReadyNote})`);
 process.exit(allPassed ? 0 : 1);
