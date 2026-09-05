@@ -54,9 +54,12 @@ export interface OriginServerOptions {
   /** Explicit route configuration for the middleware admit() dispatcher. */
   routes: MiddlewareRouteConfig;
   /**
-   * P1-9: explicit public origin (scheme + host + optional port). When set,
-   * the runtime uses it for the Request URL instead of the attacker-controlled
-   * Host header. Required when the server is behind a reverse proxy.
+   * P1-9 / P0-6: explicit public ORIGIN (scheme + host + optional port),
+   * e.g. "https://signup.example.org". Parsed and validated once at server
+   * creation (http/https scheme only; no path/query/hash/userinfo — a
+   * malformed value throws). When set, request URLs are built from it and
+   * the Host header is ignored, so a spoofed Host cannot influence origin
+   * handling behind a reverse proxy.
    */
   publicOrigin?: string;
   /**
@@ -70,7 +73,9 @@ export interface OriginServerOptions {
    */
   requestTimeoutMs?: number;
   /**
-   * P1-9: maximum header size (bytes). Default 16384 (16 KiB).
+   * P1-9 / P0-7: maximum header size in bytes, enforced at server
+   * construction (http.createServer's own option — the parser rejects
+   * oversized header blocks). Default 16384 (16 KiB).
    */
   maxHeaderSize?: number;
   /**
@@ -88,13 +93,43 @@ export interface OriginServerOptions {
    * risk annotation / joins to its own review workflow. NEVER serialized to
    * the applicant.
    *
-   * P1-10: returns void | Promise<void> so a host that persists
-   * assessment data asynchronously can await durability.
+   * P0-5: this is a DURABILITY seam — the runtime AWAITS the returned
+   * Promise BEFORE writing the success receipt, so an application is only
+   * acked once its annotation is durable. A rejection is host-infrastructure
+   * failure: the applicant gets a generic 500, never a success receipt.
    */
   onAssessment?: (assessment: OriginAssessment) => void | Promise<void>;
 }
 
 // ─── Request / Response bridge ──────────────────────────────────────────────
+
+/**
+ * P0-6: validate and parse the publicOrigin option ONCE at server creation.
+ *
+ * The contract is scheme + host + optional port — a full ORIGIN, never a
+ * host string spliced into a template (the old `http://${trustedHost}`
+ * build produced `http://https://example.org/...` for a documented
+ * `https://` option, losing HTTPS origin semantics entirely).
+ */
+function parsePublicOrigin(raw: string): URL {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`publicOrigin: not a valid URL: ${raw}`);
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(`publicOrigin: scheme must be http: or https: (${u.protocol})`);
+  }
+  if (u.pathname !== "/" || u.search || u.hash || u.username || u.password) {
+    throw new Error(
+      `publicOrigin: must be scheme + host + optional port only ` +
+      `(got path="${u.pathname}" search="${u.search}" hash="${u.hash}"` +
+      `${u.username ? " userinfo" : ""})`
+    );
+  }
+  return u;
+}
 
 /**
  * Convert a Node `IncomingMessage` + `ServerResponse` pair to a standard
@@ -103,7 +138,7 @@ export interface OriginServerOptions {
 function nodeToRequest(
   req: IncomingMessage,
   maxBytes: number = 64 * 1024,
-  trustedHost?: string
+  publicOrigin?: URL
 ): Promise<Request> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -124,11 +159,13 @@ function nodeToRequest(
     });
     req.on("end", () => {
       const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
-      // P1-9: use the explicit public origin when set; otherwise validate
-      // the Host header against a safe pattern (no user-controlled URL).
-      let host: string;
-      if (trustedHost) {
-        host = trustedHost;
+      // P0-6: when a public origin is configured, the request URL is built
+      // from IT — the Host header is attacker-controlled input behind any
+      // proxy and never contributes to the URL. Otherwise validate the Host
+      // header against a safe pattern (no user-controlled URL).
+      let fullUrl: string;
+      if (publicOrigin) {
+        fullUrl = new URL(req.url ?? "/", publicOrigin).toString();
       } else {
         const rawHost = req.headers.host ?? "localhost";
         // Reject malformed Host headers (header injection guard)
@@ -136,9 +173,8 @@ function nodeToRequest(
           reject(new Error("invalid Host header"));
           return;
         }
-        host = rawHost;
+        fullUrl = `http://${rawHost}${req.url ?? "/"}`;
       }
-      const fullUrl = `http://${host}${req.url ?? "/"}`;
       const headers: Record<string, string> = {};
       for (const [k, v] of Object.entries(req.headers)) {
         if (typeof v === "string") {
@@ -178,26 +214,40 @@ const RECEIVED_PENDING = JSON.stringify({
  * receipt with the SAME status code. Precondition failures (bad CSRF, no
  * session, malformed input) stay 4xx — those are transport-layer facts a
  * legitimate client needs to function, and they carry no evidence weight.
+ *
+ * P0-5: onAssessment is a DURABILITY seam. The response is not written
+ * until the host's persistence completes: acking an application before the
+ * review annotation is durable means a crash after the receipt silently
+ * loses it. A rejected hook is host-infrastructure failure — the generic
+ * 5xx goes out and the success receipt is NEVER sent (the applicant's
+ * client treats it as retryable; whether a retry duplicates the upstream
+ * registration is the host's idempotency problem, not something this
+ * layer may paper over with a fake success).
  */
-function writeResult(
+async function writeResult(
   res: ServerResponse,
   result: MiddlewareResult,
   onAssessment?: (a: OriginAssessment) => void | Promise<void>
-): void {
+): Promise<void> {
   // Host-internal hook FIRST — the annotation path, never the wire.
-  // P1-10: await durability if the host returns a Promise.
   if (onAssessment && (result.kind === "admit" || (result.kind === "deny" && result.decisionDenied === true))) {
-    const r = onAssessment({
-      sessionId: result.sessionId ?? "",
-      disposition: result.disposition ?? "UNKNOWN",
-      decisionDenied: result.decisionDenied === true,
-      upstreamCreated: result.upstreamCreated,
-      score: result.score,
-      submittedEmail: result.submittedEmail,
-      risk: result.risk,
-    });
-    if (r && typeof r.then === "function") {
-      void r.catch(() => {});
+    try {
+      await onAssessment({
+        sessionId: result.sessionId ?? "",
+        disposition: result.disposition ?? "UNKNOWN",
+        decisionDenied: result.decisionDenied === true,
+        upstreamCreated: result.upstreamCreated,
+        score: result.score,
+        submittedEmail: result.submittedEmail,
+        risk: result.risk,
+      });
+    } catch {
+      // Durability failure: do not pretend the application was received.
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json", ...SECURITY_HEADERS });
+        res.end(JSON.stringify({ error: "Internal Server Error" }));
+      }
+      return;
     }
   }
 
@@ -212,8 +262,19 @@ function writeResult(
 
     case "admit":
       // AUDIT (P0): neutral receipt — no disposition/score/sessionId/risk.
+      // P0-8: reached ONLY when the application is durably somewhere
+      // (upstream created, or captured in the host's retry queue).
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(RECEIVED_RECEIPT);
+      break;
+
+    case "forward-failed":
+      // P0-8: the upstream rejected the forward at the transport level and
+      // nothing was durably captured — a success receipt here would be a
+      // lie. 502 (bad gateway to the upstream) tells the client this is
+      // transient and retryable; the generic body keeps applicant opacity.
+      res.writeHead(502, { "Content-Type": "application/json", ...SECURITY_HEADERS });
+      res.end(JSON.stringify({ error: "Upstream unavailable, try again later" }));
       break;
 
     case "deny":
@@ -299,7 +360,18 @@ export function createOriginServer(
   const requestTimeout = options.requestTimeoutMs ?? 30_000;
   const maxHeaderSize = options.maxHeaderSize ?? 16_384;
 
+  // P0-6: parse the public origin ONCE, at construction — fail fast on a
+  // malformed option instead of per-request. (Undefined = legacy behavior:
+  // validate-and-use the Host header.)
+  const publicOrigin = options.publicOrigin ? parsePublicOrigin(options.publicOrigin) : undefined;
+
   const server = http.createServer(
+    // P0-7: maxHeaderSize is an http.createServer OPTION — it configures the
+    // HTTP parser's header buffer at construction. The previous property
+    // assignment onto the finished server object configured nothing (the
+    // parser had already been built), so the documented protection was never
+    // enforced.
+    { maxHeaderSize },
     async (nodeReq: IncomingMessage, nodeRes: ServerResponse) => {
       try {
         const url = nodeReq.url ?? "/";
@@ -315,9 +387,9 @@ export function createOriginServer(
           nodeRes.end(clientSource());
           return;
         }
-        const req = await nodeToRequest(nodeReq, 64 * 1024, options.publicOrigin);
+        const req = await nodeToRequest(nodeReq, 64 * 1024, publicOrigin);
         const result = await admit(req, renderDeps, htmlLoader);
-        writeResult(nodeRes, result, options.onAssessment);
+        await writeResult(nodeRes, result, options.onAssessment);
       } catch {
         // Fail-closed: serve a 500 if the bridge itself errors.
         nodeRes.writeHead(500, { "Content-Type": "application/json", ...SECURITY_HEADERS });
@@ -326,14 +398,10 @@ export function createOriginServer(
     }
   );
 
-  // P1-9: hardened timeout + header size settings
+  // P1-9: hardened timeout settings
   server.headersTimeout = headersTimeout;
   server.requestTimeout = requestTimeout;
   server.maxHeadersCount = 50;
-  if (maxHeaderSize) {
-    // Node 18+: maxHeaderSize is set via setMaxIdleTimeout or constructor
-    (server as unknown as { maxHeaderSize: number }).maxHeaderSize = maxHeaderSize;
-  }
 
   return server;
 }

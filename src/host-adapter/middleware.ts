@@ -56,6 +56,7 @@ import type {
   HostTelemetryAdapter,
   HostEnforcementAdapter,
   HostCanaryStore,
+  EnforcementResult,
 } from "./interface.js";
 import type { ProfileKeyRing } from "../core/session.js";
 
@@ -152,8 +153,8 @@ export interface EvaluationControls {
 }
 
 export interface MiddlewareResult {
-  /** "get" | "admit" | "deny" | "canary-verified" | "ingest" | "error" | "not-handled". */
-  kind: "get" | "admit" | "deny" | "canary-verified" | "ingest" | "error" | "not-handled";
+  /** "get" | "admit" | "deny" | "forward-failed" | "canary-verified" | "ingest" | "error" | "not-handled". */
+  kind: "get" | "admit" | "deny" | "forward-failed" | "canary-verified" | "ingest" | "error" | "not-handled";
   /** The HTML to return on GET (kind === "get"). */
   html?: string;
   /** Set-Cookie header(s) to return. */
@@ -196,15 +197,25 @@ export interface MiddlewareResult {
    */
   decisionDenied?: boolean;
   /**
-   * P0-4: the enforcement result detail (set when the adapter returns a
-   * discriminated EnforcementResult instead of a boolean). Lets the host
-   * distinguish a business rejection from a retryable failure.
+   * P0-4/P0-8: the enforcement result detail (set when the adapter returns a
+   * discriminated EnforcementResult instead of a legacy boolean). Lets the
+   * host distinguish a business rejection from a capture-for-retry from a
+   * bare transport failure.
    */
   enforcementDetail?: {
-    kind: "created" | "business-rejected" | "retryable-failure";
+    kind: "created" | "business-rejected" | "queued-for-retry" | "transport-failure";
     status?: number;
     reason?: string;
+    retryId?: string;
   };
+  /**
+   * P0-8: set on kind "forward-failed" — the upstream never accepted the
+   * application AND the adapter durably captured nothing, so this request
+   * must never surface to the applicant as a success receipt. Hosts run
+   * their own retry/monitoring off the reason string; the applicant sees a
+   * retryable failure.
+   */
+  forwardFailureReason?: string;
   /**
    * Reviewer-facing risk projection (set on every path that reached decide()).
    */
@@ -894,25 +905,54 @@ async function handleSubmitPost(
       // payload must stay Record<string,string>-shaped.
       const cleanForm = stripFireRaidFields(form, profile);
       const cookies = req.headers.get("cookie") ?? "";
-      // P0-4: handle discriminated enforcement result (boolean or EnforcementResult)
+      // P0-4/P0-8: handle the discriminated enforcement result (the bare
+      // boolean is legacy — `false` cannot say rejected vs unreachable).
       const enforcementResult = await deps.enforcement.allow(
         deps.upstreamRegisterUrl,
         cleanForm,
         cookies
       );
-      const upstreamCreated = enforcementResult === true
-        ? true
+      // Normalize the legacy boolean to the discriminated shape FIRST so the
+      // receipt policy below has one code path.
+      const detail: EnforcementResult = enforcementResult === true
+        ? { kind: "created" }
         : enforcementResult === false
-          ? false
-          : enforcementResult.kind === "created";
-      const enforcementDetail = typeof enforcementResult === "object" ? enforcementResult : undefined;
+          // Legacy `false` is ambiguous by construction; the honest mapping
+          // is a transport failure (never claim `created`, never invent a
+          // business status).
+          ? { kind: "transport-failure", reason: "legacy_boolean_false" }
+          : enforcementResult;
+      // FR-INV-008 receipt policy: a success receipt may leave the building
+      // only when the application is durably SOMEWHERE — created upstream or
+      // captured by the host's retry queue. A bare transport failure means
+      // nothing was captured: answering "received" would be a lie a crash
+      // turns into a silently lost application.
+      if (detail.kind === "transport-failure") {
+        return {
+          kind: "forward-failed",
+          forwardFailureReason: detail.reason,
+          enforcementDetail: detail,
+          sessionId,
+          score: decision.score,
+          submittedEmail,
+          disposition: decision.disposition,
+          risk: {
+            score: risk.score,
+            tier: risk.tier,
+            confidence: risk.confidence,
+            recommendedAction: risk.recommendedAction,
+            evidence: risk.evidence,
+          },
+        };
+      }
+      const upstreamCreated = detail.kind === "created";
       // P1-10: await durability of store finalization
       await finalizeStores(deps, sessionId);
       return {
         kind: "admit",
         disposition: decision.disposition,
         upstreamCreated,
-        enforcementDetail,
+        enforcementDetail: detail,
         sessionId,
         score: decision.score,
         submittedEmail,

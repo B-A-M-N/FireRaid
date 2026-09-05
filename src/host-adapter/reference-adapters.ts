@@ -8,6 +8,7 @@ import type {
   HostTelemetryAdapter,
   HostEnforcementAdapter,
   HostCanaryStore,
+  EnforcementResult,
 } from "./interface.js";
 import {
   signSessionEnvelope,
@@ -299,33 +300,68 @@ export class ReferenceTelemetryAdapter implements HostTelemetryAdapter {
 /**
  * Enforcement result — discriminated outcome of forwarding to the upstream.
  *
- * P0-4: the contract is no longer a bare boolean. A retryable failure
- * (timeout, 502, network error) is distinguished from a business rejection
- * (409, 422) so the host can persist a durable pending/retry record instead
- * of silently discarding the application.
+ * P0-8: the failure taxonomy the middleware's receipt policy is built on.
+ * `queued-for-retry` (durably captured) is deliberately distinct from
+ * `transport-failure` (nothing captured): only the former may ever reach
+ * the applicant as a neutral success receipt. Re-exported from the
+ * interface module — the one definition lives there.
  */
-export type EnforcementResult =
-  | { kind: "created" }
-  | { kind: "business-rejected"; status: number; body?: string }
-  | { kind: "retryable-failure"; reason: string };
+export type { EnforcementResult } from "./interface.js";
 
-/** Reference enforcement adapter — forwards to the upstream over HTTP. */
+/** HTTP statuses the reference adapter treats as TRANSIENT upstream
+ * failures (worth a durable retry), as opposed to business rejections
+ * (permanent — the upstream's own answer about this application). */
+const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/**
+ * Reference enforcement adapter — forwards to the upstream over HTTP and
+ * classifies the outcome per the P0-8 taxonomy.
+ *
+ * This reference has no durable queue of its own: a forwarding failure
+ * here is honestly `transport-failure`, never `queued-for-retry`. A host
+ * that wants at-least-once forwarding implements the adapter over its own
+ * durable pending store and returns `queued-for-retry` after capturing.
+ * (P0-8: the previous `return resp.ok` / `catch { return false }` collapsed
+ * 409-duplicate, 422-invalid, upstream 5xx, timeout, and connection-refused
+ * into one boolean — indistinguishable to every consumer downstream.)
+ */
 export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
+  /** Forward timeout (ms) — a hung upstream is a transport failure, not a
+   * successful no-op. AbortSignal so the socket is actually released. */
+  forwardTimeoutMs = 10_000;
+
   async allow(
     upstreamUrl: string,
     form: Record<string, string>,
     cookies: string
-  ): Promise<boolean> {
+  ): Promise<EnforcementResult> {
+    let resp: Response;
     try {
-      const resp = await fetch(upstreamUrl, {
+      resp = await fetch(upstreamUrl, {
         method: "POST",
         headers: { "content-type": "application/json", cookie: cookies },
         body: JSON.stringify({ form }),
+        signal: AbortSignal.timeout(this.forwardTimeoutMs),
       });
-      return resp.ok;
-    } catch {
-      return false;
+    } catch (e) {
+      return {
+        kind: "transport-failure",
+        reason: e instanceof Error && e.name === "TimeoutError" ? "timeout" : "network_error",
+      };
     }
+    if (resp.ok) return { kind: "created" };
+    if (RETRYABLE_STATUS.has(resp.status)) {
+      return { kind: "transport-failure", reason: `upstream_${resp.status}` };
+    }
+    // Any other 4xx is the upstream's OWN answer about this application:
+    // received, considered, refused. That is a terminal business outcome.
+    let body: string | undefined;
+    try {
+      body = (await resp.text()).slice(0, 512);
+    } catch {
+      // body unreadable — status alone still classifies
+    }
+    return { kind: "business-rejected", status: resp.status, body };
   }
 
   deny(_sessionId: string, _reason: string): void {

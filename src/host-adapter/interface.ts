@@ -304,11 +304,26 @@ export interface HostTelemetryAdapter {
 export interface HostEnforcementAdapter {
   /**
    * Forward the (FireRaid-stripped) registration to the upstream.
-   * @returns the result of forwarding — either a simple boolean (true =
-   *          created, false = rejected/failure) or a discriminated
-   *          EnforcementResult for explicit retry/failure handling. A
-   *          retryable-failure must NOT silently discard the application;
-   *          the host should persist a pending/retry record.
+   *
+   * P0-8: the discriminated result is the contract; the bare boolean is
+   * LEGACY (accepted for existing hosts, but ambiguous — `false` cannot say
+   * whether the upstream rejected the application or never received it).
+   * The discriminated kinds carry exactly that distinction:
+   *
+   *   - created:            the upstream accepted and durably recorded the
+   *                         registration.
+   *   - business-rejected:  the upstream RECEIVED the application and
+   *                         rejected it on its own semantics (409/422/…).
+   *                         The application will not be created; no retry.
+   *   - queued-for-retry:   forwarding failed BUT the adapter durably
+   *                         captured the application for retry (retryId
+   *                         identifies the pending record). The application
+   *                         is not lost; the host's retry worker owns it.
+   *   - transport-failure:  the upstream (or network) failed and the
+   *                         adapter has NOT durably captured anything. The
+   *                         middleware treats this as a failed request —
+   *                         the host runtime MUST NOT emit a success
+   *                         receipt for it.
    */
   allow(
     upstreamUrl: string,
@@ -330,15 +345,17 @@ export interface HostEnforcementAdapter {
 /**
  * Enforcement result — discriminated outcome of forwarding to the upstream.
  *
- * P0-4: the contract is no longer a bare boolean. A retryable failure
- * (timeout, 502, network error) is distinguished from a business rejection
- * (409, 422) so the host can persist a durable pending/retry record instead
- * of silently discarding the application.
+ * P0-8: the failure taxonomy the middleware's own receipt policy is built
+ * on. `queued-for-retry` (durably captured) is deliberately distinct from
+ * `transport-failure` (nothing captured): only the former may ever reach
+ * the applicant as a neutral success receipt — a receipt for an
+ * uncaptured application is a lie a crash turns into a lost application.
  */
 export type EnforcementResult =
   | { kind: "created" }
   | { kind: "business-rejected"; status: number; body?: string }
-  | { kind: "retryable-failure"; reason: string };
+  | { kind: "queued-for-retry"; retryId: string }
+  | { kind: "transport-failure"; reason: string };
 
 /**
  * Host-facing risk annotation. Reviewer tools consume this; it must never
