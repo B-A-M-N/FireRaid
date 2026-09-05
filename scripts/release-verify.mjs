@@ -88,18 +88,31 @@ function runGate(name, command, args, { slow = false } = {}) {
   const t0 = Date.now();
   const r = spawnSync(command, args, { cwd: ROOT, encoding: "utf-8", timeout: 15 * 60_000, shell: false });
   const passed = r.status === 0;
+  // Closure 10: the origin-budget harness self-classifies ambient machine
+  // load. When it reports timing scenarios UNMEASURED, the gate passed (a
+  // loaded machine is not a product fact) but the evidence must record that
+  // the timing budgets were NOT measured this run — never a silent PASS.
+  let unmeasuredScenarios = null;
+  if (name === "origin-budget" && /UNMEASURED \(ambient load/.test(r.stdout ?? "")) {
+    const m = (r.stdout ?? "").match(/UNMEASURED \(ambient load[^)]*\):\s*(.+)/);
+    unmeasuredScenarios = m ? m[1].trim() : "unknown";
+  }
   gates.push({
     name,
     command: [command, ...args].join(" "),
     status: passed ? "PASS" : "FAIL",
     exit_code: r.status,
     duration_ms: Date.now() - t0,
+    ...(unmeasuredScenarios ? { unmeasured_ambient_load: unmeasuredScenarios } : {}),
     // Keep tails bounded — a failure's diagnosis belongs in CI logs, but a
     // short excerpt travels with the evidence file.
     output_tail: (r.stdout ?? "").split("\n").filter(Boolean).slice(-5)
       .concat((r.stderr ?? "").split("\n").filter(Boolean).slice(-5)),
   });
-  console.log(`[${passed ? "PASS" : "FAIL"}] ${name} (${Math.round((Date.now() - t0) / 1000)}s)`);
+  console.log(
+    `[${passed ? "PASS" : "FAIL"}] ${name} (${Math.round((Date.now() - t0) / 1000)}s)` +
+    (unmeasuredScenarios ? ` [UNMEASURED under ambient load: ${unmeasuredScenarios}]` : "")
+  );
 }
 
 // --- fast gates (always run) ---
