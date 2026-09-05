@@ -41,7 +41,7 @@ import { decide } from "../core/decision.js";
 import { projectRisk, getRiskTier, DEFAULT_RISK_TIERS, resolveRuntimeDisposition, validateRiskTierConfig, type RiskTierConfig } from "../core/risk.js";
 import { aggregateTelemetry, type CaptureConfig } from "../telemetry/aggregate.js";
 import { validateSignupForm, type SubmitInbound } from "../security/request-validation.js";
-import { readJsonBody } from "../security/body-limits.js";
+import { readJsonBody, readBoundedBody } from "../security/body-limits.js";
 import { MAX_HOST_JSON_BYTES } from "../types/telemetry.js";
 import { resolveScoringPolicy } from "./reference-adapters.js";
 import type {
@@ -751,13 +751,20 @@ async function handleIngestPost(
   if (!sessionId) return { kind: "deny", disposition: "NO_SESSION" };
 
   let ingestBody: { events?: unknown };
-  try {
-    // P1-8: bounded JSON reader
-    const parsed = await readJsonBody(req, MAX_HOST_JSON_BYTES);
-    if (!parsed) return { kind: "deny", disposition: "BAD_JSON" };
-    ingestBody = parsed as { events?: unknown };
-  } catch {
-    return { kind: "deny", disposition: "BAD_JSON" };
+  {
+    // P1-8 / FR-P1-02: bounded STREAMING JSON reader — counts bytes as they
+    // arrive and cancels mid-body on oversize.
+    const read = await readJsonBody(req, MAX_HOST_JSON_BYTES);
+    if (!read.ok) {
+      // OVERSIZE and BAD_JSON are both applicant-side malformed-transport
+      // failures (a too-large batch is not the server's fault). A MISSING
+      // body is a precondition gap, not malformed JSON.
+      return {
+        kind: "deny",
+        disposition: read.reason === "MISSING" ? "MISSING_BODY" : "BAD_JSON",
+      };
+    }
+    ingestBody = read.data as { events?: unknown };
   }
   const ingest = await deps.telemetry.accept(sessionId, ingestBody.events ?? []);
   if (ingest.kind === "invalid") {
@@ -795,29 +802,31 @@ async function handleSubmitPost(
   const contentType = (req.headers.get("content-type") ?? "").split(";")[0].trim();
   let body: SubmitInbound;
   if (contentType === "application/x-www-form-urlencoded") {
-    // P1-8: bounded text reader for form posts
-    const contentLength = Number(req.headers.get("content-length") || 0);
-    if (contentLength > MAX_HOST_JSON_BYTES) return { kind: "deny", disposition: "BAD_FORM" };
-    let text: string;
-    try {
-      text = await req.text();
-    } catch {
-      return { kind: "deny", disposition: "BAD_FORM" };
+    // P1-8 / FR-P1-02: bounded STREAMING text reader for form posts — counts
+    // bytes as they arrive and cancels mid-body on oversize (the old
+    // Content-Length-then-req.text() variant buffered the whole form first).
+    const read = await readBoundedBody(req, MAX_HOST_JSON_BYTES);
+    if (!read.ok) {
+      return {
+        kind: "deny",
+        disposition: read.reason === "MISSING" ? "MISSING_BODY" : "BAD_FORM",
+      };
     }
-    if (new TextEncoder().encode(text).length > MAX_HOST_JSON_BYTES) return { kind: "deny", disposition: "BAD_FORM" };
     const entries: Record<string, string> = {};
-    for (const [k, v] of new URLSearchParams(text)) entries[k] = v;
+    for (const [k, v] of new URLSearchParams(String(read.data))) entries[k] = v;
     const { csrf, ...form } = entries;
     body = { csrf, form };
   } else {
-    try {
-      // P1-8: bounded JSON reader
-      const parsed = await readJsonBody(req, MAX_HOST_JSON_BYTES);
-      if (!parsed) return { kind: "deny", disposition: "BAD_JSON" };
-      body = parsed as SubmitInbound;
-    } catch {
-      return { kind: "deny", disposition: "BAD_JSON" };
+    // P1-8 / FR-P1-02: bounded STREAMING JSON reader — counts bytes as they
+    // arrive and cancels mid-body on oversize.
+    const read = await readJsonBody(req, MAX_HOST_JSON_BYTES);
+    if (!read.ok) {
+      return {
+        kind: "deny",
+        disposition: read.reason === "MISSING" ? "MISSING_BODY" : "BAD_JSON",
+      };
     }
+    body = read.data as SubmitInbound;
   }
   const formCheck = validateSignupForm(body.form ?? {});
   if (!formCheck.ok) {

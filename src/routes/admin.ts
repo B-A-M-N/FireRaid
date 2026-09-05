@@ -417,20 +417,32 @@ export async function adminReviewQueue(req: Request, env: Env): Promise<Response
   if (!(await requireAdmin(req, env))) return error("unauthorized", 401);
 
   const url = new URL(req.url);
-  const status = url.searchParams.get("status") as "pending" | "reviewed" | undefined;
+  // FR-P1-01: status is validated against the review_queue enum, never
+  // asserted into the TypeScript union — `?status=garbage` is a 400, not a
+  // live query with an impossible placeholder value.
+  const rawStatus = url.searchParams.get("status");
+  if (rawStatus !== null && rawStatus !== "pending" && rawStatus !== "reviewed") {
+    return error(`invalid status: ${rawStatus} (expected "pending" or "reviewed")`, 400);
+  }
+  const status = rawStatus as "pending" | "reviewed" | null;
   const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit")) || 50, 200));
   const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
 
-  const entries = await env.DB
-    .prepare(
-      `SELECT session_id, public_id, created_at, risk_score, risk_tier, disposition, policy, reasons_json,
-              status, reviewer_decision, reviewer_note, reviewed_at, reviewed_by
-       FROM review_queue` +
-        (status ? ` WHERE status = ?` : "") +
-        ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
-    )
-    .bind(status ?? null, limit, offset)
-    .all<{
+  const sql =
+    `SELECT session_id, public_id, created_at, risk_score, risk_tier, disposition, policy, reasons_json,
+            status, reviewer_decision, reviewer_note, reviewed_at, reviewed_by
+     FROM review_queue` +
+    (status ? ` WHERE status = ?` : "") +
+    ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+
+  const stmt = env.DB.prepare(sql);
+  // FR-P1-01: exactly as many bind values as placeholders. Without a status
+  // filter the SQL has two placeholders (LIMIT, OFFSET) — the previous
+  // `bind(status ?? null, limit, offset)` always supplied three and bound
+  // garbage on the unfiltered path.
+  const bound = status ? stmt.bind(status, limit, offset) : stmt.bind(limit, offset);
+
+  const entries = await bound.all<{
       session_id: string;
       public_id: string;
       created_at: number;

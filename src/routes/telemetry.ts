@@ -213,13 +213,16 @@ export async function events(req: Request, env: Env): Promise<Response> {
   const sessionId = session.id;
 
   let body: { events?: unknown };
-  try {
-    // P1-8: bounded JSON reader — rejects oversized payloads before parsing
-    const parsed = await readJsonBody(req, MAX_EVENT_PAYLOAD_BYTES);
-    if (!parsed) return error("invalid JSON or payload too large", 400);
-    body = parsed as { events?: unknown };
-  } catch {
-    return error("invalid JSON", 400);
+  {
+    // P1-8 / FR-P1-02: bounded STREAMING JSON reader — counts bytes as they
+    // arrive, cancels mid-body on oversize. Only the bounded buffer is parsed.
+    const read = await readJsonBody(req, MAX_EVENT_PAYLOAD_BYTES);
+    if (!read.ok) {
+      if (read.reason === "OVERSIZE") return error("payload too large", 413);
+      if (read.reason === "MISSING") return error("missing request body", 400);
+      return error("invalid JSON", 400);
+    }
+    body = read.data as { events?: unknown };
   }
 
   if (!body.events || !Array.isArray(body.events)) {

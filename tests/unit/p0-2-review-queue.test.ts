@@ -208,4 +208,48 @@ describe("P0-2: review-queue entry on non-ACCEPT disposition", () => {
     expect(entry).toBeDefined();
     expect(entry!.status).toBe("pending");
   });
+
+  it("FR-P1-01: no-filter GET /api/admin/review-queue binds exactly the placeholders that exist", async () => {
+    const env = makeEnv(db);
+    const sid = "p01-no-filter-0004";
+    const publicId = "pub-no-filter-0004";
+
+    db.prepare(
+      `INSERT INTO sessions (id, created_at, last_seen_at, profile_version, profile_key_id, profile_id, profile_hash, submitted)
+       VALUES (?, ?, ?, 1, ?, 'pid', 'phash', 0)`
+    ).run(sid, Date.now(), Date.now(), KEY_ID);
+    db.prepare(
+      `INSERT INTO submissions (public_id, session_id, created_at, turnstile_ok, causal_hits, strong_hits, weak_hits, risk_score, disposition, policy, verification_provider, reasons_json)
+       VALUES (?, ?, ?, 0, 0, 0, 0, 150, 'REVIEW', 'default-v1', 'none', '[]')`
+    ).run(publicId, sid, Date.now());
+    db.prepare(
+      `INSERT INTO review_queue (session_id, public_id, created_at, risk_score, risk_tier, disposition, policy, reasons_json, status)
+       VALUES (?, ?, ?, 150, 'HIGH', 'REVIEW', 'default-v1', '[]', 'pending')`
+    ).run(sid, publicId, Date.now());
+
+    const adminToken = await createAdminToken(env);
+    // NO ?status= filter — the SQL has only LIMIT/OFFSET placeholders. The
+    // pre-fix `bind(status ?? null, limit, offset)` passed three values into
+    // a two-placeholder statement and failed.
+    const req = new Request("http://localhost/api/admin/review-queue", {
+      headers: { cookie: `__Host-fr_admin=${adminToken}` },
+    });
+    const res = await adminReviewQueue(req, env);
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as { entries: Array<{ sessionId: string; status: string }> };
+    const entry = body.entries.find((e) => e.sessionId === sid);
+    expect(entry).toBeDefined();
+    expect(entry!.status).toBe("pending");
+  });
+
+  it("FR-P1-01: an invalid status query parameter is rejected, not asserted into the union", async () => {
+    const env = makeEnv(db);
+    const adminToken = await createAdminToken(env);
+    const req = new Request("http://localhost/api/admin/review-queue?status=garbage", {
+      headers: { cookie: `__Host-fr_admin=${adminToken}` },
+    });
+    const res = await adminReviewQueue(req, env);
+    expect(res.status).toBe(400);
+  });
 });
