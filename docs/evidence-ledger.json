@@ -120,12 +120,13 @@
       "tier": "LOCALLY_VERIFIED",
       "doc_anchor": "docs/RELEASE-STATUS.md claim 10",
       "evidence": [
-        { "kind": "manual", "ref": "live smoke 2026-09-03", "detail": "fireraid-production.benevolentjoker.workers.dev (version b401da70): D1 fireraid-production + full 16-migration chain applied remotely; profile/CSRF/Turnstile secrets via wrangler secret; config validator fail-closed LIVE (503 'Production requires TURNSTILE_EXPECTED_HOSTNAME' before Turnstile was configured); post-config smoke: /signup 200 with clean production plane, Turnstile script + sitekey wired; headless submit without a solved token -> 403 verification_required (fail-closed); solved-widget human submission -> success receipt." }
+        { "kind": "manual", "ref": "live smoke 2026-09-03", "detail": "fireraid-production.benevolentjoker.workers.dev (version b401da70): D1 fireraid-production + full 16-migration chain applied remotely; profile/CSRF/Turnstile secrets via wrangler secret; config validator fail-closed LIVE (503 'Production requires TURNSTILE_EXPECTED_HOSTNAME' before Turnstile was configured); post-config smoke: /signup 200 with clean production plane, Turnstile script + sitekey wired; headless submit without a solved token -> 403 verification_required (fail-closed); solved-widget human submission -> success receipt.", "deployed_sha": "b401da70" }
       ],
       "scope_limits": [
         "NOT MEASURED: sustained production traffic behavior, custom-domain routing, cron-driven retention on the remote schedule.",
         "User-gated evidence: a redeploy smoke is the owner's call (costs money / touches the internet); release:verify does not attest this claim.",
-        "FR-P0-05 freshness: the recorded smoke (2026-09-03) predates migration 0017 and the current HEAD; it does NOT certify that this SHA's 17-migration chain is applied remotely. A stable release requires a fresh post-deploy smoke against the exact deployed worker version, recorded here, before the ledger's smoke tier can be treated as current."
+        "FR-P0-05 freshness: the recorded smoke (2026-09-03) predates migration 0017 and the current HEAD; it does NOT certify that this SHA's 17-migration chain is applied remotely. A stable release requires a fresh post-deploy smoke against the exact deployed worker version, recorded here, before the ledger's smoke tier can be treated as current.",
+        "FR-P1-14 currentness: the release gate 'remote-smoke-current' fails while evidence['remote-deployment-smoke'].deployed_sha does not equal the current HEAD — a stale smoke can no longer be carried forward silently; a new smoke must be recorded with its exact deployed SHA before the release gate goes green."
       ]
     }
   ]

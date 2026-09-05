@@ -125,6 +125,73 @@ let preflight = { checks: [], passed: 0, skipped: 0, failed: 0, exit: -1 };
 const preflightLocalClean = preflight.failed === 0; // no FAIL in local determinism
 const preflightNoSkips = preflight.skipped === 0;   // no SKIP (remote verified)
 
+// P2 / FR-P1-14: the claim registry lives in docs/evidence-ledger.json
+// (validated by tests/unit/evidence-ledger.test.ts). Load it HIGH so both the
+// smoke-currentness gate below and the release_tiers summary can read it.
+// Fail-closed: a missing or malformed registry is a release-blocking
+// inconsistency, not something to paper over.
+let ledgerRegistry = null;
+let ledgerSummary = null;
+try {
+  ledgerRegistry = JSON.parse(
+    readFileSync(join(ROOT, "docs", "evidence-ledger.json"), "utf-8")
+  );
+  ledgerSummary = Object.fromEntries(
+    ledgerRegistry.claims.map((c) => [c.id, c.tier])
+  );
+} catch {
+  gates.push({
+    name: "evidence-ledger",
+    command: "read docs/evidence-ledger.json",
+    status: "FAIL",
+    exit_code: 1,
+  });
+}
+
+// FR-P1-14: the recorded remote-deployment smoke must have been performed on
+// THIS exact HEAD — a smoke recorded for an older SHA certifies nothing about
+// the tree being released. This gate reads the machine-readable deployed_sha
+// from the ledger's remote-deployment-smoke claim and fails while it does not
+// equal the current HEAD. It is a SOURCE/PACKAGE gate (not a deploy gate): a
+// stale smoke means the operational evidence attached to this release is
+// stale, so it blocks release_candidate too, forcing a fresh post-deploy smoke
+// record before the release can be certified. The re-run itself is user-gated
+// (needs a live CLOUDFLARE_API_TOKEN and touches the internet) — this gate
+// makes the requirement enforced rather than aspirational.
+{
+  const t0 = Date.now();
+  const smokeClaim = ledgerRegistry?.claims?.find(
+    (c) => c.id === "remote-deployment-smoke"
+  );
+  const smokeEv = smokeClaim?.evidence?.find(
+    (e) => typeof e?.deployed_sha === "string" && e.deployed_sha.length > 0
+  );
+  const smokeSha = smokeEv?.deployed_sha ?? null;
+  const smokeDetail = smokeEv?.detail ?? null;
+  const smokeCurrent = smokeSha !== null && smokeSha === sha;
+  gates.push({
+    name: "remote-smoke-current",
+    command: "docs/evidence-ledger.json remote-deployment-smoke evidence[].deployed_sha === HEAD",
+    status: smokeCurrent ? "PASS" : "FAIL",
+    exit_code: smokeCurrent ? 0 : 1,
+    duration_ms: Date.now() - t0,
+    detail: smokeCurrent
+      ? "recorded live smoke was performed on this exact HEAD"
+      : smokeSha === null
+        ? "no machine-readable deployed_sha recorded on the remote-deployment-smoke claim — a stale manual smoke is being carried forward; record a fresh smoke with its exact deployed SHA against the current HEAD, then re-run"
+        : `recorded smoke is for ${smokeSha}, but current HEAD is ${sha} — the smoke evidence is STALE and certifies nothing about this tree; perform a fresh post-deploy smoke against this HEAD and record its deployed_sha, then re-run`,
+  });
+  gates.push({
+    name: "smoke-evidence-recorded",
+    command: "docs/evidence-ledger.json remote-deployment-smoke evidence detail",
+    status: smokeDetail ? "PASS" : "FAIL",
+    exit_code: smokeDetail ? 0 : 1,
+    duration_ms: 0,
+    detail: smokeDetail ? "human smoke record present" : "remote-deployment-smoke claim carries no detail record",
+  });
+  console.log(`[${smokeCurrent ? "PASS" : "FAIL"}] remote-smoke-current (deployed_sha ${smokeSha ?? "none"} vs HEAD ${sha})`);
+}
+
 // --- full gates (only in full mode) ---
 runGate("unit", "npm", ["run", "test:unit"], { slow: true });
 runGate("product-boundary", "npm", ["run", "test:product"], { slow: true });
@@ -150,29 +217,10 @@ const sourceGates = gates.filter((g) => !g.deploy_gate);
 const allPassed = sourceGates.every((g) => g.status === "PASS");
 const preflightGate = gates.find((g) => g.name === "production-preflight");
 
-// P2: the claim registry lives in docs/evidence-ledger.json (validated by
-// tests/unit/evidence-ledger.test.ts). This run only attests the
-// LOCALLY_VERIFIED tier — the gates above — and embeds the ledger's tier
-// summary verbatim so the evidence file can never drift from the registry.
-let ledgerSummary;
-try {
-  const ledger = JSON.parse(
-    readFileSync(join(ROOT, "docs", "evidence-ledger.json"), "utf-8")
-  );
-  ledgerSummary = Object.fromEntries(
-    ledger.claims.map((c) => [c.id, c.tier])
-  );
-} catch {
-  // Fail-closed: a missing or malformed registry is a release-blocking
-  // inconsistency, not something to paper over with an empty summary.
-  gates.push({
-    name: "evidence-ledger",
-    command: "read docs/evidence-ledger.json",
-    status: "FAIL",
-    exit_code: 1,
-  });
-  ledgerSummary = null;
-}
+// P2: the claim registry (ledgerRegistry / ledgerSummary) was loaded high,
+// above the smoke currentness gate. This run only attests the LOCALLY_VERIFIED
+// tier — the gates above — and embeds the ledger's tier summary verbatim so
+// the evidence file can never drift from the registry.
 
 // FR-P1-13 distinction: release_candidate is the LOCALLY VERIFIED source/
 // package tier — a full clean local gate for this SHA. deploy_ready is a

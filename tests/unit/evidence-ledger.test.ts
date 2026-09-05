@@ -42,7 +42,7 @@ interface EvidenceLedger {
     statement: string;
     tier: string;
     doc_anchor: string;
-    evidence: Array<{ kind: string; ref?: string; id?: string; dir?: string; role?: string; detail?: string }>;
+    evidence: Array<{ kind: string; ref?: string; id?: string; dir?: string; role?: string; detail?: string; deployed_sha?: string }>;
     scope_limits?: string[];
     notes?: string;
   }>;
@@ -93,6 +93,14 @@ describe("evidence ledger schema", () => {
         }
         if (ev.kind === "manual") {
           expect(typeof ev.detail, `${claim.id} manual detail`).toBe("string");
+        }
+        // FR-P1-14: a live-deployment smoke recorded as manual evidence must
+        // carry a machine-readable deployed_sha so release-verify's
+        // remote-smoke-current gate can compare it to HEAD. Without it, a stale
+        // smoke can be carried forward silently.
+        if (claim.id === "remote-deployment-smoke") {
+          expect(typeof ev.deployed_sha, `${claim.id} deployed_sha`).toBe("string");
+          expect(ev.deployed_sha!.length, `${claim.id} deployed_sha nonempty`).toBeGreaterThan(0);
         }
       }
     }
