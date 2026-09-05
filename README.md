@@ -193,14 +193,45 @@ client a deployment ships).
 
 ### Cloudflare Worker Deployment (Optional)
 
-The Worker deployment is a reference implementation, not a requirement:
+The Worker deployment is a reference implementation, not a requirement. Each
+named environment binds its OWN D1 database (`wrangler.jsonc`): `dev`, `test`,
+`public-lab`, and `production` each restate `d1_databases`. **Production binds
+`fireraid-production`** (`database_id: d69ea0ad-...`), which must stay distinct
+from the public research database. Never "paste a database id into all env
+blocks" — each environment is a different database with a different lifecycle.
+
+The production sequence is **environment-scoped** — the migration command names
+the production database and the production env explicitly, so it can never
+migrate a different database than the deploy targets:
 
 ```bash
-npx wrangler d1 create fireraid
-# Paste the printed database_id into wrangler.jsonc (all env blocks)
-npx wrangler d1 migrations apply fireraid --remote   # full migration chain
-npm run deploy:production   # or deploy:lab — named-env deploys only
+# 1. Provision the production database once (prints its id — bind it ONLY in
+#    the production env block of wrangler.jsonc, not anywhere else).
+npx wrangler d1 create fireraid-production
+#    → paste the printed database_id into wrangler.jsonc → env.production.d1_databases
+
+# 2. Verify there are no unapplied migrations against THAT database + env.
+npx wrangler d1 migrations list fireraid-production --env production --remote
+
+# 3. Apply any outstanding migrations (same explicit database + env).
+npx wrangler d1 migrations apply fireraid-production --env production --remote
+
+# 4. Preflight + deploy. predeploy:production runs FIRST and fails closed on
+#    a placeholder/absent production DB id, a collision with the public-lab DB,
+#    LAB_MODE != false, a missing TURNSTILE_EXPECTED_HOSTNAME, a failed
+#    dry-run, or unapplied remote migrations (it refuses to certify "none"
+#    without a live CLOUDFLARE_API_TOKEN).
+npm run deploy:production        # == predeploy:production && wrangler deploy --env production
+npm run deploy:lab               # named-env deploys only
 ```
+
+After the deploy, smoke the **exact deployed worker version** against the
+production Worker (see `docs/evidence-ledger.json` → `remote-deployment-smoke`
+for the canonical smoke record): `/signup` 200 on the clean production plane,
+a headless submit without a solved Turnstile token returns `403
+verification_required` (fail-closed), and a solved-widget submission reaches a
+success receipt. Record the fresh smoke (with the deployed version string) in
+the ledger before treating the SHA as a stable release.
 
 ## Testing
 
