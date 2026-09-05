@@ -42,6 +42,13 @@ export interface OriginAssessment {
   score?: number;
   submittedEmail?: string;
   risk?: MiddlewareResult["risk"];
+  /**
+   * P0-8: the discriminated enforcement detail when the host adapter
+   * returned one. `queued-for-retry` carries the host's own retryId here so
+   * the review pipeline can join this assessment to its pending-queue
+   * entry; `business-rejected` carries the upstream's status/body.
+   */
+  enforcementDetail?: MiddlewareResult["enforcementDetail"];
 }
 
 export interface OriginServerOptions {
@@ -159,13 +166,20 @@ function parsePublicOrigin(raw: string): URL {
 function nodeToRequest(
   req: IncomingMessage,
   maxBytes: number = 64 * 1024,
-  publicOrigin?: URL
+  publicOrigin?: URL,
+  /** Response the bridge marks `Connection: close` on when rejecting a body. */
+  resFor413?: ServerResponse
 ): Promise<Request> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalSize = 0;
     const contentLength = Number(req.headers["content-length"] || 0);
     if (contentLength > maxBytes) {
+      // Undrained body on a kept-alive connection would poison the NEXT
+      // request on that socket (response-smuggling class). Connection:
+      // close tells the client this socket is done; the socket is destroyed
+      // after the 413 response flushes (the handler writes it), not before.
+      resFor413?.setHeader("Connection", "close");
       reject(new RequestBridgeError(413, "PAYLOAD_TOO_LARGE"));
       return;
     }
@@ -173,7 +187,11 @@ function nodeToRequest(
       totalSize += chunk.length;
       if (totalSize > maxBytes) {
         reject(new RequestBridgeError(413, "PAYLOAD_TOO_LARGE"));
-        req.destroy();
+        // Mid-stream overrun: the parser state is unusable — pause further
+        // consumption and let the handler write the 413; Node closes this
+        // connection per the Connection: close header set by the writer.
+        resFor413?.setHeader("Connection", "close");
+        req.pause();
         return;
       }
       chunks.push(chunk);
@@ -186,7 +204,19 @@ function nodeToRequest(
       // header against a safe pattern (no user-controlled URL).
       let fullUrl: string;
       if (publicOrigin) {
-        fullUrl = new URL(req.url ?? "/", publicOrigin).toString();
+        const resolved = new URL(req.url ?? "/", publicOrigin);
+        // WHATWG URL resolution gives an EXPLICIT form priority over the
+        // base: a protocol-relative target ("GET //evil.com/x HTTP/1.1") or
+        // proxy-style absolute-form target ("GET http://evil.com/x HTTP/1.1")
+        // resolves to the attacker's origin, not the pinned one. The pinned
+        // origin is the whole point of publicOrigin (Host-header control
+        // behind a reverse proxy) — a request that would escape it is a
+        // client error, not something to silently re-home.
+        if (resolved.origin !== publicOrigin.origin) {
+          reject(new RequestBridgeError(400, "INVALID_TARGET"));
+          return;
+        }
+        fullUrl = resolved.toString();
       } else {
         const rawHost = req.headers.host ?? "localhost";
         // Reject malformed Host headers (header injection guard)
@@ -261,6 +291,7 @@ async function writeResult(
         score: result.score,
         submittedEmail: result.submittedEmail,
         risk: result.risk,
+        enforcementDetail: result.enforcementDetail,
       });
     } catch {
       // Durability failure: do not pretend the application was received.
@@ -422,7 +453,7 @@ export function createOriginServer(
           nodeRes.end(clientSource());
           return;
         }
-        const req = await nodeToRequest(nodeReq, 64 * 1024, publicOrigin);
+        const req = await nodeToRequest(nodeReq, 64 * 1024, publicOrigin, nodeRes);
         const result = await admit(req, renderDeps, htmlLoader);
         await writeResult(nodeRes, result, options.onAssessment);
       } catch (err) {
@@ -430,6 +461,10 @@ export function createOriginServer(
         if (err instanceof RequestBridgeError && !nodeRes.headersSent) {
           nodeRes.writeHead(err.status, { "Content-Type": "application/json", ...SECURITY_HEADERS });
           nodeRes.end(JSON.stringify({ error: err.wireCode }));
+          // 413 with an undrained/paused body: the response is written and
+          // Connection: close is set — end the socket so the poisoned
+          // stream cannot be reused for a following request.
+          if (err.status === 413) nodeReq.destroy();
           return;
         }
         // Fail-closed: serve a 500 if the bridge itself errors.

@@ -124,6 +124,28 @@ describe("P0-8: ReferenceEnforcementAdapter classification", () => {
       server.close();
     }
   });
+
+  it("redirecting upstream → transport-failure upstream_redirect (never a false-create)", async () => {
+    // A 302 to a 200 HTML page (login/interstitial) is NOT an account
+    // creation. fetch's default redirect:"follow" would land on the final
+    // 200 and classify `created` — the redirect is refused instead.
+    const server = createServer((_req, res) => {
+      res.writeHead(302, { location: "/login" });
+      res.end();
+    });
+    const url: string = await new Promise((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address() as { port: number };
+        resolve(`http://127.0.0.1:${addr.port}/register`);
+      });
+    });
+    try {
+      const r = await adapter().allow(url, { a: "b" }, "");
+      expect(r).toEqual({ kind: "transport-failure", reason: "upstream_redirect" });
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe("P0-8: middleware receipt policy", () => {
@@ -145,9 +167,11 @@ describe("P0-8: middleware receipt policy", () => {
   /** Full session via admit(): returns the submit result object. */
   async function submitResult(
     deps: MiddlewareDeps,
-    enforcement: MiddlewareDeps["enforcement"]
+    // Deliberately widened: the malformed-shape tests drive the seam with
+    // non-contract return values, exactly as a JS host could.
+    enforcement: unknown
   ): Promise<{ kind: string; upstreamCreated?: boolean }> {
-    const validated = createFireRaidMiddleware({ ...deps, enforcement });
+    const validated = createFireRaidMiddleware({ ...deps, enforcement } as MiddlewareDeps);
     const page = await admit(new Request("http://test/signup"), validated, async () => SIGNUP_HTML);
     expect(page.kind).toBe("get");
     const cookie = page.setCookie!.split(";")[0];
@@ -198,5 +222,31 @@ describe("P0-8: middleware receipt policy", () => {
     const enforcement = { allow: async () => false, deny: () => {} };
     const r = await submitResult(baseDeps(), enforcement);
     expect(r.kind).toBe("forward-failed");
+  });
+
+  it("MALFORMED adapter shapes fail CLOSED as forward-failed (never a success receipt)", async () => {
+    // A JS host can hand back anything. A wrong-keyed object, a bare
+    // string, or a kind-less blob must never produce kind "admit" — that
+    // would ack an application that is nowhere durable (FR-INV-008).
+    const malformed: unknown[] = [
+      { status: "created" }, // wrong key
+      { ok: true },
+      "created", // bare string
+      { kind: "created-upstream" }, // unknown kind
+      { kind: "queued-for-retry" }, // missing retryId
+      { kind: "transport-failure" }, // missing reason
+      { kind: "business-rejected" }, // missing status
+      null,
+      undefined,
+    ];
+    for (const shape of malformed) {
+      // Deliberately untyped `allow` — the whole point is that the seam is
+      // a host callback that can return anything at runtime.
+      const enforcement = { allow: async (): Promise<unknown> => shape, deny: () => {} };
+      const r = await submitResult(baseDeps(), enforcement);
+      // undefined/null/throw fall through to the EVAL_ERROR deny; every
+      // other malformed shape becomes forward-failed. NEITHER is admit.
+      expect(r.kind, JSON.stringify(shape)).not.toBe("admit");
+    }
   });
 });

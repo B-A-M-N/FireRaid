@@ -142,7 +142,47 @@ describe("P0-6: publicOrigin parsing", () => {
       expect(u.includes("http://https://"), u).toBe(false);
     }
   });
+
+  it("rejects targets that would ESCAPE the pinned origin (WHATWG explicit-form priority)", async () => {
+    // `new URL("//evil.com/x", base)` and `new URL("http://evil.com/x", base)`
+    // both resolve to evil.com — WHATWG gives an explicit scheme/authority
+    // priority over the base. P0-6's promise is that the pinned origin
+    // governs; such a request is a client error, not something to re-home.
+    const server = createOriginServer({
+      middlewareDeps: deps(),
+      htmlLoader: async () => SIGNUP_HTML,
+      routes: ROUTES,
+      publicOrigin: "https://signup.example.org",
+    });
+    const port = await listen(server);
+
+    const targets = ["//evil.com/x", "http://evil.com/x", "https://evil.com/x"];
+    // Node's http client only sends origin-form targets, so drive the
+    // attack request-targets over raw sockets.
+    for (const target of targets) {
+      const line = `GET ${target} HTTP/1.1\r\nHost: signup.example.org\r\n\r\n`;
+      const status = await new Promise<string>((resolve) => {
+        const sock = net.connect(port, "127.0.0.1", () => sock.write(line));
+        let data = "";
+        sock.on("data", (c: Buffer | string) => {
+          data += String(c);
+          if (data.includes("\r\n\r\n") || data.length > 200) {
+            sock.destroy();
+            resolve(data.split("\r\n")[0] ?? "");
+          }
+        });
+        sock.on("close", () => resolve(data.split("\r\n")[0] ?? ""));
+        sock.on("error", () => resolve(data.split("\r\n")[0] ?? ""));
+        setTimeout(() => {
+          sock.destroy();
+          resolve(data.split("\r\n")[0] ?? "");
+        }, 2000);
+      });
+      expect(status, `target ${target}`).toMatch(/^HTTP\/1\.1 400/);
+    }
+  });
 });
+
 
 describe("P0-7: maxHeaderSize at construction", () => {
   it("rejects a header block over the configured limit at the socket level", async () => {

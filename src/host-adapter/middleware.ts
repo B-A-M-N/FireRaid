@@ -236,6 +236,33 @@ export interface MiddlewareResult {
   };
 }
 
+/**
+ * P0-8 hardening: runtime shape check for the discriminated enforcement
+ * result. The static type says `EnforcementResult`, but the seam is a host
+ * callback — a JS host (or a half-migrated one) can hand back anything.
+ * Only the four contract kinds with their required field types pass; a
+ * kind missing or mistyped (or a `queued-for-retry` without a retryId)
+ * fails the receipt policy closed downstream.
+ */
+function isValidEnforcementResult(v: unknown): v is EnforcementResult {
+  if (typeof v !== "object" || v === null) return false;
+  const kind = (v as { kind?: unknown }).kind;
+  switch (kind) {
+    case "created":
+      return true;
+    case "business-rejected":
+      return typeof (v as { status?: unknown }).status === "number";
+    case "queued-for-retry":
+      return typeof (v as { retryId?: unknown }).retryId === "string" &&
+        (v as { retryId: string }).retryId.length > 0;
+    case "transport-failure":
+      return typeof (v as { reason?: unknown }).reason === "string" &&
+        (v as { reason: string }).reason.length > 0;
+    default:
+      return false;
+  }
+}
+
 // Strip FireRaid-injected fields before forwarding to the upstream so the
 // ordinary app's ledger never carries our decoy/telemetry artifacts.
 // E5 lever 1: SESSION_RESPONSE_FIELD (the actuator sink the route ask binds
@@ -958,7 +985,13 @@ async function handleSubmitPost(
         cookies
       );
       // Normalize the legacy boolean to the discriminated shape FIRST so the
-      // receipt policy below has one code path.
+      // receipt policy below has one code path. Any MALFORMED shape (a
+      // string, null, an object whose `kind` is not one of the four contract
+      // kinds — e.g. `{status:"created"}` or `{ok:true}`) FAILS CLOSED as a
+      // transport failure: an unvalidated "looks-created" shape flowing past
+      // this point would produce a success receipt for an application that
+      // is nowhere durable — the FR-INV-008 violation the taxonomy exists to
+      // prevent, just via a type error instead of a logic error.
       const detail: EnforcementResult = enforcementResult === true
         ? { kind: "created" }
         : enforcementResult === false
@@ -966,7 +999,9 @@ async function handleSubmitPost(
           // is a transport failure (never claim `created`, never invent a
           // business status).
           ? { kind: "transport-failure", reason: "legacy_boolean_false" }
-          : enforcementResult;
+          : isValidEnforcementResult(enforcementResult)
+            ? enforcementResult
+            : { kind: "transport-failure", reason: "malformed_enforcement_result" };
       // FR-INV-008 receipt policy: a success receipt may leave the building
       // only when the application is durably SOMEWHERE — created upstream or
       // captured by the host's retry queue. A bare transport failure means

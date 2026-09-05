@@ -351,11 +351,26 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
         headers: { "content-type": "application/json", cookie: cookies },
         body: JSON.stringify({ form }),
         signal: AbortSignal.timeout(this.forwardTimeoutMs),
+        // An admission endpoint that responds with a redirect did NOT create
+        // the account — following the chain would land on a 200 HTML page
+        // (a login/interstitial) and classify it `created`. A redirect is an
+        // unclassifiable upstream answer: treat it as a transport failure
+        // rather than a false-create.
+        redirect: "error",
       });
     } catch (e) {
+      // Node's fetch wraps: TimeoutError surfaces named; a refused
+      // redirect: "error" surfaces as TypeError("fetch failed") with the
+      // real reason on `cause` ("unexpected redirect").
+      const causeMsg = e instanceof Error && e.cause instanceof Error ? e.cause.message : "";
       return {
         kind: "transport-failure",
-        reason: e instanceof Error && e.name === "TimeoutError" ? "timeout" : "network_error",
+        reason:
+          e instanceof Error && e.name === "TimeoutError"
+            ? "timeout"
+            : /redirect/i.test(causeMsg)
+              ? "upstream_redirect"
+              : "network_error",
       };
     }
     if (resp.ok) return { kind: "created" };
