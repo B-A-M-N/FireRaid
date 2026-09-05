@@ -35,6 +35,44 @@ import { deriveProfile, hashProfile } from "../core/profile.js";
 import { loadSession, type LoadedSession } from "./session.js";
 
 /**
+ * FR-P1-08: verify the PRODUCTION session envelope with ZERO D1 writes.
+ *
+ * Stateful routes must not materialize a stateless session row just to learn
+ * the request is garbage. This is the no-D1 verification seam: it HMAC-verifies
+ * the envelope (CPU-only) and returns the canonical inner sid plus the exact
+ * secret/version/key-id the envelope was signed with — everything a route
+ * needs to fully validate the request (parse, schema, CSRF, token comparison)
+ * before it materializes the row immediately ahead of the first real write.
+ *
+ * Returns:
+ *   { ok: true, sid, iat, pv, kid, secret }  — a VALID production envelope.
+ *   { ok: false }                            — not an envelope cookie, lab mode,
+ *                                              or the HMAC/payload/signature did
+ *                                              not verify. Callers must 403.
+ */
+export async function verifyEnvelopeOnly(
+  env: Env,
+  cookieValue: string
+): Promise<
+  | { ok: true; sid: string; iat: number; pv: number; kid: string; secret: string }
+  | { ok: false }
+> {
+  // Envelopes are a production-only stateless shape.
+  if (isLabMode(env) || !isEnvelopeCookie(cookieValue)) return { ok: false };
+  const ring = resolveProfileKey(env);
+  const verdict = await verifySessionEnvelope(ring, cookieValue, Date.now());
+  if (!verdict.ok) return { ok: false };
+  return {
+    ok: true,
+    sid: verdict.payload.sid,
+    iat: verdict.payload.iat,
+    pv: verdict.payload.pv,
+    kid: verdict.payload.kid,
+    secret: verdict.secret,
+  };
+}
+
+/**
  * Load-or-materialize the session for a stateful production request.
  *
  * @param cookieValue the raw __Host-fr_sid cookie value

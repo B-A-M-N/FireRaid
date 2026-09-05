@@ -31,6 +31,7 @@ import {
 } from "../core/session.js";
 import {
   ensureSessionRow,
+  verifyEnvelopeOnly,
 } from "../cloudflare/session-envelope.js";
 import { loadSession } from "../cloudflare/session.js";;
 import { getPolicyOrThrow } from "../core/decision.js";
@@ -76,27 +77,24 @@ export async function submit(req: Request, env: Env): Promise<Response> {
     return error("Content-Type must be application/json", 415);
   }
 
-  // 2. resolve session
-  // FR-P1-19: let — reassigned to the canonical (envelope-unwrapped) id
-  // after ensureSessionRow.
-  let sessionId = getSessionId(req);
-  if (!sessionId) return error("no session", 403);
-  // FR-P1-19: submit is a stateful first action — materializes the
-  // stateless production session row from the signed envelope.
-  const session = await ensureSessionRow(env, sessionId);
-  if (!session) return error("invalid session", 403);
-  if (isExpired(session.createdAt)) return error("session expired", 403);
-  // FR-P1-19: canonical id — FK targets materialize under the envelope's
-  // inner sid, never the envelope string.
-  sessionId = session.id;
+  // 2. resolve session.
+  // FR-P1-19 + FR-P1-08: `let` — reassigned to the canonical (envelope-
+  // unwrapped) id AFTER materialization. The envelope (production) is HMAC-
+  // verified here with ZERO D1 writes so a forged cookie is rejected before
+  // any parse work; the verified inner sid is what the CSRF was keyed on at
+  // signup (the CSRF is a pure HMAC — no D1 — so it can be checked before
+  // materialization).
+  const rawCookieSid = getSessionId(req);
+  if (!rawCookieSid) return error("no session", 403);
+  const envelope = await verifyEnvelopeOnly(env, rawCookieSid);
+  const csrfSid = envelope.ok ? envelope.sid : rawCookieSid;
 
-  // FIX: Check for resubmission (idempotent)
-  // FR-R6-023: goes through the SAME projection as the primary path — the
-  // raw stored disposition (QUARANTINE, real score) must not leak to
-  // production clients.
-  if (session.submitted) {
-    return projectFinalized(env, session.finalDisposition ?? "REVIEW", session.finalScore ?? 0, true);
-  }
+  // FR-P1-08: validate the request FULLY before any D1 write. The production
+  // stateless session row is only materialized (ensureSessionRow, below) after
+  // the body parses, the form validates, and the CSRF/challenge passes — a
+  // malformed body, invalid form, or forged CSRF turns into a 4xx with ZERO
+  // D1 writes. (For a FORGED production envelope, verifyEnvelopeOnly failed
+  // above; the materialize step below re-verifies and refuses with no INSERT.)
 
   // 3. body size limit — FR-R6-024: BYTE-based, not UTF-16 code units.
   const contentLength = Number(req.headers.get("content-length") || 0);
@@ -125,9 +123,30 @@ export async function submit(req: Request, env: Env): Promise<Response> {
     form = checked.form;
   }
 
-  // 5. CSRF
-  if (!body.csrf || !(await checkCsrf(env, sessionId, body.csrf))) {
+  // 5. CSRF (pure HMAC over the csrf secret + the session id the token was
+  // issued against — no D1).
+  if (!body.csrf || !(await checkCsrf(env, csrfSid, body.csrf))) {
     return error("invalid CSRF token", 403);
+  }
+
+  // The request is valid enough to warrant state — materialize the session
+  // row now (the first D1 mutation on this request), or load it if it already
+  // exists (lab sessions / prior stateful action). A forged production
+  // envelope is refused here without an INSERT.
+  let sessionId = rawCookieSid;
+  const session = await ensureSessionRow(env, rawCookieSid);
+  if (!session) return error("invalid session", 403);
+  if (isExpired(session.createdAt)) return error("session expired", 403);
+  // FR-P1-19: canonical id — FK targets materialize under the envelope's
+  // inner sid, never the envelope string.
+  sessionId = session.id;
+
+  // FIX: Check for resubmission (idempotent)
+  // FR-R6-023: goes through the SAME projection as the primary path — the
+  // raw stored disposition (QUARANTINE, real score) must not leak to
+  // production clients.
+  if (session.submitted) {
+    return projectFinalized(env, session.finalDisposition ?? "REVIEW", session.finalScore ?? 0, true);
   }
 
   // FIX: 6. Turnstile is now an EXPLICIT GATE, not a heuristic

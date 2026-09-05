@@ -15,9 +15,11 @@ import {
 } from "../core/session.js";
 import {
   ensureSessionRow,
+  verifyEnvelopeOnly,
 } from "../cloudflare/session-envelope.js";;
+import { loadSession } from "../cloudflare/session.js";
+import { deriveProfile, hashProfile } from "../core/profile.js";
 import { reconstructIssuedProfile } from "../core/reconstruct.js";
-import type { DefenseRecipe } from "../core/recipe-schema.js";
 import { readLabAssignment } from "../core/lab-assignment.js";
 
 /** Hash a token for storage (SHA-256 hex). */
@@ -81,41 +83,46 @@ export async function canary(req: Request, env: Env): Promise<Response> {
   const token = url.pathname.replace(/^\/c\//, "");
   if (!token) return error("missing token", 400);
 
-  // FR-P1-19: let — reassigned to the canonical (envelope-unwrapped) id
-  // after ensureSessionRow.
-  let sessionId = getSessionId(req);
-  if (!sessionId) return error("no session", 403);
-  // FR-P1-19: a canary hit is a stateful first action — materializes the
-  // stateless production session row from the signed envelope.
-  const session = await ensureSessionRow(env, sessionId);
-  if (!session) return error("invalid session", 403);
-  if (isExpired(session.createdAt)) return error("session expired", 403);
-  // FR-P1-19: canonical id — FK targets materialize under the envelope's
-  // inner sid, never the envelope string.
-  sessionId = session.id;
+  const rawCookieSid = getSessionId(req);
+  if (!rawCookieSid) return error("no session", 403);
 
-  // FR-R6-050: canonical reconstruction (recipe + key-id aware), never a
-  // route-local deriveProfile with ad-hoc arguments.
-  // FR-POST-R6-P4: a lab-BOUND session's profile is recipe-derived — the
-  // reconstruction MUST load the bound recipe the same way submit.ts does,
-  // or the reconstructed decoyRoute token differs from the RENDERED token
-  // and every legitimate REQUESTED→VERIFIED causal hit 403s. Found by the
-  // Phase 4 perception-chain integration test (render/reconstruct drift).
-  // FR-R7-019: production has no bound research runs; the lab_runs query
-  // is gated behind isLabMode(env) so a production /c/ is one session
-  // SELECT + one reconstruction, not three D1 round-trips.
-  let recipe: DefenseRecipe | undefined;
-  let holdoutMode: boolean | undefined;
-  // FR-P0-17: verification condition — hashed into the issued variant id.
-  let turnstileRequired: boolean | undefined;
-  if (isLabMode(env)) {
+  // FR-P1-08: reconstruct the EXPECTED token and compare it BEFORE any D1
+  // write — a wrong token (or forged/malformed envelope) must cause ZERO D1
+  // mutations. Only a verified, token-matching request proceeds to materialize
+  // the session row and persist the causal hit.
+  //   - production: derive the exact issued profile from the VERIFIED envelope
+  //     (HMAC — no D1). The envelope carries the secret key-id + version;
+  //     derivation matches issuance byte-for-byte.
+  //   - lab: the session row already exists (created at signup), so loading it
+  //     is a READ; the bound recipe rides in from the D1 lab_runs read, exactly
+  //     as submit.ts does, so the reconstructed token equals the RENDERED token.
+  let profile: Awaited<ReturnType<typeof deriveProfile>>;
+  let derivedHash: string | null = null;
+  if (!isLabMode(env)) {
+    const envelope = await verifyEnvelopeOnly(env, rawCookieSid);
+    if (!envelope.ok) return error("invalid session", 403);
+    try {
+      // Same exact production derivation materializeFromVerdict uses.
+      profile = await deriveProfile(
+        { FIRERAID_PROFILE_SECRET: envelope.secret, PROFILE_VERSION: String(envelope.pv), LAB_MODE: "false" },
+        envelope.sid,
+        envelope.pv
+      );
+      // FR-P0-04: snapshot the derived hash so the post-materialize drift
+      // check below detects any issuance/derivation divergence.
+      derivedHash = await hashProfile(profile);
+    } catch (err) {
+      console.error("canary production derivation failed:", err instanceof Error ? err.message : err);
+      return error("profile reconstruction failed", 500);
+    }
+  } else {
+    // Lab: read the EXISTING session row (no write) + the bound recipe.
+    const existing = await loadSession(env.DB, rawCookieSid);
+    if (!existing) return error("invalid session", 403);
     // P1-AUDIT-2: FAIL CLOSED on bound-assignment read/parse errors (shared
     // helper readLabAssignment, mirrors submit.ts). A bound session's token
-    // derivation must never fall back to a random profile on a D1 read
-    // failure — that would yield a decoyRoute token DIFFERENT from the one
-    // rendered, breaking every legitimate REQUESTED→VERIFIED hit and
-    // corrupting the causal signal.
-    const read = await readLabAssignment(env.DB, sessionId);
+    // derivation must never fall back to a random profile.
+    const read = await readLabAssignment(env.DB, existing.id);
     if (!read.ok) {
       console.error(
         "canary lab-assignment read failed (failing closed):",
@@ -126,35 +133,52 @@ export async function canary(req: Request, env: Env): Promise<Response> {
         500
       );
     }
-    if (read.assignment?.recipe != null) recipe = read.assignment.recipe;
-    // FR-POST-R6-P5: holdout flag is part of the treatment identity.
-    holdoutMode = read.assignment?.holdoutMode;
-    // FR-P0-17: verification condition likewise.
-    turnstileRequired = read.assignment?.turnstileRequired;
+    // FR-POST-R6-P4 / R6-P5 / P0-17: recipe + holdout + turnstile condition
+    // are part of the issued treatment identity.
+    const reconstructed = await reconstructIssuedProfile(env, {
+      id: existing.id,
+      profileVersion: existing.profileVersion,
+      profileKeyId: existing.profileKeyId ?? null,
+      profileHash: existing.profileHash,
+    }, read.assignment?.recipe ?? undefined, {
+      holdoutMode: read.assignment?.holdoutMode,
+      turnstileRequired: read.assignment?.turnstileRequired,
+    });
+    if (!reconstructed.ok) {
+      console.error("canary reconstruction failed:", reconstructed.code, reconstructed.detail);
+      return error("profile reconstruction failed", 500);
+    }
+    profile = reconstructed.profile;
+    derivedHash = existing.profileHash ?? null;
   }
-  // FR-R7-018: pass the already-loaded session's key id straight into the
-  // canonical reconstructor — no second session SELECT. FR-P0-04: the
-  // persisted profile hash rides along so drift fails closed.
-  const reconstructed = await reconstructIssuedProfile(env, {
-    id: sessionId,
-    profileVersion: session.profileVersion,
-    profileKeyId: session.profileKeyId ?? null,
-    profileHash: session.profileHash,
-  }, recipe, { holdoutMode, turnstileRequired });
-  if (!reconstructed.ok) {
-    console.error("canary reconstruction failed:", reconstructed.code, reconstructed.detail);
-    return error("profile reconstruction failed", 500);
-  }
-  const profile = reconstructed.profile;
 
   // FR-R6-028: the route token lives ONLY in decoyRoute — a DECOY_FIELD_ONLY
   // session (no decoyRoute) must 404 here, not fall back to aggregate state.
   if (!profile.decoyRoute) return error("no decoy route for this session", 404);
 
-  // Constant-time comparison (no early return on length mismatch)
+  // Constant-time comparison (no early return on length mismatch) — a wrong
+  // token returns here with ZERO D1 writes.
   const expected = profile.decoyRoute.endpointToken;
   if (!constantTimeTokenEqual(token, expected)) {
     return error("invalid token", 403);
+  }
+
+  // FR-P1-08: the request is valid — NOW materialize (production INSERT) or
+  // load (lab READ) the session. The first D1 mutation on the request.
+  const session = await ensureSessionRow(env, rawCookieSid);
+  if (!session) return error("invalid session", 403);
+  if (isExpired(session.createdAt)) return error("session expired", 403);
+  // FR-P1-19: canonical id — FK targets materialize under the envelope's
+  // inner sid, never the envelope string.
+  const sessionId = session.id;
+
+  // FR-P0-04: drift detection — the derived hash must match the materialized
+  // row's persisted hash. A mismatch (a deployment changed derivation for a
+  // pinned version) is a hard operational failure, never a silent replay.
+  if (derivedHash && session.profileHash && derivedHash !== session.profileHash) {
+    console.error("canary profile-hash drift (failing closed):",
+      `derived=${derivedHash.slice(0, 12)} stored=${session.profileHash.slice(0, 12)}`);
+    return error("profile reconstruction failed", 500);
   }
 
   // Record verified causal hit — FAIL CLOSED (P1-AUDIT-2). A verified canary

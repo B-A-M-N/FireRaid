@@ -201,17 +201,13 @@ export async function events(req: Request, env: Env): Promise<Response> {
 
   const cookieSessionId = getSessionId(req);
   if (!cookieSessionId) return error("no session", 403);
-  // FR-P1-19: first stateful action on the stateless production path —
-  // materializes the session row from the signed envelope (INSERT OR IGNORE).
-  const session = await ensureSessionRow(env, cookieSessionId);
-  if (!session) return error("invalid session", 403);
-  if (isExpired(session.createdAt)) return error("session expired", 403);
-  // Canonical id: the row materialized under the envelope's INNER sid, not
-  // the envelope string itself. Downstream FKs (event_batches, submissions)
-  // reference sessions.id — persisting under the envelope string would
-  // violate the foreign key (found live in the production-mode suite).
-  const sessionId = session.id;
 
+  // FR-P1-08: validate the request FULLY before any D1 write. The production
+  // stateless session row is only materialized (ensureSessionRow, below) after
+  // the envelope verifies AND the batch parses + validates — a malformed body
+  // or forged envelope turns into a 400/403 with ZERO D1 writes. ensureSessionRow
+  // itself verifies the envelope (HMAC — no D1) before it will INSERT, so a
+  // forged envelope never reaches a write even on a valid body.
   let body: { events?: unknown };
   {
     // P1-8 / FR-P1-02: bounded STREAMING JSON reader — counts bytes as they
@@ -236,6 +232,19 @@ export async function events(req: Request, env: Env): Promise<Response> {
     }
     return error(`telemetry rejected: ${validated.code}${validated.detail ? ` (${validated.detail})` : ""}`, 400);
   }
+
+  // FR-P1-19 + FR-P1-08: the batch is valid — NOW materialize the stateless
+  // production session row (or load it; lab sessions already exist from signup).
+  // This is the first D1 mutation on this request, deferred until the request
+  // is valid enough to warrant it.
+  const session = await ensureSessionRow(env, cookieSessionId);
+  if (!session) return error("invalid session", 403);
+  if (isExpired(session.createdAt)) return error("session expired", 403);
+  // Canonical id: the row materialized under the envelope's INNER sid, not
+  // the envelope string itself. Downstream FKs (event_batches, submissions)
+  // reference sessions.id — persisting under the envelope string would
+  // violate the foreign key (found live in the production-mode suite).
+  const sessionId = session.id;
 
   const outcome = await ingestTelemetryBatch(env.DB, sessionId, validated.events);
 

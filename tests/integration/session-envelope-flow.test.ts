@@ -205,4 +205,97 @@ describe("FR-P1-19 integration: stateless production envelope", () => {
     const text = await detail.text();
     expect(text).not.toContain("fr1.");
   });
+
+  it("FR-P1-08: malformed garbage causes ZERO D1 writes (deferred materialization)", async () => {
+    // A valid envelope must NOT materialize a session row when the request it
+    // carries is garbage. All routes defer materialization until the request
+    // is fully valid (envelope verified + body parsed + schema/CSRF/token
+    // checked) — so each of these sees the session count unchanged.
+    const garbage: Array<{
+      name: string;
+      build: (sid: string, csrf: string, html: string) => { path: string; init: RequestInit };
+    }> = [
+      {
+        name: "telemetry invalid JSON",
+        build: (sid) => ({
+          path: "/api/events",
+          init: {
+            method: "POST",
+            headers: { "content-type": "application/json", cookie: `__Host-fr_sid=${sid}` },
+            body: "{ not json" as unknown as BodyInit,
+          },
+        }),
+      },
+      {
+        name: "telemetry missing events array",
+        build: (sid) => ({
+          path: "/api/events",
+          init: {
+            method: "POST",
+            headers: { "content-type": "application/json", cookie: `__Host-fr_sid=${sid}` },
+            body: JSON.stringify({ other: true }),
+          },
+        }),
+      },
+      {
+        name: "submit with forged CSRF",
+        // csrf is keyed on the envelope's INNER sid; a value minted for a
+        // DIFFERENT session must be rejected before any materialization.
+        build: (sid, _csrf) => ({
+          path: "/api/submit",
+          init: {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              cookie: `__Host-fr_sid=${sid}`,
+              origin: BASE,
+            },
+            body: JSON.stringify({ csrf: `forge-${sid}`, form: { email: "g@example.test" } }),
+          },
+        }),
+      },
+      {
+        name: "submit with entirely missing CSRF",
+        build: (sid, _csrf) => ({
+          path: "/api/submit",
+          init: {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              cookie: `__Host-fr_sid=${sid}`,
+              origin: BASE,
+            },
+            body: JSON.stringify({ form: { email: "g@example.test" } }),
+          },
+        }),
+      },
+      {
+        name: "canary with a wrong token",
+        build: (sid) => ({
+          path: "/c/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          init: { headers: { cookie: `__Host-fr_sid=${sid}` } },
+        }),
+      },
+      {
+        name: "canary with no decoy-route token (garbage path)",
+        build: (sid) => ({
+          path: "/c/not-a-hex-token",
+          init: { headers: { cookie: `__Host-fr_sid=${sid}` } },
+        }),
+      },
+    ];
+
+    for (const { build } of garbage) {
+      const before = await adminSessionsCount();
+      const { sidValue, csrf } = await productionSignup();
+      const { path, init } = build(sidValue, csrf, "");
+      const resp = await fetch(`${BASE}${path}`, init);
+      // Every case is a client/precondition failure (4xx), never a 5xx —
+      // server-side refusal must not read as applicant guilt.
+      expect(resp.status).toBeGreaterThanOrEqual(400);
+      expect(resp.status).toBeLessThan(500);
+      // ...and crucially NONE of them materialized a session row.
+      expect(await adminSessionsCount()).toBe(before);
+    }
+  });
 });
