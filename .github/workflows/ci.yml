@@ -80,3 +80,25 @@ jobs:
         run: npx playwright install chromium firefox webkit && npx playwright test --config=playwright.production.config.ts
       - name: Accessibility (axe)
         run: npm run test:a11y
+
+  # P1-15: the published-package contract is its own CI job, not an
+  # afterthought inside a wider gate — an exports map that points at files
+  # that do not exist (or a dist build that fails) must fail the pipeline
+  # even when every source-level gate is green. Runs the SAME smoke the
+  # release gate runs: build → pack → install the tarball into an empty
+  # temp project → import every declared subpath → functional round-trip.
+  release-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci
+      - name: Package contract (build → pack → install → import → round-trip)
+        run: npm run test:package

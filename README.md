@@ -214,7 +214,8 @@ npm run test:a11y         # Accessibility assertions
 npm run test:ledger-proof    # end-to-end: attacker behavior → evidence → admission → upstream forwarding → origin ledger
 npm run test:envelope        # stateless production envelope issuance + forged-envelope rejection
 npm run test:budget          # Cloudflare/D1 resource budget harness
-npm run release:verify       # deterministic release gates; stamps release-evidence.json
+npm run test:package         # package contract: build → pack → install tarball → import every subpath → round-trip
+npm run release:verify       # full deterministic release gate; stamps release-evidence.json
 ```
 
 ## Running Experiments

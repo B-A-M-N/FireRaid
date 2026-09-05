@@ -51,11 +51,31 @@ const ROUTES = {
   canaryPrefix: "/c/",
 };
 
+// P0-8 follow-through: the reference enforcement adapter now classifies
+// honestly — against a dead upstream a submit yields `forward-failed`,
+// NOT `admit`. The submit-assessment budget measures the MIDDLEWARE's
+// cost, so the scenario needs a real upstream answering 2xx. A tiny
+// in-process sink stands in (kept localhost; the zero-llm egress scenario
+// stubs fetch and only forbids non-localhost, so this stays compliant).
+import { createServer as createHttpServer } from "node:http";
+
+const UPSTREAM_SINK_PORT = 5051;
+
+function startUpstreamSink() {
+  return new Promise((resolve) => {
+    const server = createHttpServer((_req, res) => {
+      res.writeHead(201, { "content-type": "application/json" });
+      res.end('{"created":true}');
+    });
+    server.listen(UPSTREAM_SINK_PORT, "127.0.0.1", () => resolve(server));
+  });
+}
+
 function buildDeps() {
   return createFireRaidMiddleware({
     profileKeys: { current: { id: "default", secret: SECRET } },
     version: VERSION,
-    upstreamRegisterUrl: "http://localhost:5051/api/register",
+    upstreamRegisterUrl: `http://127.0.0.1:${UPSTREAM_SINK_PORT}/api/register`,
     session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
     render: { inject: referenceInject },
     verification: new HostOwnedVerificationAdapter(async () => true),
@@ -167,7 +187,13 @@ async function scenario_zero_llm() {
   globalThis.fetch = async (...args) => {
     fetchCalls++;
     const url = args[0];
-    if (typeof url === "string" && !url.startsWith("http://localhost")) {
+    // Loopback only — any scheme-host form of localhost/127.0.0.1 is fine
+    // (the enforcement upstream sink binds 127.0.0.1); everything else is
+    // egress the product must never do.
+    const loopback =
+      typeof url === "string" &&
+      (url.startsWith("http://localhost") || url.startsWith("http://127.0.0.1"));
+    if (!loopback) {
       nonLocalhostFetch++;
       throw new Error(`Network egress blocked: ${url}`);
     }
@@ -251,6 +277,8 @@ async function scenario_zero_d1_imports() {
 async function run() {
   let allPassed = true;
 
+  const sink = await startUpstreamSink();
+
   console.log("=== Origin Budget Harness ===\n");
 
   // 1. profile-generation
@@ -317,6 +345,7 @@ async function run() {
   }
 
   console.log("");
+  sink.close();
   console.log(allPassed ? "All scenarios PASS" : "Some scenarios FAILED");
   process.exit(allPassed ? 0 : 1);
 }
