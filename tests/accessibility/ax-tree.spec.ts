@@ -192,8 +192,17 @@ test.describe("AX tree verification", () => {
     const canaryWrapper = page.locator("[data-fr-canary-id]");
     const canaryCount = await canaryWrapper.count();
 
-    // Case 1: No canary drawn for this session — nothing to assert.
-    if (canaryCount === 0) {
+    // Case 1: No canary drawn for this session — nothing to assert. P0-2
+    // flake fix: "no carrier" is judged by the CANONICAL introspection, not
+    // the element count — a P06 draw whose spots land only on the element-
+    // free channels (head-meta meta, body-comment comment; ~13% of S09 spot
+    // draws) ships carriers with no data-fr-canary-id element in the DOM.
+    // Skipping on carrierCount === 0 alone would run this test into the
+    // unconditional data-fr-canary-id assertion below on a legitimately
+    // carrier-bearing page (the same wrong-transport shape the pinned S09
+    // test flaked on in the release gate).
+    const carrierTruth0 = inspectLabCarriers(dom);
+    if (canaryCount === 0 && carrierTruth0.templateId === null) {
       test.skip(true, "no semantic canary in this random session");
     }
 
@@ -219,7 +228,13 @@ test.describe("AX tree verification", () => {
     if (carrierTruth.nonce) {
       expect(ax, `marker nonce must not appear in the AX tree`).not.toContain(carrierTruth.nonce);
     }
-    expect(dom).toContain("data-fr-canary-id");
+    // An element-bearing carrier draw must carry the id attribute in the
+    // markup (element-bearing is what this line means — P0-2 wording); the
+    // carrier-presence fact itself is asserted above via the introspector,
+    // because element-free channel draws legitimately lack the attribute.
+    if (canaryCount > 0) {
+      expect(dom).toContain("data-fr-canary-id");
+    }
   });
 
   test("AX tree structure for documentation", async ({ page }) => {
