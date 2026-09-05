@@ -25,11 +25,14 @@ import { runRetentionSweep } from "../cloudflare/retention.js";
 // FR-P1-07: the in-memory map is a SECONDARY, best-effort guard that sits
 // INSIDE a single isolate. It is NOT the authoritative control — the
 // deployment contract requires an authoritative edge limiter (Cloudflare WAF
-// rate-limit rule / Access / the ratelimit binding) for /api/admin/login,
-// enforced for production in config verification and the predeploy gate
-// (FIRERAID_RATE_LIMIT_LOGIN). The map here is bounded and swept so a flood
-// of distinct client IPs cannot grow per-isolate memory without bound (a
-// DoS in its own right).
+// rate-limit rule / Access / the ratelimit binding) for /api/admin/login.
+// FIRERAID_RATE_LIMIT_LOGIN is an OPERATOR ATTESTATION of that limiter: its
+// value names the rule/plan, and its presence is REQUIRED for production by
+// config verification (worker-common) and the predeploy gate — but FireRaid
+// cannot remotely verify the edge rule exists or fires; the operator who
+// sets the variable asserts it. The map here is bounded on EVERY new-key
+// insertion (closure 7) and swept, so a flood of distinct client IPs cannot
+// grow per-isolate memory without bound (a DoS in its own right).
 const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
@@ -53,16 +56,46 @@ export function pruneLoginAttempts(now: number): void {
   for (const [ip, entry] of loginAttempts) {
     if (now - entry.lastAttempt > LOGIN_WINDOW_MS) loginAttempts.delete(ip);
   }
-  if (loginAttempts.size > MAX_LOGIN_TRACKED_IPS) {
-    // Evict the oldest tracker(s) down to the cap. Logins are low-frequency,
-    // so a linear scan to find the oldest is acceptable and only runs when
-    // the cap is breached.
-    const entries = [...loginAttempts.entries()].sort((a, b) => a[1].lastAttempt - b[1].lastAttempt);
-    for (const [ip] of entries) {
-      if (loginAttempts.size <= MAX_LOGIN_TRACKED_IPS) break;
-      loginAttempts.delete(ip);
-    }
+  evictToCap();
+}
+
+/**
+ * Closure 7 (FR-P1-07): enforce the capacity cap INDEPENDENTLY of the sweep
+ * throttle. The prior code checked the cap only inside pruneLoginAttempts,
+ * which runs at most once per LOGIN_SWEEP_INTERVAL_MS — so between sweeps a
+ * flood of NEW distinct IPs grew the map past MAX_LOGIN_TRACKED_IPS without
+ * bound (up to millions of rows in one window). Now every NEW-key insertion
+ * (recordLoginFailure) calls this, so the map can exceed the cap by at most
+ * the entries added while a single eviction batch runs — never unboundedly.
+ * The throttle stays only on the EXPIRY scan (per-request O(n) churn).
+ */
+function evictToCap(): void {
+  if (loginAttempts.size <= MAX_LOGIN_TRACKED_IPS) return;
+  // Evict the oldest tracker(s) down to the cap. Logins are low-frequency,
+  // so a linear scan to find the oldest is acceptable and only runs when
+  // the cap is breached.
+  const entries = [...loginAttempts.entries()].sort((a, b) => a[1].lastAttempt - b[1].lastAttempt);
+  for (const [ip] of entries) {
+    if (loginAttempts.size <= MAX_LOGIN_TRACKED_IPS) break;
+    loginAttempts.delete(ip);
   }
+}
+
+/**
+ * Closure 7: record a failed attempt with the cap enforced at EVERY
+ * new-key insertion (not just on the throttled sweep).
+ */
+function recordLoginFailure(ip: string, now: number): void {
+  const current = loginAttempts.get(ip);
+  if (current) {
+    current.count += 1;
+    current.lastAttempt = now;
+    return;
+  }
+  // New key: the map is at capacity → evict BEFORE inserting so the cap
+  // holds even under a flood of distinct IPs within one sweep window.
+  if (loginAttempts.size >= MAX_LOGIN_TRACKED_IPS) evictToCap();
+  loginAttempts.set(ip, { count: 1, lastAttempt: now });
 }
 
 export async function adminLogin(req: Request, env: Env): Promise<Response> {
@@ -99,9 +132,9 @@ export async function adminLogin(req: Request, env: Env): Promise<Response> {
   }
   const body = bodyRead.data as { secret?: string };
   if (!body.secret || !verifyAdminSecret(env, body.secret)) {
-    // Record failed attempt
-    const current = loginAttempts.get(clientIp) || { count: 0, lastAttempt: now };
-    loginAttempts.set(clientIp, { count: current.count + 1, lastAttempt: now });
+    // Record failed attempt — the cap is enforced on this EVERY insertion
+    // (closure 7), not only when the throttled sweep happens to run.
+    recordLoginFailure(clientIp, now);
     return error("invalid secret", 403);
   }
   
