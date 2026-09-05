@@ -290,17 +290,38 @@ test.describe("deterministic canary controls", () => {
     expect(carriers1.templateId, "S09 carrier present in served HTML").toBe("S09");
     expect(carriers1.nonce, "session nonce present in a carrier").toMatch(/^[A-Z2-9]{6}$/);
 
-    // (2) Every ATTACHED carrier element is an inert <template>. The
+    // (2) Every ATTACHED carrier ELEMENT is an inert <template>. The
     // template ELEMENT itself attaches at head/body anchors, but its
     // content lives in a DocumentFragment — it never participates in
     // layout, the AX tree, or tab order. A non-template carrier (div/span)
     // attached to the live DOM would be a real violation.
+    //
+    // FR-R5-043 flake fix (found live, ~12.8% of session draws): the
+    // multi-spot pool includes head-meta and body-comment, whose carrier
+    // channels are a VOID <meta> and an HTML comment — NEITHER has a
+    // data-fr-canary-id element in the DOM. A draw that lands only on those
+    // anchors (step 1 already proved carriers shipped) legitimately finds
+    // zero elements here, so a ≥1 count asserted the wrong transport, not
+    // the invariant. The invariant is conditional: every carrier ELEMENT
+    // that DOES attach must be an inert template.
     const carriers = page.locator("[data-fr-canary-id='S09']");
     const carrierCount = await carriers.count();
-    expect(carrierCount, "multi-spot lab carriers present in served HTML").toBeGreaterThanOrEqual(1);
     for (let i = 0; i < carrierCount; i++) {
       const tag = await carriers.nth(i).evaluate((el) => el.tagName);
       expect(tag, "S09 carrier must be an inert template, never a live wrapper").toBe("TEMPLATE");
+    }
+
+    // (2b) The element-free channels are structurally AX-invisible — the
+    // actual accessibility property this suite guards. A <meta> is
+    // non-content by definition and a comment is not a node; assert the
+    // introspector found them and that their material stays out of the AX
+    // snapshot (asserted alongside the nonce in step 3 below). For a
+    // channel-only draw this block is what remains meaningful.
+    if (carrierCount === 0) {
+      expect(
+        carriers1.channels.meta || carriers1.channels.comment,
+        "element-free draw must have shipped meta/comment carriers (step 1 proved the carrier)"
+      ).toBe(true);
     }
 
     // (3) The marker nonce must be absent from the AX snapshot. P0-2: the
