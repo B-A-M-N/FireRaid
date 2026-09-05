@@ -12,6 +12,7 @@
  * all.
  */
 import { json, error } from "../security/headers.js";
+import { readJsonBody } from "../security/body-limits.js";
 import { requireAdminMutation } from "../security/admin-auth.js";
 import { finalizeReview } from "../eval/review-workflow.js";
 import { D1ReviewStore } from "../cloudflare/review-store.js";
@@ -29,12 +30,17 @@ export async function adminReviewDecision(req: Request, env: Env): Promise<Respo
   if (!(await requireAdminMutation(req, env))) return error("unauthorized", 401);
   if (req.method !== "POST") return error("method not allowed", 405);
 
-  let body: { sessionId: string; decision: string; reviewerId?: string; note?: string };
-  try {
-    body = (await req.json()) as typeof body;
-  } catch {
-    return error("invalid JSON", 400);
+  // FR-P1-02 closure: bounded streaming read — reviewer notes are small;
+  // never buffer an arbitrary body before auth'd schema checks.
+  const MAX_REVIEW_BODY_BYTES = 16_384;
+  const bodyRead = await readJsonBody(req, MAX_REVIEW_BODY_BYTES);
+  if (!bodyRead.ok) {
+    return error(
+      bodyRead.reason === "OVERSIZE" ? "payload too large" : "invalid JSON",
+      bodyRead.reason === "OVERSIZE" ? 413 : 400
+    );
   }
+  const body = bodyRead.data as { sessionId: string; decision: string; reviewerId?: string; note?: string };
 
   if (!body.sessionId || !body.decision) {
     return error("missing sessionId or decision", 400);

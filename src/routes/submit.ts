@@ -44,6 +44,7 @@ import { correlate, deriveCanaryReference, type ObservationSet } from "../core/c
 import { SESSION_RESPONSE_FIELD } from "../core/artifacts.js";
 import { decide } from "../core/decision.js";
 import { MAX_SUBMIT_BODY_BYTES } from "../types/telemetry.js";
+import { readJsonBody } from "../security/body-limits.js";
 import { isLabMode } from "../env.js";
 import {
   validateTelemetryBatch,
@@ -96,24 +97,18 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   // D1 writes. (For a FORGED production envelope, verifyEnvelopeOnly failed
   // above; the materialize step below re-verifies and refuses with no INSERT.)
 
-  // 3. body size limit — FR-R6-024: BYTE-based, not UTF-16 code units.
-  const contentLength = Number(req.headers.get("content-length") || 0);
-  if (contentLength > MAX_SUBMIT_BODY_BYTES) {
-    return error("payload too large", 413);
+  // 3+4. parse + validate — FR-P1-02 closure: the bounded streaming reader
+  // replaces the old read-then-check pattern (Content-Length pre-check plus a
+  // full req.text() buffer). The body is now counted AS IT ARRIVES and the
+  // read cancelled the moment the cap is crossed.
+  const bodyRead = await readJsonBody(req, MAX_SUBMIT_BODY_BYTES);
+  if (!bodyRead.ok) {
+    return error(
+      bodyRead.reason === "OVERSIZE" ? "payload too large" : "invalid JSON",
+      bodyRead.reason === "OVERSIZE" ? 413 : 400
+    );
   }
-
-  // 4. parse + validate
-  let body: SubmitBody;
-  try {
-    const text = await req.text();
-    const byteLength = new TextEncoder().encode(text).length;
-    if (byteLength > MAX_SUBMIT_BODY_BYTES) {
-      return error("payload too large", 413);
-    }
-    body = JSON.parse(text) as SubmitBody;
-  } catch {
-    return error("invalid JSON", 400);
-  }
+  const body = bodyRead.data as SubmitBody;
 
   // FR-R6-025: bounded form schema validation.
   let form: Record<string, string>;

@@ -23,6 +23,7 @@
  * These routes are HARD-DISABLED outside lab mode.
  */
 import { json, error } from "../security/headers.js";
+import { readJsonBody } from "../security/body-limits.js";
 import type { Env } from "../env.js";
 import { isLabMode } from "../env.js";
 import {
@@ -253,14 +254,15 @@ export async function createLabRun(req: Request, env: Env): Promise<Response> {
 
   if (!requireLabAuth(req, env)) return error("unauthorized", 401);
 
-  let raw: unknown;
-  try {
-    const text = await req.text();
-    if (text.length > 4096) return error("request body too large", 413);
-    raw = JSON.parse(text);
-  } catch {
-    return error("invalid JSON", 400);
+  // FR-P1-02 closure: bounded streaming read (was read-then-check-length).
+  const read = await readJsonBody(req, 4_096);
+  if (!read.ok) {
+    return error(
+      read.reason === "OVERSIZE" ? "request body too large" : "invalid JSON",
+      read.reason === "OVERSIZE" ? 413 : 400
+    );
   }
+  const raw: unknown = read.data;
 
   const validated = validateCreateBody(raw);
   if (validated === null) return error("invalid request body", 400);
@@ -588,12 +590,15 @@ export async function postLabRunOutcome(req: Request, env: Env, runId: string): 
   // Validate outcome enum
   const VALID_OUTCOMES = ["submitted", "stopped", "handoff", "timeout", "error"];
 
-  let body: { outcome: string; error_code?: string };
-  try {
-    body = (await req.json()) as typeof body;
-  } catch {
-    return error("invalid JSON", 400);
+  // FR-P1-02 closure: bounded streaming read (outcome reports are tiny).
+  const outcomeRead = await readJsonBody(req, 4_096);
+  if (!outcomeRead.ok) {
+    return error(
+      outcomeRead.reason === "OVERSIZE" ? "payload too large" : "invalid JSON",
+      outcomeRead.reason === "OVERSIZE" ? 413 : 400
+    );
   }
+  const body = outcomeRead.data as { outcome: string; error_code?: string };
 
   if (!body.outcome || !VALID_OUTCOMES.includes(body.outcome)) {
     return error(`invalid outcome: must be one of ${VALID_OUTCOMES.join(", ")}`, 400);
@@ -652,12 +657,17 @@ export async function ingestLabRuns(req: Request, env: Env): Promise<Response> {
   if (req.method !== "POST") return error("method not allowed", 405);
   if (!requireLabAuth(req, env)) return error("unauthorized", 401);
 
-  let body: { runs?: unknown[] };
-  try {
-    body = (await req.json()) as typeof body;
-  } catch {
-    return error("invalid JSON", 400);
+  // FR-P1-02 closure: bounded streaming read. 1000 compact run records at
+  // ~1KB each → 1MiB cap before the count check (which still applies).
+  const MAX_INGEST_BODY_BYTES = 1_048_576;
+  const ingestRead = await readJsonBody(req, MAX_INGEST_BODY_BYTES);
+  if (!ingestRead.ok) {
+    return error(
+      ingestRead.reason === "OVERSIZE" ? "payload too large" : "invalid JSON",
+      ingestRead.reason === "OVERSIZE" ? 413 : 400
+    );
   }
+  const body = ingestRead.data as { runs?: unknown[] };
   if (!Array.isArray(body.runs) || body.runs.length === 0) {
     return error("runs array required", 400);
   }

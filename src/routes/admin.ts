@@ -9,6 +9,7 @@
  * FIX: Single-statement evidence deletion (FR-R4-074).
  */
 import { json, error, withSecurityHeaders } from "../security/headers.js";
+import { readJsonBody } from "../security/body-limits.js";
 import { requireAdmin, requireAdminMutation, createAdminToken, adminCookieHeader, adminCsrfCookieHeader, createAdminCsrfValue, verifyAdminSecret } from "../security/admin-auth.js";
 import { experimentMetrics } from "../analytics/run-metrics.js";
 import { readLabAssignment } from "../core/lab-assignment.js";
@@ -86,12 +87,17 @@ export async function adminLogin(req: Request, env: Env): Promise<Response> {
     }
   }
   
-  let body: { secret?: string };
-  try {
-    body = (await req.json()) as { secret?: string };
-  } catch {
-    return error("invalid JSON", 400);
+  // FR-P1-02 closure: a bounded streaming read — the login body is tiny, so
+  // an unbounded req.json() here was a free unauthenticated allocation.
+  const MAX_LOGIN_BODY_BYTES = 4_096;
+  const bodyRead = await readJsonBody(req, MAX_LOGIN_BODY_BYTES);
+  if (!bodyRead.ok) {
+    return error(
+      bodyRead.reason === "OVERSIZE" ? "payload too large" : "invalid JSON",
+      bodyRead.reason === "OVERSIZE" ? 413 : 400
+    );
   }
+  const body = bodyRead.data as { secret?: string };
   if (!body.secret || !verifyAdminSecret(env, body.secret)) {
     // Record failed attempt
     const current = loginAttempts.get(clientIp) || { count: 0, lastAttempt: now };
