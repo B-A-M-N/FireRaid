@@ -8,6 +8,23 @@
 (function () {
   "use strict";
 
+  // FR-P1-06: the admin CSRF header name (mirrors ADMIN_CSRF_HEADER in
+  // src/security/admin-auth.ts).
+  const ADMIN_CSRF_HEADER = "X-Fireraid-CSRF";
+  const ADMIN_CSRF_COOKIE = "__Host-fr_admin_csrf";
+
+  // FR-P1-06: cookie-authenticated mutations must echo the CSRF double-submit
+  // cookie in X-Fireraid-CSRF (read from document.cookie; the __Host- prefix
+  // + SameSite=Strict means only this same-site page can supply it).
+  function csrfValue() {
+    try {
+      const m = document.cookie.match(new RegExp("(?:^|;\\s*)" + ADMIN_CSRF_COOKIE + "=([^;]+)"));
+      return m ? decodeURIComponent(m[1]) : "";
+    } catch {
+      return "";
+    }
+  }
+
   const api = {
     async get(path) {
       const resp = await fetch(path, { credentials: "include" });
@@ -18,11 +35,15 @@
       if (!resp.ok) throw new Error(`API error: ${resp.status}`);
       return resp.json();
     },
+
     async post(path, body) {
+      const headers = { "content-type": "application/json" };
+      const csrf = csrfValue();
+      if (csrf) headers[ADMIN_CSRF_HEADER] = csrf;
       const resp = await fetch(path, {
         method: "POST",
         credentials: "include",
-        headers: { "content-type": "application/json" },
+        headers,
         body: body ? JSON.stringify(body) : undefined,
       });
       if (resp.status === 401) {

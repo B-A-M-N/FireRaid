@@ -9,7 +9,7 @@
  * FIX: Single-statement evidence deletion (FR-R4-074).
  */
 import { json, error, withSecurityHeaders } from "../security/headers.js";
-import { requireAdmin, createAdminToken, adminCookieHeader, verifyAdminSecret } from "../security/admin-auth.js";
+import { requireAdmin, requireAdminMutation, createAdminToken, adminCookieHeader, adminCsrfCookieHeader, createAdminCsrfValue, verifyAdminSecret } from "../security/admin-auth.js";
 import { experimentMetrics } from "../analytics/run-metrics.js";
 import { readLabAssignment } from "../core/lab-assignment.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
@@ -62,21 +62,37 @@ export async function adminLogin(req: Request, env: Env): Promise<Response> {
   loginAttempts.delete(clientIp);
   
   const token = await createAdminToken(env);
+  // FR-P1-06: issue the session cookie AND the CSRF double-submit cookie
+  // together. The page JS reads the (non-HttpOnly) CSRF cookie to echo it
+  // back on mutations; the session cookie stays HttpOnly.
+  const csrf = createAdminCsrfValue();
   const resp = json({ ok: true });
   resp.headers.append("set-cookie", adminCookieHeader(token));
+  resp.headers.append("set-cookie", adminCsrfCookieHeader(csrf));
   return resp;
 }
 
-// POST /api/admin/logout — clear admin session cookie
-export async function adminLogout(_req: Request, _env: Env): Promise<Response> {
+// POST /api/admin/logout — clear admin session cookie.
+// FR-P1-06: logout is a cookie mutation and is gated the same way (same-site
+// origin for a browser caller). Bearer callers may log out without CSRF.
+export async function adminLogout(req: Request, env: Env): Promise<Response> {
+  if (!(await requireAdminMutation(req, env))) return error("unauthorized", 401);
   const resp = json({ ok: true });
-  // Clear the cookie by setting Max-Age=0
+  // Clear the cookies by setting Max-Age=0 (both the session and the CSRF
+  // double-submit cookie, SameSite policy mirrored).
   resp.headers.append("set-cookie", [
     "__Host-fr_admin=deleted",
     "Path=/",
     "HttpOnly",
     "Secure",
-    "SameSite=Lax",
+    "SameSite=Strict",
+    "Max-Age=0",
+  ].join("; "));
+  resp.headers.append("set-cookie", [
+    "__Host-fr_admin_csrf=deleted",
+    "Path=/",
+    "Secure",
+    "SameSite=Strict",
     "Max-Age=0",
   ].join("; "));
   return resp;
@@ -342,7 +358,11 @@ const DEFAULT_REVIEW_RETENTION_DAYS = 90;
 const DEFAULT_LAB_RETENTION_DAYS = 90;
 
 export async function adminCleanup(req: Request, env: Env): Promise<Response> {
-  if (!(await requireAdmin(req, env))) return error("unauthorized", 401);
+  // FR-P1-06: cleanup DELETE-rows for real — a destructive cookie mutation
+  // MUST clear the origin+CSRF gate. A Bearer API caller (operator script)
+  // passes with the token alone; a browser cookie caller must present the
+  // CSRF header echoing the CSRF cookie from a same-site origin.
+  if (!(await requireAdminMutation(req, env))) return error("unauthorized", 401);
   if (req.method !== "POST") return error("method not allowed", 405);
 
   const url = new URL(req.url);

@@ -98,10 +98,21 @@ describe("integration: admin", () => {
 
   it("logout clears cookie", async () => {
     if (!(await ensureWorker())) return;
+    // FR-P1-06: a cookie-authenticated mutation must present same-site Origin
+    // + the CSRF double-submit header echoing the CSRF cookie. Mirror a real
+    // browser: parse the CSRF cookie value out of the login Set-Cookie and
+    // send it back in the header.
     const cookie = await login();
+    const csrfMatch = cookie.match(/(?:^|;\s*)__Host-fr_admin_csrf=([^;]+)/);
+    const csrf = csrfMatch?.[1] ?? "";
+    const baseUrl = new URL(BASE);
     const resp = await fetch(`${BASE}/api/admin/logout`, {
       method: "POST",
-      headers: { cookie },
+      headers: {
+        cookie,
+        origin: `${baseUrl.protocol}//${baseUrl.host}`,
+        "X-Fireraid-CSRF": csrf,
+      },
     });
     expect(resp.status).toBe(200);
     const setCookie = resp.headers.get("set-cookie") || "";

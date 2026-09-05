@@ -7,6 +7,8 @@ import {
   createAdminToken,
   verifyAdminToken,
   verifyAdminSecret,
+  requireAdminMutation,
+  createAdminCsrfValue,
   ADMIN_SESSION_TTL,
 } from "../../src/security/admin-auth.js";
 import type { Env } from "../../src/env.js";
@@ -222,5 +224,145 @@ describe("admin-auth: verifyAdminSecret", () => {
     const env = mockEnvWithSecret("short");
     expect(verifyAdminSecret(env, "any")).toBe(false);
     expect(await verifyAdminToken(env, "any-token")).toBe(false);
+  });
+});
+
+describe("admin-auth: FR-P1-06 mutation gate (origin + CSRF)", () => {
+  /** Build a valid real session cookie Request with optional overrides. */
+  async function cookieRequest(env: Env, { origin, csrfHeader, csrfCookie }: {
+    origin: string | null;
+    csrfHeader: string | false;
+    csrfCookie: string | false;
+  }): Promise<Request> {
+    const token = await createAdminToken(env);
+    const headers: Record<string, string> = {
+      cookie: `__Host-fr_admin=${token}`,
+    };
+    if (csrfCookie !== false) headers.cookie += `; __Host-fr_admin_csrf=${csrfCookie}`;
+    if (csrfHeader) headers["X-Fireraid-CSRF"] = csrfHeader;
+    if (origin) headers.origin = origin;
+    headers.host = "admin.example.org";
+    return new Request("http://admin.example.org/api/admin/cleanup", { method: "POST", headers });
+  }
+
+  function bearerRequest(token: string): Request {
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${token}`,
+      host: "admin.example.org",
+    };
+    return new Request("http://admin.example.org/api/admin/cleanup", { method: "POST", headers });
+  }
+
+  it("Bearer caller with a valid token is permitted WITHOUT any CSRF/origin material", async () => {
+    const env = mockEnv();
+    const token = await createAdminToken(env);
+    expect(await requireAdminMutation(bearerRequest(token), env)).toBe("bearer");
+  });
+
+  it("Bearer caller with an invalid token is rejected", async () => {
+    const env = mockEnv();
+    const token = await createAdminToken(env);
+    const req = new Request("http://admin.example.org/api/admin/cleanup", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}bad`, host: "admin.example.org" },
+    });
+    expect(await requireAdminMutation(req, env)).toBeNull();
+  });
+
+  it("cookie caller with same-origin + matching CSRF header is permitted", async () => {
+    const env = mockEnv();
+    const csrf = createAdminCsrfValue();
+    const req = await cookieRequest(env, {
+      origin: "http://admin.example.org",
+      csrfHeader: csrf,
+      csrfCookie: csrf,
+    });
+    expect(await requireAdminMutation(req, env)).toBe("cookie");
+  });
+
+  it("cookie caller with NO Origin is rejected", async () => {
+    const env = mockEnv();
+    const csrf = createAdminCsrfValue();
+    const req = await cookieRequest(env, {
+      origin: null,
+      csrfHeader: csrf,
+      csrfCookie: csrf,
+    });
+    expect(await requireAdminMutation(req, env)).toBeNull();
+  });
+
+  it("cookie caller with a CROSS-ORIGIN Origin is rejected", async () => {
+    const env = mockEnv();
+    const csrf = createAdminCsrfValue();
+    const req = await cookieRequest(env, {
+      origin: "http://evil.example.org", // attacker-controlled origin != Host
+      csrfHeader: csrf,
+      csrfCookie: csrf,
+    });
+    expect(await requireAdminMutation(req, env)).toBeNull();
+  });
+
+  it("cookie caller with a MISMATCHED CSRF header (attacker guess) is rejected", async () => {
+    const env = mockEnv();
+    const csrf = createAdminCsrfValue();
+    const req = await cookieRequest(env, {
+      origin: "http://admin.example.org",
+      csrfHeader: "attacker-forged-value",
+      csrfCookie: csrf,
+    });
+    expect(await requireAdminMutation(req, env)).toBeNull();
+  });
+
+  it("cookie caller with NO CSRF header is rejected", async () => {
+    const env = mockEnv();
+    const csrf = createAdminCsrfValue();
+    const req = await cookieRequest(env, {
+      origin: "http://admin.example.org",
+      csrfHeader: false,
+      csrfCookie: csrf,
+    });
+    expect(await requireAdminMutation(req, env)).toBeNull();
+  });
+
+  it("cookie caller with NO CSRF cookie is rejected (origin alone insufficient)", async () => {
+    const env = mockEnv();
+    const csrf = createAdminCsrfValue();
+    const req = await cookieRequest(env, {
+      origin: "http://admin.example.org",
+      csrfHeader: csrf, // header present but no cookie to match
+      csrfCookie: false,
+    });
+    expect(await requireAdminMutation(req, env)).toBeNull();
+  });
+
+  it("cookie caller without a valid session cookie is rejected even with CSRF material", async () => {
+    const env = mockEnv();
+    const csrf = createAdminCsrfValue();
+    const req = new Request("http://admin.example.org/api/admin/cleanup", {
+      method: "POST",
+      headers: {
+        host: "admin.example.org",
+        origin: "http://admin.example.org",
+        cookie: `__Host-fr_admin=not-a-valid-session; __Host-fr_admin_csrf=${csrf}`,
+        "X-Fireraid-CSRF": csrf,
+      },
+    });
+    expect(await requireAdminMutation(req, env)).toBeNull();
+  });
+
+  it("origin with a non-http(s) scheme is rejected", async () => {
+    const env = mockEnv();
+    const csrf = createAdminCsrfValue();
+    const token = await createAdminToken(env);
+    const req = new Request("http://admin.example.org/api/admin/cleanup", {
+      method: "POST",
+      headers: {
+        host: "admin.example.org",
+        origin: "file:///attacker",
+        cookie: `__Host-fr_admin=${token}; __Host-fr_admin_csrf=${csrf}`,
+        "X-Fireraid-CSRF": csrf,
+      },
+    });
+    expect(await requireAdminMutation(req, env)).toBeNull();
   });
 });

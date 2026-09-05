@@ -12,7 +12,7 @@
  * all.
  */
 import { json, error } from "../security/headers.js";
-import { requireAdmin } from "../security/admin-auth.js";
+import { requireAdminMutation } from "../security/admin-auth.js";
 import { finalizeReview } from "../eval/review-workflow.js";
 import { D1ReviewStore } from "../cloudflare/review-store.js";
 import type { Env } from "../env.js";
@@ -23,7 +23,10 @@ export async function adminReviewDecision(req: Request, env: Env): Promise<Respo
     return error("not found", 404);
   }
 
-  if (!(await requireAdmin(req, env))) return error("unauthorized", 401);
+  // FR-P1-06: a reviewer decision is a state mutation — gate it the same way
+  // as cleanup. Bearer callers pass with the token alone; cookie callers need
+  // same-site origin + the CSRF double-submit header.
+  if (!(await requireAdminMutation(req, env))) return error("unauthorized", 401);
   if (req.method !== "POST") return error("method not allowed", 405);
 
   let body: { sessionId: string; decision: string; reviewerId?: string; note?: string };

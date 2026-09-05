@@ -10,6 +10,14 @@ import type { Env } from "../env.js";
 
 export const ADMIN_SESSION_TTL = 60 * 60 * 1000; // 1 hour
 const ADMIN_COOKIE = "__Host-fr_admin";
+// FR-P1-06: the admin CSRF cookie is separate from the session cookie and is
+// NOT HttpOnly — the admin page JS must READ it to echo it back in the
+// X-Fireraid-CSRF header (double-submit). `__Host-` prefix means a cross-site
+// origin cannot set it, and SameSite=Strict means the browser won't send it
+// on a cross-site request anyway. A cross-site attacker therefore cannot
+// produce the matching header+cookie pair.
+const ADMIN_CSRF_COOKIE = "__Host-fr_admin_csrf";
+export const ADMIN_CSRF_HEADER = "X-Fireraid-CSRF";
 
 // P1-AUDIT-2 (P1-7): the single shared constant-time primitive.
 import { constantTimeTokenEqual as constantTimeEqual } from "../core/tokens.js";
@@ -96,9 +104,96 @@ export function adminCookieHeader(token: string): string {
     "Path=/",
     "HttpOnly",
     "Secure",
-    "SameSite=Lax",
+    // FR-P1-06: the admin interface has no real cross-site flow (it is a
+    // same-origin dashboard), so SameSite=Strict is safe and defence-in-depth
+    // on top of the explicit origin+CSRF gate for cookie mutations. A strict
+    // cookie is not sent on ANY cross-site request — not even top-level POST
+    // navigations that would usually slip by Lax.
+    "SameSite=Strict",
     `Max-Age=${Math.floor(ADMIN_SESSION_TTL / 1000)}`,
   ].join("; ");
+}
+
+/** FR-P1-06: a random, unguessable CSRF value for double-submit. */
+export function createAdminCsrfValue(): string {
+  const raw = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(raw).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** FR-P1-06: the CSRF double-submit cookie — readable by page JS (no
+ * HttpOnly) so the dashboard can echo it back in the header. */
+export function adminCsrfCookieHeader(value: string): string {
+  return [
+    `${ADMIN_CSRF_COOKIE}=${value}`,
+    "Path=/",
+    "Secure",
+    "SameSite=Strict",
+    `Max-Age=${Math.floor(ADMIN_SESSION_TTL / 1000)}`,
+  ].join("; ");
+}
+
+/** FR-P1-06: read the CSRF cookie value, if present. */
+export function getAdminCsrf(req: Request): string | null {
+  const cookies = parseCookies(req.headers.get("cookie"));
+  return cookies.get(ADMIN_CSRF_COOKIE) ?? null;
+}
+
+/**
+ * FR-P1-06: exact-origin check for cookie-authenticated mutations.
+ *
+ * A cross-site request from a browser carries an Origin equal to the
+ * ATTACKER's origin, which cannot equal the request Host (the victim's
+ * origin). Requiring Origin === Host therefore rejects cross-site POSTs. A
+ * cookie-authenticated mutation with NO Origin header is also rejected — a
+ * same-origin browser POST always sends Origin, so its absence on a cookie
+ * call is anomalous and safest to refuse (Bearer API callers bypass this
+ * entirely).
+ */
+function sameSiteOrigin(req: Request): boolean {
+  const origin = req.headers.get("origin");
+  if (!origin) return false;
+  let u: URL;
+  try {
+    u = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  const host = req.headers.get("host");
+  if (!host) return false;
+  return u.host === host;
+}
+
+/**
+ * FR-P1-06: admin mutation gate — explicit auth contract.
+ *
+ *   Bearer API caller  → authorization token; NO CSRF requirement (the token
+ *                        is the credential, and cross-origin thieves cannot
+ *                        read it to forge the header).
+ *   Browser cookie     → session cookie AND exact expected Origin AND admin
+ *                        CSRF double-submit (header echoes the CSRF cookie).
+ *
+ * Returns "bearer" | "cookie" on success (callers may want to know which path
+ * authenticated), or null when the request is not permitted to mutate.
+ */
+export async function requireAdminMutation(req: Request, env: Env): Promise<"bearer" | "cookie" | null> {
+  const auth = req.headers.get("authorization");
+  if (auth?.startsWith("Bearer ")) {
+    if (!(await verifyAdminToken(env, auth.slice(7)))) return null;
+    return "bearer";
+  }
+  // Browser cookie caller.
+  const token = getAdminToken(req);
+  if (!token) return null;
+  if (!(await verifyAdminToken(env, token))) return null;
+  if (!sameSiteOrigin(req)) return null;
+  // Double-submit: the header must exactly match the CSRF cookie. Without
+  // this, a CSRF token stolen/propagated across tools (or a cookie that
+  // leaked in a non-HttpOnly form) would pass the origin check alone.
+  const csrf = getAdminCsrf(req);
+  if (!csrf) return null;
+  if (req.headers.get(ADMIN_CSRF_HEADER) !== csrf) return null;
+  return "cookie";
 }
 
 export function getAdminToken(req: Request): string | null {
