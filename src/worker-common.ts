@@ -72,6 +72,18 @@ export function validateConfig(env: Env): string | null {
       if (!env.TURNSTILE_SITE_KEY || !env.TURNSTILE_SECRET_KEY) {
         return "Production requires both TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY";
       }
+
+      // FR-P1-07: the in-isolate login map is a secondary, per-isolate guard;
+      // a production deployment MUST also declare an authoritative edge
+      // limiter for /api/admin/login (Cloudflare WAF rate-limit rule / Access
+      // / the ratelimit binding). FIRERAID_RATE_LIMIT_LOGIN is that
+      // declaration (its value names the rule/plan; presence is what matters).
+      // Without it the deployment's only login protection is a single
+      // isolate's best-effort map — not an acceptable brute-force contract for
+      // a real production admin surface.
+      if (!env.FIRERAID_RATE_LIMIT_LOGIN || env.FIRERAID_RATE_LIMIT_LOGIN === "REPLACE_WITH_EDGE_LIMITER_NAME") {
+        return "Production requires FIRERAID_RATE_LIMIT_LOGIN (declare the authoritative edge rate-limiter for /api/admin/login)";
+      }
     }
   }
 

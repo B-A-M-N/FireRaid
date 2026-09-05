@@ -112,6 +112,18 @@ if (!hostname) {
   pass("production-hostname", `TURNSTILE_EXPECTED_HOSTNAME=${hostname}`);
 }
 
+// FR-P1-07: production must declare an authoritative edge limiter for
+// /api/admin/login. The in-isolate login map is a secondary per-isolate
+// guard only; a placeholder or missing value is a deployment defect.
+const rateLimitLogin = productionVars.FIRERAID_RATE_LIMIT_LOGIN;
+if (!rateLimitLogin) {
+  fail("rate-limit-login", "production env FIRERAID_RATE_LIMIT_LOGIN is unset — declare the authoritative edge rate-limiter (WAF/Access/ratelimit) for /api/admin/login");
+} else if (rateLimitLogin === "REPLACE_WITH_EDGE_LIMITER_NAME") {
+  fail("rate-limit-login", "FIRERAID_RATE_LIMIT_LOGIN still carries the tracked placeholder — set it to the actual limiter rule/plan name");
+} else {
+  pass("rate-limit-login", `FIRERAID_RATE_LIMIT_LOGIN=${rateLimitLogin}`);
+}
+
 // ── Production entrypoint import graph (FR-P1-05) ────────────────────────
 // The production Worker must not bundle the evaluation control plane at all
 // (src/eval/, lab routes, the review-decision write). A config that lets the

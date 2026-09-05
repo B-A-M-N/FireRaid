@@ -216,13 +216,27 @@ npx wrangler d1 migrations list fireraid-production --env production --remote
 # 3. Apply any outstanding migrations (same explicit database + env).
 npx wrangler d1 migrations apply fireraid-production --env production --remote
 
-# 4. Preflight + deploy. predeploy:production runs FIRST and fails closed on
+# 4. Set FIRERAID_RATE_LIMIT_LOGIN in the production env to name the
+#    authoritative edge rate-limiter (WAF rate-limit rule / Access / the
+#    ratelimit binding) protecting /api/admin/login. The Worker's in-isolate
+#    login map is a secondary per-isolate guard only — a production deploy is
+#    REFUSED until this is declared (FR-P1-07).
+#    → wrangler.jsonc → env.production.vars.FIRERAID_RATE_LIMIT_LOGIN
+
+# 5. Preflight + deploy. predeploy:production runs FIRST and fails closed on
 #    a placeholder/absent production DB id, a collision with the public-lab DB,
-#    LAB_MODE != false, a missing TURNSTILE_EXPECTED_HOSTNAME, a failed
-#    dry-run, or unapplied remote migrations (it refuses to certify "none"
-#    without a live CLOUDFLARE_API_TOKEN).
+#    LAB_MODE != false, a missing TURNSTILE_EXPECTED_HOSTNAME, an undeclared
+#    AUTHORITATIVE LOGIN LIMITER, a production Worker that bundles the eval
+#    control plane, a failed dry-run, or unapplied remote migrations (it
+#    refuses to certify "none" without a live CLOUDFLARE_API_TOKEN).
 npm run deploy:production        # == predeploy:production && wrangler deploy --env production
 npm run deploy:lab               # named-env deploys only
+
+# The production Worker (env production / production-test) binds
+# src/worker-production.ts — the PRODUCT-ONLY entrypoint that has no import
+# path into the evaluation control plane (src/eval/, lab routes, review
+# decision writes). The lab Worker (src/index.ts) is used by dev/test/public-lab.
+# See docs/INVARIANTS.md / the check:production-graph gate (FR-P1-05).
 ```
 
 After the deploy, smoke the **exact deployed worker version** against the

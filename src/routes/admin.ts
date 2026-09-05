@@ -20,9 +20,49 @@ import { runRetentionSweep } from "../cloudflare/retention.js";
 // POST /api/admin/login — exchange ADMIN_SECRET for a session cookie
 // FIX: Constant-time secret comparison to prevent timing attacks
 // FR-R3-069: Brute-force control via in-memory rate limiting
+//
+// FR-P1-07: the in-memory map is a SECONDARY, best-effort guard that sits
+// INSIDE a single isolate. It is NOT the authoritative control — the
+// deployment contract requires an authoritative edge limiter (Cloudflare WAF
+// rate-limit rule / Access / the ratelimit binding) for /api/admin/login,
+// enforced for production in config verification and the predeploy gate
+// (FIRERAID_RATE_LIMIT_LOGIN). The map here is bounded and swept so a flood
+// of distinct client IPs cannot grow per-isolate memory without bound (a
+// DoS in its own right).
 const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+/** FR-P1-07: hard cap on distinct tracked IPs so per-isolate memory is bounded. */
+export const MAX_LOGIN_TRACKED_IPS = 5_000;
+/** FR-P1-07: sweep expired entries at most this often (bounded cost per call). */
+export const LOGIN_SWEEP_INTERVAL_MS = 60_000;
+let lastLoginSweep = 0;
+
+/**
+ * FR-P1-07: bound + sweep the fallback login map.
+ *
+ * Removes entries older than the window (so an idle IP never pins a row
+ * forever), then, if the map is still at its capacity cap, evicts the entry
+ * with the oldest lastAttempt. This keeps the number of tracked IPs bounded
+ * no matter how many distinct source IPs hit the login endpoint.
+ */
+export function pruneLoginAttempts(now: number): void {
+  if (now - lastLoginSweep < LOGIN_SWEEP_INTERVAL_MS) return;
+  lastLoginSweep = now;
+  for (const [ip, entry] of loginAttempts) {
+    if (now - entry.lastAttempt > LOGIN_WINDOW_MS) loginAttempts.delete(ip);
+  }
+  if (loginAttempts.size > MAX_LOGIN_TRACKED_IPS) {
+    // Evict the oldest tracker(s) down to the cap. Logins are low-frequency,
+    // so a linear scan to find the oldest is acceptable and only runs when
+    // the cap is breached.
+    const entries = [...loginAttempts.entries()].sort((a, b) => a[1].lastAttempt - b[1].lastAttempt);
+    for (const [ip] of entries) {
+      if (loginAttempts.size <= MAX_LOGIN_TRACKED_IPS) break;
+      loginAttempts.delete(ip);
+    }
+  }
+}
 
 export async function adminLogin(req: Request, env: Env): Promise<Response> {
   if (req.method !== "POST") return error("method not allowed", 405);
@@ -32,8 +72,9 @@ export async function adminLogin(req: Request, env: Env): Promise<Response> {
   // x-forwarded-for/x-real-ip are attacker-controlled request headers.
   // NOTE: this in-memory map is per-isolate and best-effort — platform-level
   // rate limiting (WAF rule / Access) is the authoritative control.
-  const clientIp = req.headers.get("cf-connecting-ip") || "unknown";
   const now = Date.now();
+  pruneLoginAttempts(now); // FR-P1-07: bound + sweep the per-isolate fallback
+  const clientIp = req.headers.get("cf-connecting-ip") || "unknown";
   const attempts = loginAttempts.get(clientIp);
   
   if (attempts) {

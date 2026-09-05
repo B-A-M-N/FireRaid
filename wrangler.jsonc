@@ -171,7 +171,12 @@
         // P0-AUDIT-3 release smoke: the hostname the Turnstile widget is
         // bound to (workers.dev subdomain deploy). Secrets (site/secret
         // keys) ride wrangler secret, never the tracked config.
-        "TURNSTILE_EXPECTED_HOSTNAME": "fireraid-production.benevolentjoker.workers.dev"
+        "TURNSTILE_EXPECTED_HOSTNAME": "fireraid-production.benevolentjoker.workers.dev",
+        // FR-P1-07: REQUIRED — names the authoritative edge rate-limiter
+        // (WAF rate-limit rule / Access / ratelimit binding) protecting
+        // /api/admin/login. The in-isolate login map is a secondary guard
+        // only; set this to your actual rule/plan name before deploying.
+        "FIRERAID_RATE_LIMIT_LOGIN": "REPLACE_WITH_EDGE_LIMITER_NAME"
       }
     },
     // P1 (P0-AUDIT-3 follow-up): the production-SHAPE test tier — the real

@@ -67,6 +67,15 @@ export interface Env {
   FIRERAID_LAB_RETENTION_DAYS?: string;
   /** FR-R7-021: persist ALL production verification attempts (audit opt-in). */
   FIRERAID_AUDIT_VERIFICATION_ATTEMPTS?: string;
+  /**
+   * FR-P1-07: REQUIRED in real production. Declares the authoritative edge
+   * rate-limiter for /api/admin/login (Cloudflare WAF rate-limit rule /
+   * Access / the ratelimit binding). The in-isolate login map is a secondary
+   * per-isolate guard only; validateConfig refuses a production deployment
+   * that has not declared this limiter. Value is informational (names the
+   * rule/plan); presence is what the gate checks.
+   */
+  FIRERAID_RATE_LIMIT_LOGIN?: string;
 }
 
 export function isLabMode(env: Env): boolean {
