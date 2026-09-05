@@ -5,7 +5,11 @@
  * The npm tarball is the published contract. This gate proves, for THIS
  * tree, that the contract actually loads: build → pack → install the
  * tarball into an empty temp project → import EVERY declared subpath →
- * construct the middleware and run one GET/POST admission round-trip.
+ * construct the middleware and run one GET/POST admission round-trip →
+ * compile a TypeScript consumer against the installed .d.ts (stage 5 uses
+ * node import(), which ignores the "types" condition — without stage 6 a
+ * missing/stale declaration file would pass this gate and break every TS
+ * consumer at tsc time).
  *
  * This gate exists because release:verify can otherwise certify a package
  * nobody can import (the exports map once pointed at files that did not
@@ -61,7 +65,6 @@ try {
   // 4. Import every declared subpath + run the functional smoke FROM the
   //    installed copy (resolution through the consumer's node_modules).
   const smoke = `
-    const pkg = await import("${tarballToSpecifier(join(proj, "node_modules", "fireraid"))}");
     const root = await import("fireraid");
     const node = await import("fireraid/node");
     const adapters = await import("fireraid/adapters");
@@ -110,14 +113,56 @@ try {
   const smokePath = join(proj, "smoke.mjs");
   writeFileSync(smokePath, smoke);
   run("import every subpath + functional smoke", "node", ["smoke.mjs"], { cwd: proj });
+
+  // 6. TYPES-consumer stage: Node's import() ignores the "types" condition,
+  // so the .d.ts half of the exports contract is unexercised by stage 5 —
+  // a tarball with a missing or stale dist/**/*.d.ts would pass above and
+  // then break every TypeScript consumer at tsc time (TS2307/TS2305).
+  // Compile a real TS consumer against the INSTALLED tarball.
+  const consumerTs = `
+    import { createFireRaidMiddleware, admit, ReferenceSessionAdapter } from "fireraid";
+    import { createOriginServer } from "fireraid/node";
+    import { referenceInject } from "fireraid/adapters";
+    import { createEvaluationMiddleware } from "fireraid/evaluation";
+
+    // Touch one exported VALUE from each subpath so type-only elision cannot
+    // hide a broken module, and assert a couple of TYPES so declaration
+    // errors surface at compile time.
+    const deps = createFireRaidMiddleware as unknown as (opts: Record<string, unknown>) => Record<string, unknown>;
+    void deps; void admit; void ReferenceSessionAdapter; void createOriginServer;
+    void referenceInject; void createEvaluationMiddleware;
+    const _n: number = 1;
+    void _n;
+  `.trim();
+  writeFileSync(join(proj, "consumer.ts"), consumerTs);
+  writeFileSync(
+    join(proj, "tsconfig.json"),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          // nodenext honors the exports map's "types" condition exactly as
+          // a real consumer's bundler/tsc would.
+          module: "nodenext",
+          moduleResolution: "nodenext",
+          target: "es2022",
+          strict: true,
+          noEmit: true,
+          skipLibCheck: false,
+        },
+        include: ["consumer.ts"],
+      },
+      null,
+      2
+    )
+  );
+  run(
+    "typescript consumer compiles against installed .d.ts",
+    process.execPath,
+    [join(ROOT, "node_modules", "typescript", "bin", "tsc"), "-p", join(proj, "tsconfig.json")],
+    { cwd: proj }
+  );
   console.log(`\nsmoke project: ${proj}`);
 } finally {
   rmSync(proj, { recursive: true, force: true });
   rmSync(tarball, { force: true });
-}
-
-/** The installed package directory name comes from the packed manifest. */
-function tarballToSpecifier(installDir) {
-  void installDir;
-  return "fireraid"; // npm installs under the manifest name, which "fireraid" is
 }

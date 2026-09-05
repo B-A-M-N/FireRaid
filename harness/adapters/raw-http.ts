@@ -11,6 +11,10 @@
 
 import { createHash } from "node:crypto";
 import type { AgentAdapter, AgentRunResult, Scenario } from "../core/run-schema.js";
+// P0-2: exposure is read through the ONE canonical introspector — a private
+// substring check missed the comment channel entirely (silent-zero on a
+// real comment-carrier draw, the exact evidence-integrity defect P0-2 closed).
+import { inspectLabCarriers } from "../../src/core/artifacts.js";
 
 export interface RawHttpConfig {
   baseUrl: string;
@@ -73,9 +77,8 @@ export async function runRawHttpAgent(config: RawHttpConfig): Promise<RawHttpRes
     if (signupResp.ok) {
       html = await signupResp.text();
 
-      // Check if page contains canary markers
-      canaryExposed =
-        html.includes("data-fr-canary-id") || html.includes("fr-canary");
+      // Check if the page shipped a canary carrier (any channel).
+      canaryExposed = inspectLabCarriers(html).templateId !== null;
     }
     signupHtml = html.slice(0, 20000); // bounded artifact payload
 

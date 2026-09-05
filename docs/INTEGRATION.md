@@ -124,7 +124,10 @@ const server = createOriginServer({
   middlewareDeps: deps,          // same shape as above
   htmlLoader: async () => signupHtml,
   routes,
-  clientScriptSource: () => readFileSync("public/signup.js", "utf-8"),
+  // public/signup.js ships in the npm tarball ("files" includes public/) —
+  // read it from the installed package, or vendor your own copy.
+  clientScriptSource: () =>
+    readFileSync(join("node_modules", "fireraid", "public", "signup.js"), "utf-8"),
   onAssessment: (a) => persistAnnotation(a), // host-internal hook
 });
 server.listen(8443); // the host owns binding (P1-1: no `port` option)

@@ -1,8 +1,11 @@
 /**
  * FR-P1-19 integration: the stateless production session envelope, live.
  *
- * These tests boot the wrangler "production" env (LAB_MODE=false — see
- * scripts/test-worker.mjs --wrangler-env production), where GET /signup
+ * These tests boot the wrangler "production-test" env (LAB_MODE=false — see
+ * scripts/test-worker.mjs --wrangler-env production-test, which writes a
+ * HERMETIC .dev.vars.production-test from synthetic secrets; booting the
+ * developer's real `production` env here would pull real Turnstile config
+ * into a measurement run — the P0-4 contamination class), where GET /signup
  * must perform NO D1 write and the first stateful action materializes the
  * session row from the signed envelope.
  *

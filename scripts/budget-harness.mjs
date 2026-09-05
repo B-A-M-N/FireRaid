@@ -103,6 +103,7 @@ const BUDGETS = {
 // ── Worker lifecycle ───────────────────────────────────────────────────────
 
 let worker = null;
+let workerOutTail = [];
 async function startWorker() {
   // P0-4: production-TEST, never the developer's real `production` env. The
   // bootstrap writes a hermetic .dev.vars.production-test (synthetic secrets)
@@ -121,19 +122,50 @@ async function startWorker() {
     "--wrangler-env", "production-test",
   ], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
   worker.stdout.on("data", () => {});
+  // Readiness = the supervisor's own lifecycle lines, read from its piped
+  // stderr: "[test-worker] healthy at <base>" (printed after its
+  // identity-checked handoff gate: health + "Ready on OUR port" ready-line
+  // reconciliation) and then "no command given — idling" (printed after the
+  // Turnstile-disabled probe — the bootstrap's OWN signup+submit traffic —
+  // completes). Waiting for "idling" means scenario windows start AFTER all
+  // bootstrap traffic, so no probe requests pollute the first scenario.
+  // Polling /health here directly would race that gate: a stale workerd
+  // from an earlier run answers /health on this port too, and the
+  // trace-store "newest by mtime" selection would then read THAT worker's
+  // spans as fresh measurements — PASS against code that may not even be
+  // this tree. Supervisor exit at any point during the wait is fatal.
+  let healthyAt = null;
+  let idling = false;
   worker.stderr.on("data", (d) => {
-    if (process.env.BUDGET_VERBOSE) process.stderr.write(`[worker] ${d}`);
+    const text = d.toString();
+    workerOutTail.push(text);
+    if (workerOutTail.length > 50) workerOutTail.shift();
+    const m = text.match(/\[test-worker\] healthy at (\S+)/);
+    if (m) healthyAt = m[1];
+    if (text.includes("no command given — idling")) idling = true;
+    if (process.env.BUDGET_VERBOSE) process.stderr.write(`[worker] ${text}`);
   });
-  const deadline = Date.now() + 90_000;
+  const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
-    if (worker.exitCode !== null) throw new Error("worker died during startup");
-    try {
-      const r = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(2000) });
-      if (r.ok) return;
-    } catch { /* not up yet */ }
-    await sleep(400);
+    if (worker.exitCode !== null || worker.signalCode !== null) {
+      throw new Error(
+        `worker supervisor exited during startup (code=${worker.exitCode} signal=${worker.signalCode}):\n` +
+        workerOutTail.join("")
+      );
+    }
+    if (idling) {
+      if (healthyAt !== BASE) {
+        throw new Error(`supervisor announced ${healthyAt}, harness expected ${BASE} — port mismatch`);
+      }
+      return;
+    }
+    await sleep(300);
   }
-  throw new Error("worker failed to become healthy in 90s");
+  throw new Error(
+    `worker never reached the idle-ready marker "[test-worker] … no command given — idling" in 120s ` +
+    `(healthyAt=${healthyAt}):\n` +
+    workerOutTail.join("")
+  );
 }
 
 async function stopWorker() {

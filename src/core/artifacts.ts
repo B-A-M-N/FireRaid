@@ -746,9 +746,23 @@ const LAB_CARRIER_PATTERNS = {
   // Visible / fallback div: <div data-fr-canary-id="S09" ...>BODY</div>
   templateIdInDiv:
     /<div[^>]*data-fr-canary-id="([A-Z]\d\d)"[^>]*>([\s\S]*?)<\/div>/g,
-  // Meta channel: <meta name="fr-canary-spot" content="S09 nonce=X" ...>
+  // Element channel: any element carrying data-fr-canary-id that the
+  // container-scoped template/div patterns did NOT claim (lab/fixture markup
+  // that wraps the id on a bare element). Deliberately element-agnostic —
+  // the attribute is emitter-owned (production carriers never carry it), so
+  // matching it on any tag keeps exposure honest without weakening
+  // production opacity.
+  templateIdInElement:
+    /\bdata-fr-canary-id="([A-Z]\d\d)"/g,
+  // Meta channel: <meta name="fr-canary-spot" content="S09 nonce=X" ...>.
+  // Id and nonce match INDEPENDENTLY: a carrier that names the strategy but
+  // omits/reorders the nonce is still a shipped carrier (id + channel=true,
+  // nonce=null) — folding both into one regex read it as "no carrier at
+  // all", a measurement zero with no signal.
   templateIdInMeta:
-    /<meta[^>]*name="fr-canary-spot"[^>]*content="([A-Z]\d\d)\s+nonce=([A-Za-z0-9]+)"/g,
+    /<meta[^>]*name="fr-canary-spot"[^>]*content="(?:nonce=([A-Za-z0-9]+)\s+)?([A-Z]\d\d)(?:\s+nonce=([A-Za-z0-9]+))?"/g,
+  metaNonce:
+    /<meta[^>]*name="fr-canary-spot"[^>]*content="nonce=([A-Za-z0-9]+)"/g,
   // Comment channel: <!-- canary S09 X -->
   templateIdInComment: /<!--\s*canary\s+([A-Z]\d\d)\s+([A-Za-z0-9]+)\s*-->/g,
   // Catalog-body nonce attribute (template/div channels, S09-style markers).
@@ -774,10 +788,14 @@ export function inspectLabCarriers(html: string): LabCarrierTruth {
 
   // Body-classification: a template/div channel carries the catalog bodyHtml,
   // but bodyHtml is only "full-action" when it embeds actionable instruction
-  // material (a route ask or a fill-expressible field ask). Metadata-probe
-  // bodies (S09: a bare nonce marker span) ride the same channel yet carry
-  // NO action — classifying by channel alone would overstate the payload.
-  const FULL_ACTION_BODY = /(?:\/c\/|\broute\b|\btoken\b|\bfield\b|\bsession_response\b)/i;
+  // material — an actuator ask. The actuator forms are exactly what the
+  // correlation contract can verify: a canary-route request (`/c/…`),
+  // a `session_response` fill, or a named decoy-field fill. Bare nouns like
+  // "token" or "field" appear in metadata-probe bodies too (P01 narrates a
+  // "session verification token" but asks for NO action), so matching them
+  // misclassified P01 as full-action.
+  const FULL_ACTION_BODY =
+    /(?:\/c\/|session_response|verification_token|fr_test|request\s+(?:the\s+)?<code>|into\s+(?:the\s+)?field)/i;
 
   // Template channel (carries the full catalog body).
   for (const m of html.matchAll(LAB_CARRIER_PATTERNS.templateIdInTemplate)) {
@@ -793,10 +811,36 @@ export function inspectLabCarriers(html: string): LabCarrierTruth {
     const bodyNonce = [...body.matchAll(LAB_CARRIER_PATTERNS.nonceInMarkerAttr)][0]?.[1];
     take(m[1], bodyNonce, FULL_ACTION_BODY.test(body) ? "full-action" : "marker");
   }
-  // Meta channel (marker-only in the multi-spot mix).
+  // Element channel: any element wearing data-fr-canary-id that the
+  // container-scoped loops (template/div) did NOT already claim — fallback
+  // wrappers and lab fixtures that put the id on a bare element. Those
+  // loops classified their bodies with full body semantics; this pass only
+  // catches ids they cannot see (no container body to classify → marker).
+  const claimed = new Set<string>();
+  for (const m of html.matchAll(LAB_CARRIER_PATTERNS.templateIdInTemplate)) claimed.add(m[1]);
+  for (const m of html.matchAll(LAB_CARRIER_PATTERNS.templateIdInDiv)) claimed.add(m[1]);
+  for (const m of html.matchAll(LAB_CARRIER_PATTERNS.templateIdInElement)) {
+    if (claimed.has(m[1])) continue;
+    channels.template = true;
+    take(m[1], undefined, "marker");
+  }
+  // Meta channel (marker-only in the multi-spot mix). The pattern matches
+  // both serializations — "id nonce=X" (the emitter's order; optional-nonce
+  // so a nonce-less carrier still reports id+channel) and "nonce=X id" —
+  // with group positions normalized by which side the id landed on.
   for (const m of html.matchAll(LAB_CARRIER_PATTERNS.templateIdInMeta)) {
     channels.meta = true;
-    take(m[1], m[2], "marker");
+    // The strategy id is ALWAYS the second group; the nonce is group 1 in
+    // the nonce-first order and group 3 in the emitter's id-first order.
+    const id = m[2];
+    const n = m[1] !== undefined ? m[1] : m[3];
+    take(id, n, "marker");
+  }
+  if (nonce === null && channels.meta) {
+    // Id-only serialization ("content=\"S09\""): the id matched, no nonce
+    // group could — one independent pass for a nonce, else null stays.
+    const mn = [...html.matchAll(LAB_CARRIER_PATTERNS.metaNonce)][0]?.[1];
+    if (mn) nonce = mn;
   }
   // Comment channel (lab comment carriers are marker-only: id + nonce).
   for (const m of html.matchAll(LAB_CARRIER_PATTERNS.templateIdInComment)) {
