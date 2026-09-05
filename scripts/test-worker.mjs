@@ -429,7 +429,7 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
             const close = stat.lastIndexOf(")");
             // /proc/<pid>/stat format after comm): state ppid pgrp session ...
             // state = fields[0], ppid = fields[1], pgrp = fields[2]
-            const fields = stat.slice(close + 2).split(/\s+/);
+            const fields = stat.slice(close + 2).split(/\\s+/);
             procs.set(Number(d), { ppid: Number(fields[1]), comm: (readFileSync("/proc/" + d + "/comm", "utf8") || "").trim() });
           } catch {}
         }
@@ -465,7 +465,7 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
         // dead for our purposes.
         const stat = readFileSync("/proc/" + SUP + "/stat", "utf8");
         const close = stat.lastIndexOf(")");
-        const state = stat.slice(close + 2).split(/\s+/)[0];
+        const state = stat.slice(close + 2).split(/\\s+/)[0];
         alive = state !== "Z";
       } catch { alive = false; }
       if (!alive) break;
@@ -479,7 +479,7 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
         try {
           const stat = readFileSync("/proc/" + pid + "/stat", "utf8");
           const close = stat.lastIndexOf(")");
-          pgid = Number(stat.slice(close + 2).split(/\s+/)[2]);
+          pgid = Number(stat.slice(close + 2).split(/\\s+/)[2]);
         } catch {}
         try { process.kill(-pgid, "SIGKILL"); } catch {}
         try { process.kill(pid, "SIGKILL"); } catch {}
@@ -515,7 +515,8 @@ function recordOutput(chunk) {
     // around the URL), which broke the "Ready on <url>" regex and made the
     // P0-4 ready-line guard false-positive against our own healthy child.
     // Diagnostics keep the RAW line (colors help humans; matches need clean).
-    const line = rawLine.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").trim();
+    const ESC = String.fromCharCode(27); // lint-clean ANSI escape (no-control-regex)
+    const line = rawLine.split(ESC + "[").map((part, i) => i === 0 ? part : part.replace(/^[0-9;]*[A-Za-z]/, "")).join("").trim();
     if (!line) continue;
     outputTail.push(line);
     if (outputTail.length > OUTPUT_TAIL_LINES) outputTail.shift();

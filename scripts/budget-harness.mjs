@@ -522,7 +522,7 @@ const SCENARIOS = {
     // Test infrastructure must learn treatment from authoritative
     // derivation, never from presentation.
     for (let attempt = 0; attempt < 20; attempt++) {
-      const { sid, cookieValue } = await signup();
+      const { cookieValue } = await signup();
       const profile = await deriveProfileFromEnvelope(cookieValue);
       if (!profile) throw new Error("verified-canary: envelope failed harness-side verification");
       const token = profile.decoyRoute?.endpointToken;

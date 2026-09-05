@@ -70,6 +70,9 @@ wiring time and throws `MiddlewareConfigError` on any gap:
 - `canaryStore` — REQUIRED (the P02/P04 strategies need verified
   route-evidence storage; a deployment that cannot observe a causal
   channel must not announce it)
+- `submissionStore` — REQUIRED (FR-P0-02: the durable
+  claim/replay/complete record that makes "one session → one irreversible
+  forward" true across retries and restarts)
 - `session`, `render`, `telemetry`, `enforcement` adapters
 - `verification` — if present, must be a real verifier (the disabled
   no-op test verifier is rejected)
@@ -80,6 +83,12 @@ wiring time and throws `MiddlewareConfigError` on any gap:
 - `profileKeys` — REQUIRED production key ring, validated (ids, lengths,
   duplicates); production configurations without it are rejected at
   wiring time
+- **Durability is asserted, exactly**: every evidence store
+  (`telemetry`, `canaryStore`, `submissionStore`) must carry
+  `durability: "durable"` — the literal string. An adapter that omits the
+  field, misspells it, or declares `"volatile"` fails wiring. There is no
+  production opt-out; in-memory stores belong to the evaluation plane
+  (below).
 
 ```ts
 const deps = createFireRaidMiddleware({
@@ -94,9 +103,14 @@ const deps = createFireRaidMiddleware({
   csrfSecret,
   session: new ReferenceSessionAdapter(secret),
   render: { inject: referenceInject },
-  telemetry: new ReferenceTelemetryAdapter(),
+  // ── Durable evidence stores (YOUR adapters over YOUR database) ──────
+  // Each MUST set durability: "durable" — the exact string. Implement the
+  // interface over D1/Postgres/R2/…; the reference in-memory stores are
+  // "volatile" and are REJECTED here.
+  telemetry: myDurableTelemetry,    // { durability: "durable", accept, collect }
+  canaryStore: myDurableCanaryStore,// { durability: "durable", record, readVerified, drop }
+  submissionStore: myDurableSubmissions, // { durability: "durable", claim, complete, lookupFinal? }
   enforcement: { allow: myUpstreamCreate, deny: myDenyHook },
-  canaryStore: new ReferenceCanaryStore(),
   verification: myVerifier, // optional — must be a real verifier
 });
 
@@ -107,6 +121,27 @@ const result = await admit(request, deps, htmlLoader);
 // The middleware's HTTP responses are decision-blind: a denied submission
 // and an accepted one are indistinguishable on the wire.
 ```
+
+A minimal durable `submissionStore` over SQL looks like:
+
+```ts
+const submissionStore = {
+  durability: "durable" as const,
+  async claim(sessionId: string, idempotencyKey: string) {
+    // Conditional INSERT/UPDATE: succeeds exactly once per session.
+    // INSERT INTO submission_claims (session_id, idempotency_key, state)
+    // VALUES (?, ?, 'open') — unique(session_id) → conflict when held,
+    // replay when a terminal outcome row exists.
+    ...
+  },
+  async complete(claimId: string, outcome) { /* persist outcome; release on definite transport failure */ },
+  async lookupFinal(sessionId: string) { /* stored terminal outcome or null */ },
+};
+```
+
+Send the claim's `idempotencyKey` to your upstream with the forward
+(`Idempotency-Key` header) when the upstream supports it — that is what
+makes a post-send timeout reconcilable instead of a possible duplicate.
 
 Route the `Request` objects for your four routes into `admit`; it
 dispatches page renders, submissions, telemetry batches, and canary-route
@@ -152,14 +187,18 @@ keep.
 Two storage caveats:
 
 - The reference stores (`ReferenceTelemetryAdapter`,
-  `ReferenceCanaryStore`) are **volatile** — in-process, lost on restart.
-  They declare `durability: "volatile"` (FR-P1-03) and the PRODUCTION factory
-  (`createFireRaidMiddleware`) THROWS `MiddlewareConfigError` when handed one
-  — evidence that disappears on restart cannot anchor review decisions or a
-  one-submission claim. The EVALUATION constructor (`createEvaluationMiddleware`)
-  permits volatile stores via `{ allowVolatile: true }`. Fine for local
-  development and integration; production deployments must wire durable
-  adapters.
+  `ReferenceCanaryStore`, `ReferenceSubmissionStore`) are **volatile** —
+  in-process, lost on restart. They declare `durability: "volatile"`
+  (FR-P1-03) and the PRODUCTION factory (`createFireRaidMiddleware`)
+  THROWS `MiddlewareConfigError` when handed one — evidence that
+  disappears on restart cannot anchor review decisions or a one-submission
+  claim. The durable check is EXACT: a store whose `durability` is
+  `undefined` (the field never set) is equally rejected. The sanctioned
+  non-durable path is `createEvaluationMiddleware` (or
+  `createEvaluationOriginServer` for the Node runtime) — there is no
+  production opt-out and no public bypass. Fine for local development and
+  integration; production deployments must wire durable adapters and
+  label them truthfully.
 - **`forward-failed`**: when the upstream registration cannot be forwarded
   AND your enforcement adapter did not durably capture the application,
   `admit()` returns `kind: "forward-failed"` and the reference runtime
@@ -168,7 +207,9 @@ Two storage caveats:
   the application in your own durable pending store to get the admit path
   with at-least-once forwarding semantics.
 
-`examples/origin-server.mjs` is a complete runnable integration.
+`examples/origin-server.mjs` is a complete runnable integration (local-dev
+posture: honestly-volatile stores through `createEvaluationOriginServer`;
+its header documents exactly what a production wiring must change).
 
 ## The Browser Client
 

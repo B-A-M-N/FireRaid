@@ -118,7 +118,7 @@ const VIOLATIONS = [
   },
   {
     name: "D1Database/KVNamespace annotation",
-    test: (edge, content, file) => {
+    test: (edge, content, _file) => {
       const lines = content.split("\n");
       return lines.some((l) => {
         const code = l.replace(/\/\/.*/, "").replace(/\/\*.*?\*\//, "");

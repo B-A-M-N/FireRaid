@@ -55,7 +55,8 @@ const PLACEHOLDER = "REPLACE_AFTER_CREATE";
 // ── Mode & output parsing ────────────────────────────────────────────────
 const args = process.argv.slice(2);
 const DEPLOY_MODE = args.includes("--deploy");
-const LOCAL_MODE = args.includes("--local") || !DEPLOY_MODE; // default local
+const LOCAL_MODE = args.includes("--local") || !DEPLOY_MODE; // default local (kept for --help text)
+void LOCAL_MODE;
 const JSON_MODE = args.includes("--json");
 // Back-compat: a bare `--json` (no mode flag) is local/evidence mode.
 const MODE = DEPLOY_MODE ? "deploy" : "local";

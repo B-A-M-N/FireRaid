@@ -27,7 +27,7 @@ const CURRENT_MARKERS = [
 // prints outstanding migrations in a simple box-drawing table (name +
 // creation timestamp) or as bare lines; both forms start (after optional
 // bullets/table gutters/whitespace) with NNNN_name.
-const MIGRATION_ROW = /^[\s*│|]*\d{4}_[A-Za-z0-9_\-]+/;
+const MIGRATION_ROW = /^[\s*│|]*\d{4}_[A-Za-z0-9_-]+/;
 
 /**
  * @param {string} stdout — trimmed wrangler stdout
