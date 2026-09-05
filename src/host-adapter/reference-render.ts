@@ -22,6 +22,7 @@
  * or data-* signature and NO internal strategy ID.
  */
 import type { DefenseProfile } from "../types/profile.js";
+import { escapeHtml, jsonForScriptIsland } from "../security/html.js";
 import {
   buildArtifactSet,
   placeSemanticCarriers,
@@ -48,7 +49,7 @@ export class ReferenceRenderError extends Error {
   }
 }
 
-/** Standard visually-hidden technique as INLINE styles — no host CSS dependency. */
+/** P0-7: visually-hidden technique as INLINE styles — no host CSS dependency. */
 const VISUALLY_HIDDEN_STYLE =
   "position:absolute!important;width:1px!important;height:1px!important;" +
   "padding:0!important;margin:-1px!important;overflow:hidden!important;" +
@@ -76,24 +77,27 @@ export function referenceInject(
   let out = html;
 
   // --- Inside-form injection: CSRF + decoy field + client config ---------
-  const csrfInput = `<input type="hidden" name="csrf" value="${csrfToken}">`;
+  const csrfInput = `<input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">`;
   // Decoy field + the E5 actuator sink (session_response, route-armed only):
   // identical hidden-input contract, both dropped from upstream forwarding.
+  // P0-7: production uses self-contained inline styles. The constant style
+  // string is allowlisted in the CSP via a SHA-256 hash so the restrictive
+  // `style-src 'self'` policy does not need 'unsafe-inline'.
   const hiddenInput = (d: NonNullable<typeof artifacts.decoyField>): string =>
     d.presentation === "lab-marked"
-      ? `<input type="text" name="${d.fieldName}" id="${d.elementId}" class="fr-decoy" aria-hidden="true" tabindex="-1" autocomplete="off" value="">`
-      : `<input type="text" name="${d.fieldName}" id="${d.elementId}" style="${VISUALLY_HIDDEN_STYLE}" aria-hidden="true" tabindex="-1" autocomplete="off" value="">`;
+      ? `<input type="text" name="${escapeHtml(d.fieldName)}" id="${escapeHtml(d.elementId)}" class="fr-decoy" aria-hidden="true" tabindex="-1" autocomplete="off" value="">`
+      : `<input type="text" name="${escapeHtml(d.fieldName)}" id="${escapeHtml(d.elementId)}" style="${VISUALLY_HIDDEN_STYLE}" aria-hidden="true" tabindex="-1" autocomplete="off" value="">`;
   const decoyInput = [
     artifacts.decoyField ? hiddenInput(artifacts.decoyField) : "",
     artifacts.sessionResponseField ? hiddenInput(artifacts.sessionResponseField) : "",
   ].join("");
   // Lab keeps fr-client-config; production uses a neutral JSON island id.
   const id = labMode ? "fr-client-config" : "app-runtime-config";
-  const clientConfigScript = `<script type="application/json" id="${id}">${JSON.stringify(artifacts.clientConfig)}</script>`;
+  const clientConfigScript = `<script type="application/json" id="${id}">${jsonForScriptIsland(artifacts.clientConfig)}</script>`;
   // AUDIT (P0 client routing): the host names where its client lives; the
   // renderer emits the loader tag. No tag → host owns client loading.
   const clientScript = opts.clientScriptSrc
-    ? `<script src="${opts.clientScriptSrc}" defer></script>`
+    ? `<script src="${escapeHtml(opts.clientScriptSrc)}" defer></script>`
     : "";
   const injection = csrfInput + decoyInput + clientConfigScript + clientScript;
 
@@ -162,7 +166,7 @@ export function referenceInject(
       out = out.replace(
         '<form id="signup-form"',
         `<div data-fr-route class="fr-canary-wrap">` +
-          `<span class="fr-decoy">Verification endpoint: ${prefix}${token}</span></div>` +
+          `<span class="fr-decoy">Verification endpoint: ${escapeHtml(prefix + token)}</span></div>` +
           '<form id="signup-form"'
       );
     }

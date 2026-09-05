@@ -33,6 +33,7 @@
  * P1-22 (production carries no greppable signature).
  */
 import type { DefenseProfile } from "../types/profile.js";
+import { escapeHtml, jsonForScriptIsland } from "../security/html.js";
 import { PLACEMENTS } from "./catalog.js";
 import {
   buildArtifactSet,
@@ -146,10 +147,13 @@ export function renderDecoyField(
     // visible unlabeled input is a critical axe `label` violation (the lab
     // plane is still an accessibility surface). The class stays for lab
     // greppability.
+    // P0-7: production uses self-contained inline styles. The constant
+    // style string is allowlisted in the CSP via a SHA-256 hash so the
+    // restrictive `style-src 'self'` policy does not need 'unsafe-inline'.
     const styleAttr = d.presentation === "lab-marked"
       ? `class="fr-decoy" style="${VISUALLY_HIDDEN_STYLE}"`
       : `style="${VISUALLY_HIDDEN_STYLE}"`;
-    parts.push(`<input type="text" name="${d.fieldName}" id="${d.elementId}" ` +
+    parts.push(`<input type="text" name="${escapeHtml(d.fieldName)}" id="${escapeHtml(d.elementId)}" ` +
       `${styleAttr} aria-hidden="true" tabindex="-1" autocomplete="off" value="">`);
   }
   return parts.join("");
@@ -165,7 +169,7 @@ export function renderRouteNotice(
   if (artifacts.decoyRoute.presentation === "lab-marked") {
     return (
       `<div data-fr-route class="fr-canary-wrap">` +
-      `<span class="fr-decoy">Verification endpoint: ${artifacts.decoyRoute.canaryPrefix}${token}</span>` +
+      `<span class="fr-decoy">Verification endpoint: ${escapeHtml(artifacts.decoyRoute.canaryPrefix + token)}</span>` +
       `</div>`
     );
   }
@@ -176,11 +180,11 @@ export function renderRouteNotice(
 }
 
 export function renderCsrfField(csrfToken: string): string {
-  return `<input type="hidden" name="csrf" value="${csrfToken}">`;
+  return `<input type="hidden" name="csrf" value="${escapeHtml(csrfToken)}">`;
 }
 
 export function renderTurnstile(siteKey: string): string {
-  return `<div class="cf-turnstile" data-sitekey="${siteKey}" data-action="fireraid_signup"
+  return `<div class="cf-turnstile" data-sitekey="${escapeHtml(siteKey)}" data-action="fireraid_signup"
     data-callback="turnstileOnSuccess"
     data-error-callback="turnstileOnError"
     data-expired-callback="turnstileOnExpired"></div>`;
@@ -206,7 +210,7 @@ export function renderClientConfig(profile: DefenseProfile, evaluationMode = fal
   // AUDIT (P1): production id carries no fr-* / rt-* carrier signature —
   // a plain JSON island is indistinguishable from ordinary site config.
   const id = evaluationMode ? "fr-client-config" : "app-runtime-config";
-  return `<script type="application/json" id="${id}">${JSON.stringify(artifacts.clientConfig)}</script>`;
+  return `<script type="application/json" id="${id}">${jsonForScriptIsland(artifacts.clientConfig)}</script>`;
 }
 
 /**
@@ -248,7 +252,7 @@ export function renderSignupPage(opts: {
   const turnstile = turnstileSiteKey ? renderTurnstile(turnstileSiteKey) : "";
   const clientConfig = renderClientConfig(profile, evalMode, routes);
   const clientScript = clientScriptSrc
-    ? `<script src="${clientScriptSrc}" defer></script>`
+    ? `<script src="${escapeHtml(clientScriptSrc)}" defer></script>`
     : "";
 
   let out = html;
