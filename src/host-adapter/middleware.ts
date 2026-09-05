@@ -45,6 +45,7 @@ import { readJsonBody, readBoundedBody } from "../security/body-limits.js";
 import { MAX_HOST_JSON_BYTES } from "../types/telemetry.js";
 import { resolveScoringPolicy } from "./reference-adapters.js";
 import { validateUpstreamUrl, buildForwardCookieHeader } from "./forward-security.js";
+import { DeadlineSignal, DeadlineError, DEFAULT_ADAPTER_CALL_TIMEOUT_MS } from "./deadline.js";
 import type {
   VerificationInput,
   MiddlewareRouteConfig,
@@ -170,6 +171,17 @@ export interface MiddlewareDeps {
    * see a host-session cookie must name it here explicitly.
    */
   cookieForwardAllowlist?: string[];
+  /**
+   * FR-P1-11: per-adapter-call deadline (ms). A custom adapter (telemetry
+   * accept/collect, canary record/readVerified, submission claim/complete,
+   * verification, enforcement allow) that exceeds this budget is abandoned —
+   * the middleware races every adapter await against it and handles the
+   * expiry as a fail-closed infrastructure/transport failure, never a
+   * partial forward and never a hang. The underlying AbortSignal is also
+   * passed INTO the adapter so a cooperative host cancels its own I/O.
+   * Default DEFAULT_ADAPTER_CALL_TIMEOUT_MS (10s).
+   */
+  adapterTimeoutMs?: number;
 }
 
 /** Default forward-cookie spec: forward nothing unless the host opts in. */
@@ -505,6 +517,12 @@ export async function __admitWithEvaluation(
   // origin from accumulating per-session evidence forever.
   sweepStores(deps);
 
+  // FR-P1-11: a per-request deadline the middleware OWNS — every adapter
+  // await is raced against it (an adapter that ignores the signal cannot hang
+  // the request) and the signal is passed into each adapter so a cooperative
+  // host cancels its own I/O. Default 10s interior to the request.
+  const deadline = new DeadlineSignal(deps.adapterTimeoutMs ?? DEFAULT_ADAPTER_CALL_TIMEOUT_MS);
+
   // ── Route-table dispatch (when `routes` is provided) ─────────────────────
   if (routes) {
     // GET path dispatch
@@ -512,11 +530,11 @@ export async function __admitWithEvaluation(
       // Canary probe — parsed with THE SAME resolved prefix the artifacts
       // emit (audit P0: three subsystems previously disagreed here).
       if (pathname.startsWith(routes.canaryPrefix)) {
-        return handleCanaryGet(req, deps, url, ring, routes, evaluation);
+        return handleCanaryGet(req, deps, url, ring, routes, evaluation, deadline);
       }
       // Application page injection
       if (pathname === routes.applicationPage) {
-        return handleInjectGet(req, deps, htmlLoader, labMode, ring, routes, evaluation);
+        return handleInjectGet(req, deps, htmlLoader, labMode, ring, routes, evaluation, deadline);
       }
       // Everything else → not-handled
       return { kind: "not-handled" };
@@ -526,11 +544,11 @@ export async function __admitWithEvaluation(
     if (req.method === "POST") {
       // Telemetry ingest
       if (routes.telemetry !== "" && pathname === routes.telemetry) {
-        return handleIngestPost(req, deps);
+        return handleIngestPost(req, deps, deadline);
       }
       // Application submit
       if (pathname === routes.applicationSubmit) {
-        return handleSubmitPost(req, deps, labMode, ring, routes, evaluation);
+        return handleSubmitPost(req, deps, labMode, ring, routes, evaluation, deadline);
       }
       // Everything else → not-handled
       return { kind: "not-handled" };
@@ -544,10 +562,10 @@ export async function __admitWithEvaluation(
     // Canary probes are ROUTE-AWARE (P1-AUDIT-2 Phase D): resolve session,
     // reconstruct the profile, verify constant-time, persist FAIL-CLOSED.
     if (pathname.startsWith(DEFAULT_CANARY_PREFIX)) {
-      return handleCanaryGet(req, deps, url, ring, null, evaluation);
+      return handleCanaryGet(req, deps, url, ring, null, evaluation, deadline);
     }
 
-    return handleInjectGet(req, deps, htmlLoader, labMode, ring, null, evaluation);
+    return handleInjectGet(req, deps, htmlLoader, labMode, ring, null, evaluation, deadline);
   }
 
   if (req.method === "POST") {
@@ -556,11 +574,11 @@ export async function __admitWithEvaluation(
     // before submitting, exactly as on the Worker plane.
     const ingestPath = deps.telemetryIngestPath === "" ? "" : (deps.telemetryIngestPath ?? DEFAULT_TELEMETRY_PATH);
     if (ingestPath !== "" && pathname === ingestPath) {
-      return handleIngestPost(req, deps);
+      return handleIngestPost(req, deps, deadline);
     }
 
     // Legacy: all POST goes to the submit branch.
-    return handleSubmitPost(req, deps, labMode, ring, null, evaluation);
+    return handleSubmitPost(req, deps, labMode, ring, null, evaluation, deadline);
   }
 
   return { kind: "deny", disposition: "METHOD_NOT_ALLOWED" };
@@ -618,12 +636,12 @@ function reportOperationalError(deps: MiddlewareDeps, op: string, err: unknown):
   }
 }
 
-async function finalizeStores(deps: MiddlewareDeps, sessionId: string): Promise<void> {
-  for (const store of [deps.canaryStore, deps.telemetry as unknown as { finalize?: (sid: string) => unknown }]) {
-    const s = store as { finalize?: (sid: string) => unknown } | undefined;
+async function finalizeStores(deps: MiddlewareDeps, sessionId: string, signal?: AbortSignal): Promise<void> {
+  for (const store of [deps.canaryStore, deps.telemetry as unknown as { finalize?: (sid: string, signal?: AbortSignal) => unknown }]) {
+    const s = store as { finalize?: (sid: string, signal?: AbortSignal) => unknown } | undefined;
     if (s && typeof s.finalize === "function") {
       try {
-        await s.finalize(sessionId);
+        await s.finalize(sessionId, signal);
       } catch (err) {
         // Finalization failure must not corrupt the response path — but it
         // must be SEEN (P1-10), not swallowed.
@@ -641,7 +659,8 @@ async function handleCanaryGet(
   url: URL,
   ring: ProfileKeyRing,
   routes: ResolvedFireRaidRoutes | null,
-  evaluation: EvaluationControls | undefined
+  evaluation: EvaluationControls | undefined,
+  deadline: DeadlineSignal
 ): Promise<MiddlewareResult> {
   const store = deps.canaryStore;
   // Parse with the EXACT prefix the artifacts emitted.
@@ -649,7 +668,7 @@ async function handleCanaryGet(
   const token = url.pathname.slice(prefix.length);
   if (!token) return { kind: "deny", disposition: "MISSING_TOKEN" };
   if (!store) return { kind: "deny", disposition: "NO_ROUTE_STORE" };
-  const session = await deps.session.resolveSession(req);
+  const session = await deadline.run(deps.session.resolveSession(req, deadline.signal));
   const sessionId = session?.id ?? null;
   if (!sessionId) return { kind: "deny", disposition: "NO_SESSION" };
   const deriveVersion = session?.profileVersion ?? deps.version;
@@ -670,7 +689,7 @@ async function handleCanaryGet(
     if (!constantTimeTokenEqual(token, expected)) {
       return { kind: "deny", disposition: "INVALID_TOKEN" };
     }
-    const persisted = await store.record(sessionId, token, expected);
+    const persisted = await deadline.run(store.record(sessionId, token, expected, deadline.signal));
     // FR-P0-03: a canary-store outage is a SERVER failure, not an applicant
     // rejection. Fail closed (never report attacker success) but classify it
     // as an operational error — the Worker plane already returns 500 here,
@@ -726,10 +745,11 @@ async function handleInjectGet(
   labMode: boolean,
   ring: ProfileKeyRing,
   routes: ResolvedFireRaidRoutes | null,
-  evaluation: EvaluationControls | undefined
+  evaluation: EvaluationControls | undefined,
+  deadline: DeadlineSignal
 ): Promise<MiddlewareResult> {
   try {
-    const sessionId = await deps.session.createSession();
+    const sessionId = await deadline.run(deps.session.createSession());
     const secret = resolveKeySecret(ring);
     const profile = await deriveForRequest(
       { secret, version: deps.version, sessionId },
@@ -746,7 +766,7 @@ async function handleInjectGet(
       clientScriptSrc: deps.clientScriptSrc,
     };
     const page = deps.render.inject(html, profile, csrfToken, labMode, renderOpts);
-    return { kind: "get", html: page, setCookie: await deps.session.sessionCookie(sessionId) };
+    return { kind: "get", html: page, setCookie: await deadline.run(deps.session.sessionCookie(sessionId)) };
   } catch (err) {
     // Fail-closed, but never silent: an inject path failure is a host
     // integration bug (bad fixture, render contract violation) and must be
@@ -758,9 +778,10 @@ async function handleInjectGet(
 
 async function handleIngestPost(
   req: Request,
-  deps: MiddlewareDeps
+  deps: MiddlewareDeps,
+  deadline: DeadlineSignal
 ): Promise<MiddlewareResult> {
-  const session = await deps.session.resolveSession(req);
+  const session = await deadline.run(deps.session.resolveSession(req, deadline.signal));
   const sessionId = session?.id ?? null;
   if (!sessionId) return { kind: "deny", disposition: "NO_SESSION" };
 
@@ -780,9 +801,23 @@ async function handleIngestPost(
     }
     ingestBody = read.data as { events?: unknown };
   }
-  const ingest = await deps.telemetry.accept(sessionId, ingestBody.events ?? []);
+  // FR-P1-11: a telemetry/store adapter that exceeds the deadline (or throws)
+  // is FireRaid/host infrastructure failing — an operational error, fail-closed,
+  // never an applicant-facing deny and never an unhandled hang.
+  let ingest;
+  try {
+    ingest = await deadline.run(deps.telemetry.accept(sessionId, ingestBody.events ?? [], deadline.signal));
+  } catch (err) {
+    reportOperationalError(deps, "telemetry.accept", err);
+    return { kind: "error", operationalReason: err instanceof DeadlineError ? "INGEST_ADAPTER_DEADLINE" : "INGEST_ADAPTER_FAILED" };
+  }
   if (ingest.kind === "invalid") {
-    await deps.enforcement.deny(sessionId, "INVALID_TELEMETRY");
+    try {
+      await deadline.run(deps.enforcement.deny(sessionId, "INVALID_TELEMETRY", undefined, deadline.signal));
+    } catch (err) {
+      reportOperationalError(deps, "enforcement.deny(invalid-telemetry)", err);
+      return { kind: "error", operationalReason: "INGEST_DENY_FAILED" };
+    }
     return { kind: "deny", disposition: "INVALID_TELEMETRY" };
   }
   if (ingest.kind === "conflict") {
@@ -805,9 +840,10 @@ async function handleSubmitPost(
   labMode: boolean,
   ring: ProfileKeyRing,
   _routes: ResolvedFireRaidRoutes | null,
-  evaluation: EvaluationControls | undefined
+  evaluation: EvaluationControls | undefined,
+  deadline: DeadlineSignal
 ): Promise<MiddlewareResult> {
-  const session = await deps.session.resolveSession(req);
+  const session = await deadline.run(deps.session.resolveSession(req, deadline.signal));
   const sessionId = session?.id ?? null;
   if (!sessionId) return { kind: "deny", disposition: "NO_SESSION" };
   const deriveVersion = session?.profileVersion ?? deps.version;
@@ -844,7 +880,7 @@ async function handleSubmitPost(
   }
   const formCheck = validateSignupForm(body.form ?? {});
   if (!formCheck.ok) {
-    await deps.enforcement.deny(sessionId, "INVALID_FORM");
+    await deadline.run(deps.enforcement.deny(sessionId, "INVALID_FORM", undefined, deadline.signal));
     return { kind: "deny", disposition: "INVALID_FORM" };
   }
   const form = formCheck.form;
@@ -869,7 +905,7 @@ async function handleSubmitPost(
   const idempotencyKey = submissionIdempotencyKey(sessionId);
   let claim: HostSubmissionClaimResult;
   try {
-    claim = await deps.submissionStore.claim(sessionId, idempotencyKey);
+    claim = await deadline.run(deps.submissionStore.claim(sessionId, idempotencyKey, deadline.signal));
   } catch (err) {
     reportOperationalError(deps, "submissionStore.claim", err);
     return { kind: "forward-failed", forwardFailureReason: "submission_claim_failed" };
@@ -934,7 +970,7 @@ async function handleSubmitPost(
         userAgent: req.headers.get("user-agent") ?? undefined,
         requestUrl: req.url,
       };
-      const allowed = await deps.verification.verify(profile, verificationInput);
+      const allowed = await deadline.run(deps.verification.verify(profile, verificationInput, deadline.signal));
       // FR-P0-03: `false` from the adapter is the provider's OWN answer about
       // this applicant — a genuine deny. A verifier OUTAGE throws, and the
       // outer catch now classifies that as an operational error (5xx) rather
@@ -975,9 +1011,9 @@ async function handleSubmitPost(
       // same rejected, same seq/dt/kind/target/meta — no fabricated
       // timestamps). A structurally invalid batch is a DENY, never a
       // silent repair (FR-R6-035 semantics on the host plane).
-      const ingest = await deps.telemetry.accept(sessionId, body.eventBatch ?? []);
+      const ingest = await deadline.run(deps.telemetry.accept(sessionId, body.eventBatch ?? [], deadline.signal));
       if (ingest.kind === "invalid") {
-        await deps.enforcement.deny(sessionId, "INVALID_TELEMETRY");
+        await deadline.run(deps.enforcement.deny(sessionId, "INVALID_TELEMETRY", undefined, deadline.signal));
         return { kind: "deny", disposition: "INVALID_TELEMETRY" };
       }
       // kind "conflict" on the submit carrier is NOT a denial either — the
@@ -985,7 +1021,7 @@ async function handleSubmitPost(
       // scoring pass below reads the whole persisted stream.
       if (profile.interaction?.scoringEnabled) {
         // Score the WHOLE persisted stream, not just the final batch.
-        const events = await deps.telemetry.collect(sessionId);
+        const events = await deadline.run(deps.telemetry.collect(sessionId, deadline.signal));
         if (events.length > 0) {
           const capture: CaptureConfig = {
             capturePointer: profile.telemetry.capturePointer,
@@ -1014,7 +1050,7 @@ async function handleSubmitPost(
       // probe of the decoy route before submission is Class-A causal
       // evidence (CANARY_ROUTE_MATCH, weight 100 → QUARANTINE).
       if (profile.decoyRoute) {
-        const hit = await deps.canaryStore.readVerified(sessionId);
+        const hit = await deadline.run(deps.canaryStore.readVerified(sessionId, deadline.signal));
         if (hit) observations.canaryEndpointHit = true;
       }
 
@@ -1024,7 +1060,7 @@ async function handleSubmitPost(
       // too. Unknown policy fails closed (deny, never default-score).
       const policy = resolveScoringPolicy(profile);
       if (!policy) {
-        await deps.enforcement.deny(sessionId, "UNKNOWN_SCORING_POLICY");
+        await deadline.run(deps.enforcement.deny(sessionId, "UNKNOWN_SCORING_POLICY", undefined, deadline.signal));
         return { kind: "deny", disposition: "UNKNOWN_SCORING_POLICY" };
       }
       const decision = decide(evidence, policy);
@@ -1049,22 +1085,22 @@ async function handleSubmitPost(
       if (runtimeDisposition !== "ACCEPT") {
         // P1-10: await durability of the deny annotation (e.g. for a host
         // that persists review-queue data asynchronously)
-        await deps.enforcement.deny(sessionId, decision.disposition, {
+        await deadline.run(deps.enforcement.deny(sessionId, decision.disposition, {
           score: risk.score,
           tier: risk.tier,
           confidence: risk.confidence,
           recommendedAction: risk.recommendedAction,
           evidence: risk.evidence,
-        });
-        await finalizeStores(deps, sessionId);
+        }, deadline.signal));
+        await finalizeStores(deps, sessionId, deadline.signal);
         // FR-P0-02: the decision denied BEFORE any forward — release the
         // claim with a transport-failure outcome (the session may legitimately
         // fix and retry; no upstream act ever happened).
         try {
-          await deps.submissionStore.complete(claim.claimId, {
+          await deadline.run(deps.submissionStore.complete(claim.claimId, {
             kind: "transport-failure",
             reason: `decision_${decision.disposition.toLowerCase()}`,
-          });
+          }, deadline.signal));
         } catch (err) {
           reportOperationalError(deps, "submissionStore.complete(decision-deny)", err);
         }
@@ -1101,11 +1137,36 @@ async function handleSubmitPost(
       );
       // P0-4/P0-8: handle the discriminated enforcement result (the bare
       // boolean is legacy — `false` cannot say rejected vs unreachable).
-      const enforcementResult = await deps.enforcement.allow(
-        deps.upstreamRegisterUrl,
-        cleanForm,
-        cookies
-      );
+      // FR-P1-11: the forward itself is raced against the deadline — a hung
+      // upstream (even one the adapter's own timeout misses) becomes a
+      // transport failure, never a hang, and never a false created-receipt.
+      let enforcementResult: boolean | EnforcementResult;
+      try {
+        enforcementResult = await deadline.run(
+          deps.enforcement.allow(deps.upstreamRegisterUrl, cleanForm, cookies, deadline.signal)
+        );
+      } catch (err) {
+        // DeadlineError (and any abort it surfaces) → the forward never
+        // reached a terminal captured state.
+        reportOperationalError(deps, "enforcement.allow(deadline)", err);
+        try {
+          await deadline.run(
+            deps.submissionStore.complete(claim.claimId, {
+              kind: "transport-failure",
+              reason: err instanceof DeadlineError ? "adapter_deadline" : "enforcement_allow_failed",
+            }, deadline.signal)
+          );
+        } catch (completeErr) {
+          reportOperationalError(deps, "submissionStore.complete(allow-deadline)", completeErr);
+        }
+        return {
+          kind: "forward-failed",
+          forwardFailureReason: "adapter_deadline",
+          sessionId,
+          submittedEmail: typeof form.email === "string" ? form.email : undefined,
+        };
+      }
+      // Normalize the legacy boolean to the discriminated shape FIRST so the
       // Normalize the legacy boolean to the discriminated shape FIRST so the
       // receipt policy below has one code path. Any MALFORMED shape (a
       // string, null, an object whose `kind` is not one of the four contract
@@ -1136,7 +1197,7 @@ async function handleSubmitPost(
         // fails, the claim stays held: fail closed (conflict on retry) beats
         // silently allowing a second forward after an unknown-state first.
         try {
-          await deps.submissionStore.complete(claim.claimId, detail);
+          await deadline.run(deps.submissionStore.complete(claim.claimId, detail, deadline.signal));
         } catch (err) {
           reportOperationalError(deps, "submissionStore.complete(transport-failure)", err);
         }
@@ -1164,14 +1225,15 @@ async function handleSubmitPost(
       // the durable record may not exist: fail the request (release never
       // happened → the claim still guards the upstream), never ack blindly.
       try {
-        await deps.submissionStore.complete(
+        await deadline.run(deps.submissionStore.complete(
           claim.claimId,
           detail.kind === "created"
             ? { kind: "created" }
             : detail.kind === "queued-for-retry"
               ? { kind: "queued-for-retry", retryId: detail.retryId }
-              : { kind: "business-rejected", status: detail.status }
-        );
+              : { kind: "business-rejected", status: detail.status },
+          deadline.signal
+        ));
       } catch (err) {
         reportOperationalError(deps, "submissionStore.complete", err);
         return {
@@ -1185,7 +1247,7 @@ async function handleSubmitPost(
       }
       const upstreamCreated = detail.kind === "created";
       // P1-10: await durability of store finalization
-      await finalizeStores(deps, sessionId);
+      await finalizeStores(deps, sessionId, deadline.signal);
       return {
         kind: "admit",
         disposition: decision.disposition,
@@ -1208,19 +1270,24 @@ async function handleSubmitPost(
       // release fails the claim stays held (fail closed: a later retry gets
       // conflict rather than risk a second forward on unknown state).
       try {
-        await deps.submissionStore.complete(claim.claimId, {
+        await deadline.run(deps.submissionStore.complete(claim.claimId, {
           kind: "transport-failure",
           reason: "eval_error",
-        });
+        }, deadline.signal));
       } catch (completeErr) {
         reportOperationalError(deps, "submissionStore.complete(eval_error)", completeErr);
       }
       // FR-P0-03: the exception is FireRaid/host infrastructure failing —
       // an operational error (5xx), never an applicant-facing denial. The
       // account is not created (fail closed preserved); the classification
-      // no longer lies about whose fault it was.
+      // no longer lies about whose fault it was. A FR-P1-11 deadline expiry
+      // is named distinctly so an ops dashboard can tell a rare hang from a
+      // routine evaluation fault.
       reportOperationalError(deps, "handleSubmitPost.evaluate", err);
-      return { kind: "error", operationalReason: "SUBMIT_EVAL_ERROR" };
+      return {
+        kind: "error",
+        operationalReason: err instanceof DeadlineError ? "ADAPTER_DEADLINE" : "SUBMIT_EVAL_ERROR",
+      };
     }
 }
 

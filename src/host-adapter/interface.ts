@@ -139,7 +139,13 @@ export interface HostSessionAdapter {
    * Adapters without a signed envelope return the sid with pv/kid from
    * their own issuance state.
    */
-  resolveSession(req: Request): Promise<HostSessionContext | null>;
+  /**
+   * FR-P1-11: trailing `signal` carries the per-request deadline the
+   * middleware owns. A host adapter must abort its underlying work when it
+   * fires; the middleware races the await regardless, so ignoring it cannot
+   * hang the request.
+   */
+  resolveSession(req: Request, signal?: AbortSignal): Promise<HostSessionContext | null>;
 }
 
 /** The verified session context a host adapter returns (P1-1). */
@@ -230,7 +236,7 @@ export interface HostVerificationAdapter {
    * @returns true if the submission may be forwarded (verification passed or
    *          not required); false if admission must be denied.
    */
-  verify(profile: DefenseProfile, input: VerificationInput): Promise<boolean>;
+  verify(profile: DefenseProfile, input: VerificationInput, signal?: AbortSignal): Promise<boolean>;
 }
 
 /**
@@ -294,9 +300,9 @@ export interface HostTelemetryAdapter {
    * invalid observation stream is never silently repaired: FR-R6-035
    * semantics on the host plane too).
    */
-  accept(sessionId: string, batch: unknown): Promise<HostTelemetryIngest>;
+  accept(sessionId: string, batch: unknown, signal?: AbortSignal): Promise<HostTelemetryIngest>;
   /** The session's full validated stream, in seq order (deduplicated). */
-  collect(sessionId: string): Promise<ValidatedEvent[]>;
+  collect(sessionId: string, signal?: AbortSignal): Promise<ValidatedEvent[]>;
 }
 
 /**
@@ -336,7 +342,8 @@ export interface HostEnforcementAdapter {
   allow(
     upstreamUrl: string,
     form: Record<string, string>,
-    cookies: string
+    cookies: string,
+    signal?: AbortSignal
   ): Promise<boolean | EnforcementResult>;
   /**
    * Record a denied submission (never forwarded).
@@ -346,8 +353,10 @@ export interface HostEnforcementAdapter {
    * P1-10: returns void | Promise<void> so a host that persists the
    * annotation/review data asynchronously can await durability. The
    * middleware awaits the result.
+   *
+   * FR-P1-11: optional trailing signal is the request deadline.
    */
-  deny(sessionId: string, reason: string, annotation?: RiskAnnotation): void | Promise<void>;
+  deny(sessionId: string, reason: string, annotation?: RiskAnnotation, signal?: AbortSignal): void | Promise<void>;
 }
 
 /**
@@ -439,7 +448,7 @@ export interface HostSubmissionStore {
    * MUST be durable and atomic (a unique constraint or conditional UPDATE,
    * never check-then-insert).
    */
-  claim(sessionId: string, idempotencyKey: string): Promise<HostSubmissionClaimResult>;
+  claim(sessionId: string, idempotencyKey: string, signal?: AbortSignal): Promise<HostSubmissionClaimResult>;
   /**
    * Record the forward's outcome against the claim durably. Called exactly
    * once per successful claim, before the middleware responds. `outcome`
@@ -447,7 +456,7 @@ export interface HostSubmissionStore {
    * queued-for-retry, AND transport-failure (a recorded transport failure
    * releases the claim so a genuine client retry may re-attempt).
    */
-  complete(claimId: string, outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string }): Promise<void>;
+  complete(claimId: string, outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string }, signal?: AbortSignal): Promise<void>;
 }
 
 /** Deterministic idempotency key material for one session's forward. */
@@ -495,15 +504,15 @@ export interface HostCanaryStore {
    * (mirrors the Worker's INSERT OR IGNORE). Return false ONLY on a real
    * storage error — the caller fails the request closed.
    */
-  record(sessionId: string, token: string, expected: string): Promise<boolean>;
+  record(sessionId: string, token: string, expected: string, signal?: AbortSignal): Promise<boolean>;
   /** Whether this session has ≥1 VERIFIED route hit (correlation input). */
-  readVerified(sessionId: string): Promise<boolean>;
+  readVerified(sessionId: string, signal?: AbortSignal): Promise<boolean>;
   /**
    * Lifecycle: the session is finalized (application submitted) or expired
    * (TTL). Drop all transient state for it. Production stores persist
    * exactly what their retention policy needs BEFORE clearing.
    */
-  finalize(sessionId: string): Promise<void>;
+  finalize(sessionId: string, signal?: AbortSignal): Promise<void>;
   /** Wall-clock TTL hint (ms) the middleware enforces via finalize(). */
   readonly ttlMs?: number;
 }

@@ -346,15 +346,24 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
   async allow(
     upstreamUrl: string,
     form: Record<string, string>,
-    cookies: string
+    cookies: string,
+    signal?: AbortSignal
   ): Promise<EnforcementResult> {
     let resp: Response;
     try {
+      // FR-P1-11: combine the middleware's request deadline with the adapter's
+      // own forward timeout so an aborted request cancels the socket early.
+      // AbortSignal.any isn't a stable global everywhere (Node 18 lacks it),
+      // so fall back to the adapter's own timeout when it isn't available.
+      const requestSignal = signal ?? new AbortController().signal;
+      const combined = typeof AbortSignal.any === "function"
+        ? AbortSignal.any([requestSignal, AbortSignal.timeout(this.forwardTimeoutMs)])
+        : AbortSignal.timeout(this.forwardTimeoutMs);
       resp = await fetch(upstreamUrl, {
         method: "POST",
         headers: { "content-type": "application/json", cookie: cookies },
         body: JSON.stringify({ form }),
-        signal: AbortSignal.timeout(this.forwardTimeoutMs),
+        signal: combined,
         // An admission endpoint that responds with a redirect did NOT create
         // the account — following the chain would land on a 200 HTML page
         // (a login/interstitial) and classify it `created`. A redirect is an
