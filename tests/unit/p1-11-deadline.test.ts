@@ -117,3 +117,21 @@ describe("FR-P1-11: a hanging telemetry adapter cannot hang the ingest path", ()
     expect(elapsed).toBeLessThan(5_000);
   });
 });
+
+describe("closure 4: deadline lifecycle", () => {
+  it("clear() discards the timer — a completed request leaves no live timer", async () => {
+    const d = new DeadlineSignal(50);
+    d.clear();
+    // The deadline must NOT fire: sleep past the budget and confirm the
+    // signal never aborts (clear() actually removed the setTimeout).
+    await new Promise((r) => setTimeout(r, 90));
+    expect(d.signal.aborted).toBe(false);
+  });
+
+  it("expired reports whether the budget already fired", async () => {
+    const d = new DeadlineSignal(20);
+    expect(d.expired).toBe(false);
+    await d.run(new Promise<never>(() => {})).catch(() => {});
+    expect(d.expired).toBe(true);
+  });
+});

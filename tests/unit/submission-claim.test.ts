@@ -579,3 +579,80 @@ describe("P0-E: ReferenceSubmissionStore.lookupFinal", () => {
     expect(again.kind).toBe("replay");
   });
 });
+
+// ── Closure 4 (FR-P1-11): post-forward durability on its OWN budget ──────
+
+describe("closure 4: durability window survives a spent request deadline", () => {
+  it("an adapter_deadline during allow() still records the UNCERTAIN complete (held slot)", async () => {
+    // Regression: before the durability window, the complete(uncertain) write
+    // after a deadline-expired allow() was raced against the SAME (now spent)
+    // request deadline and failed instantly — the claim stayed OPEN instead
+    // of uncertain-held, and lookupFinal could never see the outcome class.
+    const deps = baseDeps();
+    deps.enforcement = recordingEnforcement([]) as never;
+    (deps.enforcement as { allow: unknown }).allow = async () =>
+      new Promise<never>(() => {}); // hang the forward; the deadline must fire
+    deps.adapterTimeoutMs = 60;
+    deps.durabilityTimeoutMs = 2_000;
+    const store = deps.submissionStore as DurableSubmissionStore;
+
+    const post = await session(deps);
+    const res = await post();
+    expect(res.kind).toBe("forward-failed");
+    expect((res as { forwardFailureReason?: string }).forwardFailureReason).toBe("adapter_deadline");
+
+    // The uncertain marking landed DESPITE the spent request deadline: the
+    // slot is held (not open, no outcome) and a retry CONFLICTS — the
+    // fail-closed held-uncertain contract.
+    const state = (
+      store as unknown as {
+        claims: Map<string, { open: boolean; heldUncertain?: boolean; outcome?: { uncertain?: boolean } }>;
+      }
+    );
+    const entries = Array.from(state.claims.values());
+    expect(entries.length).toBe(1);
+    expect(entries[0].open).toBe(false);
+    expect(entries[0].heldUncertain).toBe(true);
+  });
+
+  it("a slow forward consumes the request budget but complete(created) still lands", async () => {
+    // The forward resolves just INSIDE the request deadline; the request
+    // deadline is then effectively spent for any further write. The
+    // durability window gives complete() its own fresh budget.
+    const deps = baseDeps();
+    const forwards: number[] = [];
+    deps.enforcement = recordingEnforcement(forwards) as never;
+    (deps.enforcement as { allow: unknown }).allow = async () => {
+      await new Promise((r) => setTimeout(r, 0));
+      return { kind: "created" } as EnforcementResult;
+    };
+    deps.adapterTimeoutMs = 15; // short — but the forward resolves inside it
+    deps.durabilityTimeoutMs = 2_000;
+    // Force the durability write to be slow enough that the REQUEST deadline
+    // (15ms) would already be spent when it finishes; only a separate
+    // durability budget lets it complete.
+    const store = deps.submissionStore as DurableSubmissionStore;
+    const origComplete = (ReferenceSubmissionStore.prototype as unknown as {
+      complete: (id: string, o: unknown) => Promise<void>;
+    }).complete;
+    let completeStartedAt = 0;
+    let completeSettledAt = 0;
+    (store as unknown as { complete: (id: string, o: unknown) => Promise<void> }).complete =
+      async function (this: unknown, id: string, o: unknown) {
+        completeStartedAt = Date.now();
+        await new Promise((r) => setTimeout(r, 80));
+        await origComplete.call(this, id, o);
+        completeSettledAt = Date.now();
+      };
+
+    const post = await session(deps);
+    const res = await post();
+    expect(res.kind).toBe("admit");
+    expect(res.upstreamCreated).toBe(true);
+    expect(completeSettledAt).toBeGreaterThan(0);
+    // The complete() ran to completion (80ms sleep) — far past the 15ms
+    // request budget — proving it raced the durability window, not the
+    // request deadline.
+    expect(completeSettledAt - completeStartedAt).toBeGreaterThanOrEqual(60);
+  });
+});

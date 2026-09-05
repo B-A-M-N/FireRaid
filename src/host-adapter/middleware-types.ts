@@ -107,6 +107,14 @@ export interface MiddlewareDeps {
    * lifecycle/deadlines.ts. Default DEFAULT_ADAPTER_CALL_TIMEOUT_MS (10s).
    */
   adapterTimeoutMs?: number;
+  /**
+   * FR-P1-11 (closure 4): budget (ms) for each POST-BOUNDARY durability
+   * write (submissionStore.complete, finalizeStores) — a FRESH deadline that
+   * starts when the write begins, never raced against the request deadline
+   * (which may be spent after a long forward). See
+   * DEFAULT_DURABILITY_TIMEOUT_MS. Default 5s.
+   */
+  durabilityTimeoutMs?: number;
 }
 
 /**

@@ -114,7 +114,42 @@ export async function __admitWithEvaluation(
   // await is raced against it (an adapter that ignores the signal cannot hang
   // the request) and the signal is passed into each adapter so a cooperative
   // host cancels its own I/O. Default 10s interior to the request.
+  // Closure 4: the timer is DISCARDED on every exit path — a long-lived host
+  // (the node runtime) previously leaked one live 10s timer per request for
+  // the full budget even when the request finished in milliseconds.
   const deadline = new DeadlineSignal(deps.adapterTimeoutMs ?? DEFAULT_ADAPTER_CALL_TIMEOUT_MS);
+  try {
+    return await dispatchRequest(req, deps, htmlLoader, evaluation, {
+      labMode,
+      url,
+      pathname,
+      ring,
+      routes,
+      deadline,
+    });
+  } finally {
+    deadline.clear();
+  }
+}
+
+/** Everything dispatch needs, resolved once in __admitWithEvaluation. */
+interface DispatchArgs {
+  labMode: boolean;
+  url: URL;
+  pathname: string;
+  ring: ProfileKeyRing;
+  routes: ReturnType<typeof resolveRoutes>;
+  deadline: DeadlineSignal;
+}
+
+async function dispatchRequest(
+  req: Request,
+  deps: MiddlewareDeps,
+  htmlLoader: () => Promise<string>,
+  evaluation: EvaluationControls | undefined,
+  args: DispatchArgs
+): Promise<MiddlewareResult> {
+  const { labMode, url, pathname, ring, routes, deadline } = args;
 
   // ── Route-table dispatch (when `routes` is provided) ─────────────────────
   if (routes) {

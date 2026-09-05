@@ -30,6 +30,18 @@
 /** Default budget for a single adapter call. */
 export const DEFAULT_ADAPTER_CALL_TIMEOUT_MS = 10_000;
 
+/**
+ * FR-P1-11 (rereview closure 4): default budget for the POST-FORWARD
+ * durability window — the fresh deadline that starts at the irreversible
+ * boundary and covers recording the outcome (submissionStore.complete,
+ * finalizeStores). It must be a SEPARATE, later-starting budget: a complete()
+// raced against the request deadline after a long forward can find that
+ * deadline already expired and fail instantly, which would leave a forwarded
+ * session's claim unrecorded (held forever, or released without a stored
+ * outcome — both contradict the one-forward invariant).
+ */
+export const DEFAULT_DURABILITY_TIMEOUT_MS = 5_000;
+
 export class DeadlineSignal {
   readonly signal: AbortSignal;
   private readonly abortController: AbortController;
@@ -75,6 +87,16 @@ export class DeadlineSignal {
         throw new DeadlineError("adapter call exceeded the request deadline");
       }),
     ]);
+  }
+
+  /**
+   * Whether the deadline has already fired. Post-boundary durability code
+   * checks this and switches to its OWN durability deadline — a complete()
+   * raced against a spent request deadline would fail instantly (see
+   * DEFAULT_DURABILITY_TIMEOUT_MS).
+   */
+  get expired(): boolean {
+    return this.signal.aborted;
   }
 }
 

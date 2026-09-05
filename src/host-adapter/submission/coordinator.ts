@@ -22,7 +22,7 @@ import type { SubmitInbound } from "../../security/request-validation.js";
 import type { DefenseProfile } from "../../types/profile.js";
 import { resolveScoringPolicy } from "../reference-adapters.js";
 import { buildForwardCookieHeader } from "../forward-security.js";
-import { DeadlineSignal, DeadlineError } from "../deadline.js";
+import { DeadlineSignal, DeadlineError, DEFAULT_DURABILITY_TIMEOUT_MS } from "../deadline.js";
 import { submissionIdempotencyKey } from "../interface.js";
 import type {
   VerificationInput,
@@ -134,6 +134,21 @@ export async function coordinateSubmission(
   // The forward-boundary claim — defined only from the irreversible boundary
   // onward; the pre-claim catch reads it to decide whether a release is due.
   let claim: HostSubmissionClaim | undefined;
+  // Closure 4 (FR-P1-11): the FRESH deadline governing post-boundary
+  // durability writes (submissionStore.complete, finalizeStores), created
+  // lazily on the FIRST such write. It must be separate from the request
+  // deadline: a forward that consumed most of the request budget leaves that
+  // deadline spent, and a complete() raced against it would fail INSTANTLY
+  // with a DeadlineError it had no fair chance to beat — the claim would stay
+  // open after a `created` forward, or the uncertain marking would never
+  // land. Each durability phase gets its own full budget.
+  let durabilityWindow: DeadlineSignal | undefined;
+  const durability = (): DeadlineSignal => {
+    durabilityWindow ??= new DeadlineSignal(
+      deps.durabilityTimeoutMs ?? DEFAULT_DURABILITY_TIMEOUT_MS
+    );
+    return durabilityWindow;
+  };
 
   // Replay check WITHOUT claiming (P0-E fix): the old flow claimed the
   // forward slot merely to discover a finalized outcome, so any early
@@ -360,6 +375,14 @@ export async function coordinateSubmission(
     //              with the outcome below, whichever way it lands.
     // A claim store that throws or returns a non-contract shape fails CLOSED
     // (conflict semantics): an unclaimable session is never forwarded.
+    //
+    // Closure 4 (FR-P1-11): from this point EVERY durability write (complete,
+    // finalizeStores) is raced against the FRESH `durability()` window, not
+    // the request deadline — a forward that consumed most of the request
+    // budget would otherwise leave that deadline spent, and the first
+    // post-forward write would fail INSTANTLY with a DeadlineError it had no
+    // fair chance to beat: the claim would stay open after a `created`
+    // forward, or the uncertain marking would never land.
     {
       let claimResult: HostSubmissionClaimResult;
       try {
@@ -420,12 +443,12 @@ export async function coordinateSubmission(
       // so the outcome is UNCERTAIN (held slot, not released).
       reportOperationalError(deps, "enforcement.allow(deadline)", err);
       try {
-        await deadline.run(
+        await durability().run(
           deps.submissionStore.complete(claim.claimId, {
             kind: "transport-failure",
             reason: err instanceof DeadlineError ? "adapter_deadline" : "enforcement_allow_failed",
             uncertain: true,
-          }, deadline.signal)
+          }, durability().signal)
         );
       } catch (completeErr) {
         reportOperationalError(deps, "submissionStore.complete(allow-deadline)", completeErr);
@@ -467,7 +490,7 @@ export async function coordinateSubmission(
       // fails, the claim stays held: fail closed (conflict on retry) beats
       // silently allowing a second forward after an unknown-state first.
       try {
-        await deadline.run(deps.submissionStore.complete(claim.claimId, detail, deadline.signal));
+        await durability().run(deps.submissionStore.complete(claim.claimId, detail, durability().signal));
       } catch (err) {
         reportOperationalError(deps, "submissionStore.complete(transport-failure)", err);
       }
@@ -489,14 +512,14 @@ export async function coordinateSubmission(
     // the durable record may not exist: fail the request (release never
     // happened → the claim still guards the upstream), never ack blindly.
     try {
-      await deadline.run(deps.submissionStore.complete(
+      await durability().run(deps.submissionStore.complete(
         claim.claimId,
         detail.kind === "created"
           ? { kind: "created" }
           : detail.kind === "queued-for-retry"
             ? { kind: "queued-for-retry", retryId: detail.retryId }
             : { kind: "business-rejected", status: detail.status },
-        deadline.signal
+        durability().signal
       ));
     } catch (err) {
       reportOperationalError(deps, "submissionStore.complete", err);
@@ -510,8 +533,9 @@ export async function coordinateSubmission(
       };
     }
     const upstreamCreated = detail.kind === "created";
-    // P1-10: await durability of store finalization
-    await finalizeStores(deps, sessionId, deadline.signal);
+    // P1-10: await durability of store finalization (own durability budget —
+    // finalization must never be starved by a spent request deadline).
+    await durability().run(finalizeStores(deps, sessionId, durability().signal));
     return {
       kind: "admit",
       disposition: decision.disposition,
@@ -529,13 +553,17 @@ export async function coordinateSubmission(
     // RELEASE the claim as a definite transport failure — nothing was sent,
     // so the session may legitimately retry. If the release fails the claim
     // stays held (fail closed: a later retry gets conflict rather than risk
-    // a second forward on unknown state).
+    // a second forward on unknown state). The release is raced against the
+    // DURABILITY window, never the request deadline: a DeadlineError thrown
+    // by an expired request deadline is exactly the case where the request
+    // deadline is spent, and racing the release against it would fail
+    // instantly and leave the claim open.
     if (claim !== undefined) {
       try {
-        await deadline.run(deps.submissionStore.complete(claim.claimId, {
+        await durability().run(deps.submissionStore.complete(claim.claimId, {
           kind: "transport-failure",
           reason: "eval_error",
-        }, deadline.signal));
+        }, durability().signal));
       } catch (completeErr) {
         reportOperationalError(deps, "submissionStore.complete(eval_error)", completeErr);
       }
@@ -551,5 +579,10 @@ export async function coordinateSubmission(
       kind: "error",
       operationalReason: err instanceof DeadlineError ? "ADAPTER_DEADLINE" : "SUBMIT_EVAL_ERROR",
     };
+  } finally {
+    // Closure 4: the durability window's timer is discarded on every exit —
+    // a long-lived host must not accumulate one live timer per submitted
+    // request for the full window.
+    durabilityWindow?.clear();
   }
 }
