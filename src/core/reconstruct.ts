@@ -19,7 +19,8 @@ import {
   resolveProfileKey,
   type ProfileKeyRing,
 } from "./session.js";
-import { deriveProfilePure } from "./profile.js";
+import { deriveEvaluationProfileByVersion } from "./profile-versions.js";
+import { hashProfile } from "./profile.js";
 import type { DefenseRecipe } from "./recipe-schema.js";
 import type { DefenseProfile } from "../types/profile.js";
 
@@ -28,12 +29,28 @@ export interface ReconstructableSession {
   id: string;
   profileVersion: number;
   profileKeyId?: string | null;
+  /**
+   * FR-P0-04: the profile hash AS ISSUED (persisted at issuance). When
+   * present, the reconstructed profile is compared against it and a
+   * mismatch FAILS CLOSED — derivation ran but produced something other
+   * than what the session was shown.
+   */
+  profileHash?: string | null;
 }
 
 /** Result variants: ok, or a typed failure the caller must handle fail-closed. */
 export type ReconstructionResult =
   | { ok: true; profile: DefenseProfile }
-  | { ok: false; code: "UNKNOWN_PROFILE_KEY" | "INVALID_RECIPE" | "DERIVATION_FAILED"; detail: string };
+  | {
+      ok: false;
+      code:
+        | "UNKNOWN_PROFILE_KEY"
+        | "INVALID_RECIPE"
+        | "DERIVATION_FAILED"
+        | "UNSUPPORTED_PROFILE_VERSION"
+        | "PROFILE_HASH_MISMATCH";
+      detail: string;
+    };
 
 /**
  * Reconstruct the issued profile for a session.
@@ -109,13 +126,39 @@ export async function reconstructIssuedProfile(
     turnstileRequired: options?.turnstileRequired === true,
   };
   try {
-    const profile = await deriveProfilePure(opts, recipe);
+    // FR-P0-04: reconstruction dispatches by the session's PERSISTED version
+    // to the frozen implementation for that version. An unknown historical
+    // version fails closed (UNSUPPORTED_PROFILE_VERSION) — it never runs
+    // current code under an old number, which is exactly how a profile
+    // silently drifts from the treatment that was issued.
+    const profile = await deriveEvaluationProfileByVersion(opts, recipe);
+    // FR-P0-04 drift detection: when the session persisted the profile hash
+    // at issuance, the re-derived profile must match it. A mismatch means
+    // the derivation produced something other than the treatment the
+    // session was actually shown — hard failure, never "close enough".
+    if (session.profileHash) {
+      const recomputed = await hashProfile(profile);
+      if (recomputed !== session.profileHash) {
+        return {
+          ok: false,
+          code: "PROFILE_HASH_MISMATCH",
+          detail:
+            `reconstructed profile hash differs from the hash persisted at ` +
+            `issuance (expected ${session.profileHash.slice(0, 12)}…, got ${recomputed.slice(0, 12)}…) — ` +
+            `the derivation no longer reproduces the issued treatment`,
+        };
+      }
+    }
     return { ok: true, profile };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
-      code: detail.startsWith("INVALID_RECIPE") ? "INVALID_RECIPE" : "DERIVATION_FAILED",
+      code: detail.startsWith("INVALID_RECIPE")
+        ? "INVALID_RECIPE"
+        : detail.startsWith("UNSUPPORTED_PROFILE_VERSION")
+          ? "UNSUPPORTED_PROFILE_VERSION"
+          : "DERIVATION_FAILED",
       detail,
     };
   }

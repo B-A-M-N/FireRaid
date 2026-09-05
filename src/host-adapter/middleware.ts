@@ -25,11 +25,16 @@
  * Fail-closed: any adapter/verification error → deny (never forward).
  */
 import {
-  deriveProductionProfile,
-  deriveEvaluationProfile,
   hashProfile,
   type DefenseRecipe,
 } from "../core/profile.js";
+// FR-P0-04: derivation goes through the VERSION DISPATCH — the version on
+// the session envelope selects the frozen implementation, and an unknown
+// version fails closed instead of running current code.
+import {
+  deriveProductionProfileByVersion,
+  deriveEvaluationProfileByVersion,
+} from "../core/profile-versions.js";
 import { correlate, deriveCanaryReference, type ObservationSet } from "../core/correlation.js";
 import { SESSION_RESPONSE_FIELD } from "../core/artifacts.js";
 import { decide } from "../core/decision.js";
@@ -679,8 +684,12 @@ function deriveForRequest(
   evaluation: EvaluationControls | undefined,
   labMode: boolean
 ): Promise<DefenseProfile> {
+  // FR-P0-04: BOTH planes dispatch by the requested VERSION to the frozen
+  // implementation for it. A session envelope carrying pv=N must derive the
+  // SAME treatment N named when it was issued — an unsupported N fails
+  // closed rather than running current code under an old number.
   if (evaluation) {
-    return deriveEvaluationProfile(
+    return deriveEvaluationProfileByVersion(
       {
         secret: key.secret,
         version: key.version,
@@ -693,7 +702,7 @@ function deriveForRequest(
     );
   }
   // PRODUCTION: no recipe, no holdout, no mode override — ever.
-  return deriveProductionProfile(key);
+  return deriveProductionProfileByVersion(key);
 }
 
 async function handleInjectGet(

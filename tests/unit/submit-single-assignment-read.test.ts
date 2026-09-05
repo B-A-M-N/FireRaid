@@ -19,6 +19,8 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { submit } from "../../src/routes/submit.js";
 import { makeCsrfToken } from "../../src/security/csrf.js";
+import { deriveEvaluationProfile, hashProfile } from "../../src/core/profile.js";
+import type { DefenseFamilyName } from "../../src/core/recipe-schema.js";
 import type { Env } from "../../src/env.js";
 
 const SECRET = "k".repeat(64);
@@ -33,12 +35,28 @@ function migratedDb(): DatabaseSync {
   return db;
 }
 
-/** A lab session row as the lab signup route creates it (stateful, bare sid). */
-function insertLabSession(db: DatabaseSync, sid: string): void {
+/**
+ * A lab session row as the lab signup route creates it (stateful, bare sid).
+ * FR-P0-04: the profile_hash must be the REAL hash of the profile issuance
+ * derived — the submit route's drift check compares reconstruction against
+ * it and fails closed on a stub.
+ */
+async function insertLabSession(db: DatabaseSync, sid: string, recipe?: { families: DefenseFamilyName[] }): Promise<void> {
+  const profile = await deriveEvaluationProfile(
+    {
+      secret: SECRET,
+      version: 1,
+      sessionId: sid,
+      mode: "lab",
+      holdoutMode: false,
+      turnstileRequired: false,
+    },
+    recipe
+  );
   db.prepare(
     `INSERT INTO sessions (id, created_at, last_seen_at, profile_version, profile_id, profile_hash, submitted)
-     VALUES (?, ?, ?, 1, 'pid', 'phash', 0)`
-  ).run(sid, Date.now(), Date.now());
+     VALUES (?, ?, ?, 1, ?, ?, 0)`
+  ).run(sid, Date.now(), Date.now(), profile.profileId, await hashProfile(profile));
 }
 
 /** D1-shaped wrapper that COUNTS lab_runs reads (the P1-3 assertion). */
@@ -94,7 +112,7 @@ describe("P1-3: one lab_runs read per lab submit", () => {
     // Lab sessions are STATEFUL (envelopes are production-only): the signup
     // route created the row; submit resolves it by the bare sid.
     const sid = "sid-single-read";
-    insertLabSession(db, sid);
+    await insertLabSession(db, sid, { families: ["decoy-field"] });
 
     // A BOUND lab run: decoy-field recipe, no holdout, no turnstile.
     db.prepare(
@@ -121,7 +139,7 @@ describe("P1-3: one lab_runs read per lab submit", () => {
     const db = migratedDb();
     const { d1, reads } = countingD1(db);
     const sid = "sid-unbound";
-    insertLabSession(db, sid);
+    await insertLabSession(db, sid);
     const csrf = await makeCsrfToken({ FIRERAID_CSRF_SECRET: CSRF_SECRET } as never, sid);
     const req = new Request("http://w/api/submit", {
       method: "POST",

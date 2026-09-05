@@ -133,11 +133,13 @@ export async function canary(req: Request, env: Env): Promise<Response> {
     turnstileRequired = read.assignment?.turnstileRequired;
   }
   // FR-R7-018: pass the already-loaded session's key id straight into the
-  // canonical reconstructor — no second session SELECT.
+  // canonical reconstructor — no second session SELECT. FR-P0-04: the
+  // persisted profile hash rides along so drift fails closed.
   const reconstructed = await reconstructIssuedProfile(env, {
     id: sessionId,
     profileVersion: session.profileVersion,
     profileKeyId: session.profileKeyId ?? null,
+    profileHash: session.profileHash,
   }, recipe, { holdoutMode, turnstileRequired });
   if (!reconstructed.ok) {
     console.error("canary reconstruction failed:", reconstructed.code, reconstructed.detail);

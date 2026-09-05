@@ -293,14 +293,14 @@ export async function events(req: Request, env: Env): Promise<Response> {
  */
 async function lazyCaptureMask(
   env: Env,
-  session: { id: string; profileVersion: number; profileKeyId: string | null; labModeHoldout?: boolean }
+  session: { id: string; profileVersion: number; profileKeyId: string | null; profileHash?: string | null; labModeHoldout?: boolean }
 ): Promise<{ capturePointer: boolean; captureKey: boolean }> {
   return resolveCaptureMask(env, session);
 }
 
 async function resolveCaptureMask(
   env: Env,
-  session: { id: string; profileVersion: number; profileKeyId: string | null; labModeHoldout?: boolean }
+  session: { id: string; profileVersion: number; profileKeyId: string | null; profileHash?: string | null; labModeHoldout?: boolean }
 ): Promise<{ capturePointer: boolean; captureKey: boolean }> {
   try {
     const { reconstructIssuedProfile } = await import("../core/reconstruct.js");
@@ -313,6 +313,10 @@ async function resolveCaptureMask(
       id: session.id,
       profileVersion: session.profileVersion,
       profileKeyId: session.profileKeyId,
+      // FR-P0-04: drift detection — an issued-hash mismatch is a hard failure
+      // here too (the catch below degrades to capture-unknown, and the
+      // console warning names the drift for operators).
+      profileHash: session.profileHash,
     });
     if (reconstructed.ok) {
       return {

@@ -68,6 +68,12 @@ export async function persistSession(
  */
 export interface LoadedSession extends SessionPayload {
   profileKeyId: string | null;
+  /**
+   * FR-P0-04: the hash of the profile AS ISSUED (persisted at issuance).
+   * Reconstruction compares its re-derived output against this — a mismatch
+   * is profile drift and fails closed.
+   */
+  profileHash: string;
   /** P1-9: verified canary-route hit compacted onto the session row. */
   causalRouteHit?: number | null;
 }
@@ -87,6 +93,7 @@ export async function loadSession(
     finalScore: row.finalScore,
     finalDisposition: row.finalDisposition,
     profileKeyId: row.profileKeyId,
+    profileHash: row.profileHash,
     causalRouteHit: row.causalRouteHit,
   };
 }

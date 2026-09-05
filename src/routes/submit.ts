@@ -269,6 +269,9 @@ export async function submit(req: Request, env: Env): Promise<Response> {
       id: sessionId,
       profileVersion: session.profileVersion,
       profileKeyId: session.profileKeyId ?? null,
+      // FR-P0-04: the hash persisted at issuance — a reconstructed profile
+      // that no longer matches it is drift, and drift fails closed.
+      profileHash: session.profileHash,
     }, recipe, { holdoutMode, turnstileRequired: turnstileRequiredForId });
     if (!reconstructed.ok) {
       console.error("submit reconstruction failed:", reconstructed.code, reconstructed.detail);

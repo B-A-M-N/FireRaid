@@ -30,7 +30,6 @@ import {
   admitEvaluation,
   type EvaluationMiddlewareDeps,
 } from "../../src/eval/evaluation-middleware.js";
-import { deriveProfilePure } from "../../src/core/profile.js";
 
 const SECRET = "k".repeat(64);
 
@@ -65,49 +64,40 @@ function deps(version: number, over: Partial<EvaluationMiddlewareDeps> = {}): Ev
 const HTML = '<html><body><form id="signup-form"></form></body></html>';
 
 describe("P1-1: middleware consumes the envelope's pv (version pinning)", () => {
-  it("a v7 cookie under a v8 deployment default still reconstructs the v7 treatment", async () => {
-    // The sessions were ISSUED at version 7 (adapter constructed with 7).
+  it("a pv=7 cookie under a v1 deployment FAILS CLOSED (never runs v1 under pv=7)", async () => {
+    // The sessions were ISSUED at version 7. The profile registry today has
+    // only ONE FROZEN version (v1), so version 7 has no frozen implementation
+    // (FR-P0-04). The middleware MUST consume the envelope's pv — and, finding
+    // it unsupported, fail closed with an operational error rather than derive
+    // the v1 treatment under a mismatched number. If it silently fell back to
+    // deps.version (v1) the request would proceed — the exact pre-FR-P0-04
+    // version-drift the registry exists to stop.
     const issuingAdapter = new ReferenceSessionAdapter(SECRET, { version: 7 });
     const sessionId = await issuingAdapter.createSession();
     const cookie = await issuingAdapter.sessionCookie(sessionId);
     const csrf = await makeCsrf(SECRET, sessionId);
 
-    // The v7 profile's treatment (decoy field name) — what the middleware
-    // MUST reconstruct.
-    const v7Profile = await deriveProfilePure(
-      { secret: SECRET, version: 7, sessionId, mode: "production" },
-      { families: ["decoy-field"] }
-    );
-    // The v8 profile for the same session differs (different seed domain).
-    const v8Profile = await deriveProfilePure(
-      { secret: SECRET, version: 8, sessionId, mode: "production" },
-      { families: ["decoy-field"] }
-    );
-    // Sanity: the two versions really do issue different material for this
-    // session — otherwise this test cannot distinguish them.
-    expect(v7Profile.decoyField!.fieldName).not.toBe(v8Profile.decoyField!.fieldName);
-
-    // Deployment default is NOW 8, with the bound recipe the experiment
-    // assigned. The submit carries the v7 cookie.
     const enforcement = new NullEnforcement();
-    const d = deps(8, { enforcement, recipe: { families: ["decoy-field"] } as never });
+    const d = deps(1, {
+      enforcement,
+      recipe: { families: ["decoy-field"] } as never,
+    });
     const req = new Request("http://mw/signup", {
       method: "POST",
       headers: { "content-type": "application/json", cookie },
       body: JSON.stringify({
         csrf,
-        form: { name: "A", email: "a@b.c", [v7Profile.decoyField!.fieldName]: "decoy-hit" },
+        form: { name: "A", email: "a@b.c", decoy_field: "decoy-hit" },
       }),
     });
     const res = await admitEvaluation(req, d, async () => HTML);
 
-    // The v7 decoy field must have been STRIPPED from the forward (the
-    // middleware reconstructed the v7 profile — the v8 field name would
-    // have survived the strip and leaked into the upstream form).
-    expect(res.kind).toBe("deny"); // decoy populated ⇒ class-B evidence ⇒ REVIEW-deny
-    expect(enforcement.lastForm).toBeNull(); // never forwarded
-    // And the deny was a SCORING decision, not an infrastructure reject.
-    expect((res as { disposition?: string }).disposition).toBe("REVIEW");
+    // The envelope's pv=7 was consumed; UNSUPPORTED_PROFILE_VERSION fails
+    // closed as an operational error — never an applicant-facing denial, and
+    // never a silent derive-under-wrong-version (the forward stays undone).
+    expect(res.kind).toBe("error");
+    expect((res as { operationalReason?: string }).operationalReason).toBe("SUBMIT_EVAL_ERROR");
+    expect(enforcement.lastForm).toBeNull(); // never forwarded on an unsupported version
   });
 
   it("resolveSession returns the envelope's pv/kid (the context middleware consumes)", async () => {
@@ -123,25 +113,22 @@ describe("P1-1: middleware consumes the envelope's pv (version pinning)", () => 
     expect(typeof ctx!.issuedAt).toBe("number");
   });
 
-  it("the canary GET path derives under the envelope pv (route token parity)", async () => {
-    // A v7-issued route token must verify under a v8 deployment default.
+  it("the canary GET path consumes the envelope pv and FAILS CLOSED on an unsupported version", async () => {
+    // A pv=7-issued canary probe must NOT be verified by re-deriving under a
+    // different number. With only v1 frozen, the envelope's pv=7 is consumed
+    // and fails closed as an operational error (never INVALID_TOKEN, which
+    // would claim the treatment WAS verified-then-rejected — version drift
+    // must stay an infrastructure failure, not an applicant rejection).
     const issuingAdapter = new ReferenceSessionAdapter(SECRET, { version: 7 });
     const sessionId = await issuingAdapter.createSession();
     const cookie = await issuingAdapter.sessionCookie(sessionId);
-    const v7Profile = await deriveProfilePure(
-      { secret: SECRET, version: 7, sessionId, mode: "production" },
-      { families: ["decoy-route"] }
-    );
-    const d = deps(8, {
+    const d = deps(1, {
       recipe: { families: ["decoy-route"] } as never,
       canaryStore: new (await import("../../src/host-adapter/index.js")).ReferenceCanaryStore(),
     });
-    const probe = new Request(`http://mw/c/${v7Profile.decoyRoute!.endpointToken}`, {
-      headers: { cookie },
-    });
+    const probe = new Request("http://mw/c/some-token", { headers: { cookie } });
     const res = await admitEvaluation(probe, d, async () => HTML);
-    // Verified under the ENVELOPE's version — 204, not an INVALID_TOKEN deny
-    // from re-deriving the v8 token.
-    expect(res.kind).toBe("canary-verified");
+    expect(res.kind).toBe("error");
+    expect((res as { operationalReason?: string }).operationalReason).toBe("CANARY_EVAL_ERROR");
   });
 });

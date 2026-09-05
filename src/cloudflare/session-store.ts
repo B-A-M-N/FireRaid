@@ -39,6 +39,7 @@ export class D1SessionStore implements SessionStore {
     createdAt: number;
     profileVersion: number;
     profileKeyId: string | null;
+    profileHash: string;
     /** Numeric submitted (0 = unsubmitted, 1 = submitted). Compatible with SessionPayload. */
     submitted: number | undefined;
     finalScore: number | null;
@@ -48,7 +49,7 @@ export class D1SessionStore implements SessionStore {
   } | null> {
     const row = await this.db
       .prepare(
-        `SELECT id, created_at, profile_version, profile_key_id, submitted, final_score, final_disposition, causal_route_hit FROM sessions WHERE id = ?`
+        `SELECT id, created_at, profile_version, profile_key_id, profile_hash, submitted, final_score, final_disposition, causal_route_hit FROM sessions WHERE id = ?`
       )
       .bind(sessionId)
       .first<{
@@ -56,6 +57,7 @@ export class D1SessionStore implements SessionStore {
         created_at: number;
         profile_version: number;
         profile_key_id: string | null;
+        profile_hash: string;
         submitted: number;
         final_score: number | null;
         final_disposition: string | null;
@@ -67,6 +69,7 @@ export class D1SessionStore implements SessionStore {
       createdAt: row.created_at,
       profileVersion: row.profile_version,
       profileKeyId: row.profile_key_id,
+      profileHash: row.profile_hash,
       submitted: row.submitted,
       finalScore: row.final_score,
       finalDisposition: row.final_disposition,

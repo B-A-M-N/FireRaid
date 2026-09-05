@@ -2,7 +2,8 @@
  * FireRaid Engine Facade (FR-R3-086).
  * Unified entry point for the defense plane.
  */
-import { deriveProductionProfile, deriveEvaluationProfile, type DefenseRecipe } from "./profile.js";
+import { deriveProductionProfileByVersion, deriveEvaluationProfileByVersion } from "./profile-versions.js";
+import type { DefenseRecipe } from "./recipe-schema.js";
 import { correlate, type ServerObservationSet } from "./correlation.js";
 import { decide, getPolicyOrThrow } from "./decision.js";
 import type { DefenseProfile } from "../types/profile.js";
@@ -58,14 +59,16 @@ export class FireRaidEngine {
     recipe?: DefenseRecipe
   ): Promise<DefenseProfile> {
     // FR-R5-032: "production" mode goes through the production API (no
-    // recipe override); "lab" is the evaluation plane.
+    // recipe override); "lab" is the evaluation plane. FR-P0-04: both go
+    // through the version dispatch (frozen implementations, fail-closed on
+    // unknown versions).
     if (this.mode === "lab") {
-      return deriveEvaluationProfile(
+      return deriveEvaluationProfileByVersion(
         { secret: this.secret, version: this.version, sessionId, mode: "lab" },
         recipe
       );
     }
-    return deriveProductionProfile({ secret: this.secret, version: this.version, sessionId });
+    return deriveProductionProfileByVersion({ secret: this.secret, version: this.version, sessionId });
   }
 
   /**

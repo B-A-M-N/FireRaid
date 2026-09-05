@@ -101,6 +101,26 @@ async function envelopeFor(env: Env, sid: string): Promise<string> {
   return signSessionEnvelope(resolveProfileKey(env), sid, Date.now(), 1);
 }
 
+/**
+ * FR-P0-04: the session row must carry the profile hash AS ISSUED — the
+ * submit route's drift check compares reconstruction against it and fails
+ * closed on a mismatch. Seed rows with the REAL derived hash, not a stub.
+ */
+async function seedIssuedSession(
+  sid: string,
+  keyId: string,
+  extra: { submitted?: number; lastEventSeq?: number } = {}
+): Promise<void> {
+  const { deriveProductionProfile } = await import("../../src/core/profile.js");
+  const { hashProfile } = await import("../../src/core/profile.js");
+  const profile = await deriveProductionProfile({ secret: SECRET, version: 1, sessionId: sid });
+  const hash = await hashProfile(profile);
+  db.prepare(
+    `INSERT INTO sessions (id, created_at, last_seen_at, profile_version, profile_key_id, profile_id, profile_hash, submitted, last_event_seq)
+     VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)`
+  ).run(sid, Date.now(), Date.now(), keyId, profile.profileId, hash, extra.submitted ?? 0, extra.lastEventSeq ?? null);
+}
+
 const INTERACTION_SOURCES = new Set([
   "DIRECT_FILL_PATTERN",
   "SHORT_COMPLETION",
@@ -118,10 +138,7 @@ describe("P0-1: incomplete telemetry must NOT score interaction evidence", () =>
     const cookie = await envelopeFor(env, sid);
 
     // Session accepted through seq 10, but raw batches 3-10 were pruned.
-    db.prepare(
-      `INSERT INTO sessions (id, created_at, last_seen_at, profile_version, profile_key_id, profile_id, profile_hash, submitted, last_event_seq)
-       VALUES (?, ?, ?, 1, ?, 'pid', 'phash', 0, 10)`
-    ).run(sid, Date.now(), Date.now(), KEY_ID);
+    await seedIssuedSession(sid, KEY_ID, { lastEventSeq: 10 });
 
     // Compact metrics row only folded through seq 1 — behind the watermark.
     // capturePointer/Key true so the interaction family WOULD score if the
@@ -175,10 +192,7 @@ describe("P0-1: incomplete telemetry must NOT score interaction evidence", () =>
     const cookie = await envelopeFor(env, sid);
 
     // Session accepted through seq 1.
-    db.prepare(
-      `INSERT INTO sessions (id, created_at, last_seen_at, profile_version, profile_key_id, profile_id, profile_hash, submitted, last_event_seq)
-       VALUES (?, ?, ?, 1, ?, 'pid', 'phash', 0, 1)`
-    ).run(sid, Date.now(), Date.now(), KEY_ID);
+    await seedIssuedSession(sid, KEY_ID, { lastEventSeq: 1 });
 
     // Compact metrics row folded through seq 1 — caught up to watermark.
     // Simulate a direct-fill pattern: input_without_focus > 0.
