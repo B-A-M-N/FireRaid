@@ -347,8 +347,13 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
     upstreamUrl: string,
     form: Record<string, string>,
     cookies: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    opts?: { idempotencyKey?: string }
   ): Promise<EnforcementResult> {
+    // FR-P0-02: a request that was actually SENT carries the idempotency key
+    // so the upstream can deduplicate its side of the irreversible act. A
+    // failure AFTER send is uncertain (the upstream may have committed); a
+    // definite pre-send failure may release the slot.
     let resp: Response;
     try {
       // FR-P1-11: combine the middleware's request deadline with the adapter's
@@ -359,9 +364,14 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
       const combined = typeof AbortSignal.any === "function"
         ? AbortSignal.any([requestSignal, AbortSignal.timeout(this.forwardTimeoutMs)])
         : AbortSignal.timeout(this.forwardTimeoutMs);
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        cookie: cookies,
+      };
+      if (opts?.idempotencyKey) headers["idempotency-key"] = opts.idempotencyKey;
       resp = await fetch(upstreamUrl, {
         method: "POST",
-        headers: { "content-type": "application/json", cookie: cookies },
+        headers,
         body: JSON.stringify({ form }),
         signal: combined,
         // An admission endpoint that responds with a redirect did NOT create
@@ -376,18 +386,31 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
       // redirect: "error" surfaces as TypeError("fetch failed") with the
       // real reason on `cause` ("unexpected redirect").
       const causeMsg = e instanceof Error && e.cause instanceof Error ? e.cause.message : "";
+      const reason =
+        e instanceof Error && e.name === "TimeoutError"
+          ? "timeout"
+          : /redirect/i.test(causeMsg)
+            ? "upstream_redirect"
+            : "network_error";
+      // A timeout AFTER the request was dispatched cannot rule out that the
+      // upstream received (and committed) it — uncertain. A redirect
+      // rejection means the upstream RESPONDED (received, then answered
+      // non-locally): received, so also uncertain, but named distinctly.
+      // Everything else failed before the request left: definite.
       return {
         kind: "transport-failure",
-        reason:
-          e instanceof Error && e.name === "TimeoutError"
-            ? "timeout"
-            : /redirect/i.test(causeMsg)
-              ? "upstream_redirect"
-              : "network_error",
+        reason,
+        ...(e instanceof Error && e.name === "TimeoutError" || /redirect/i.test(causeMsg)
+          ? { uncertain: true }
+          : {}),
       };
     }
     if (resp.ok) return { kind: "created" };
     if (RETRYABLE_STATUS.has(resp.status)) {
+      // FR-P0-02: a received-and-answered 5xx/408/429 means the upstream
+      // processed the request but did not commit (its own failure paths) —
+      // the received answer makes this KNOWN, not uncertain, but the slot
+      // release stays the store's policy for recorded transport failures.
       return { kind: "transport-failure", reason: `upstream_${resp.status}` };
     }
     // Any other 4xx is the upstream's OWN answer about this application:
@@ -476,7 +499,14 @@ export class ReferenceSubmissionStore implements HostSubmissionStore {
   /** sessionId → claim state. A completed claim holds its outcome forever. */
   private readonly claims = new Map<
     string,
-    { claimId: string; idempotencyKey: string; open: boolean; outcome?: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string } }
+    {
+      claimId: string;
+      idempotencyKey: string;
+      open: boolean;
+      /** FR-P0-02: a held-open UNCERTAIN claim — operator reconciliation required. */
+      heldUncertain?: boolean;
+      outcome?: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string };
+    }
   >();
 
   async claim(sessionId: string, idempotencyKey: string): Promise<HostSubmissionClaimResult> {
@@ -504,16 +534,38 @@ export class ReferenceSubmissionStore implements HostSubmissionStore {
     return { kind: "claimed", claimId, idempotencyKey: submissionIdempotencyKey(sessionId) };
   }
 
+  /**
+   * FR-P0-02 (rereview P0-E): read the finalized outcome WITHOUT claiming.
+   * An uncertain-held slot is deliberately NOT a final outcome — the caller
+   * proceeds, hits claim() → conflict, and fails closed.
+   */
+  async lookupFinal(sessionId: string): Promise<FinalSubmissionOutcome | null> {
+    const existing = this.claims.get(sessionId);
+    if (!existing || existing.open || !existing.outcome) return null;
+    const o = existing.outcome;
+    return o.kind === "transport-failure" ? null : o;
+  }
+
   async complete(
     claimId: string,
-    outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string }
+    outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string; uncertain?: boolean }
   ): Promise<void> {
     for (const [sessionId, claim] of this.claims) {
       if (claim.claimId !== claimId) continue;
+      // FR-P0-02: a DEFINITE transport failure releases the slot entirely —
+      // a genuine client retry must be able to re-attempt the forward. An
+      // UNCERTAIN outcome (post-send timeout / ambiguous network error)
+      // HOLDS the slot open without an outcome: the upstream may have
+      // committed, so an automatic retry could create a duplicate. The
+      // session stays claimed (later retries → conflict) until an operator
+      // reconciles the unknown state.
+      if (outcome.kind === "transport-failure" && outcome.uncertain === true) {
+        claim.open = false;
+        claim.heldUncertain = true;
+        return;
+      }
       claim.open = false;
       claim.outcome = outcome;
-      // A transport failure releases the slot entirely — a genuine client
-      // retry must be able to re-attempt the forward.
       if (outcome.kind === "transport-failure") this.claims.delete(sessionId);
       return;
     }

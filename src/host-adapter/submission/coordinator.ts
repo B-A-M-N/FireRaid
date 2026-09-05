@@ -27,6 +27,8 @@ import { submissionIdempotencyKey } from "../interface.js";
 import type {
   VerificationInput,
   HostSubmissionClaimResult,
+  HostSubmissionClaim,
+  FinalSubmissionOutcome,
   EnforcementResult,
 } from "../interface.js";
 import type {
@@ -113,50 +115,57 @@ export interface SubmissionContext {
 /**
  * Verify the applicant, collect evidence, score, and — when admission
  * allows — perform the ONE irreversible forward under a durable claim.
- * FR-P0-02: the session's single forward slot is claimed BEFORE any
- * evaluation work and completed with the outcome whichever way the request
- * lands (replay → stored outcome; conflict → never forward).
+ *
+ * FR-P0-02 (rereview P0-E): the session's single forward slot is claimed
+ * ONLY at the irreversible boundary — after verification, evidence
+ * collection, scoring, and the runtime disposition have all approved the
+ * forward. A deny anywhere earlier (verification failure, invalid
+ * telemetry, unknown scoring policy, decision denial, evaluation error)
+ * never opens a claim, so a corrected retry can never collide with an
+ * orphaned one. Before the boundary, a cheap non-claiming lookup
+ * (lookupFinal) still serves replay: a session that already finalized
+ * durably gets its stored outcome without re-evaluating.
  */
 export async function coordinateSubmission(
   ctx: SubmissionContext,
   ring: ProfileKeyRing
 ): Promise<MiddlewareResult> {
   const { deps, deadline, sessionId } = ctx;
+  // The forward-boundary claim — defined only from the irreversible boundary
+  // onward; the pre-claim catch reads it to decide whether a release is due.
+  let claim: HostSubmissionClaim | undefined;
 
-  // FR-P0-02: claim the session's single irreversible forward BEFORE any
-  // evaluation work. Three outcomes:
-  //   replay   → the session already finalized durably; return the STORED
-  //              outcome without touching the upstream again (the
-  //              lost-response retry converges to the original receipt).
-  //   conflict → another in-flight request owns the claim (concurrent
-  //              submits); fail closed as forward-failed — never forward.
-  //   claimed  → this request owns the forward; the claim is completed with
-  //              the outcome below, whichever way the forward lands.
-  // A claim store that throws or returns a non-contract shape fails CLOSED
-  // (conflict semantics): an unclaimable session is never forwarded.
+  // Replay check WITHOUT claiming (P0-E fix): the old flow claimed the
+  // forward slot merely to discover a finalized outcome, so any early
+  // failure AFTER the claim (unknown profile key, verification failure,
+  // invalid telemetry, …) left the slot open forever and every corrected
+  // retry collided with it. lookupFinal returns the stored outcome, if any,
+  // without touching the claim state.
   const idempotencyKey = submissionIdempotencyKey(sessionId);
-  let claim: HostSubmissionClaimResult;
+  let stored: FinalSubmissionOutcome | null = null;
   try {
-    claim = await deadline.run(deps.submissionStore.claim(sessionId, idempotencyKey, deadline.signal));
+    stored = await deadline.run(
+      deps.submissionStore.lookupFinal
+        ? deps.submissionStore.lookupFinal(sessionId, deadline.signal)
+        : Promise.resolve(null)
+    );
   } catch (err) {
-    reportOperationalError(deps, "submissionStore.claim", err);
-    return { kind: "forward-failed", forwardFailureReason: "submission_claim_failed" };
+    // A lookup failure must not bypass the invariant: fail closed as if no
+    // final result exists (the forward path will claim and re-check).
+    reportOperationalError(deps, "submissionStore.lookupFinal", err);
   }
-  if (claim.kind === "replay") {
+  if (stored) {
     // The stored outcome IS the receipt: the applicant gets the same neutral
     // result as the request that actually did the work (created → success
     // receipt; business-rejected / queued-for-retry → captured-but-not-
     // created receipt). The upstream is never called again.
     return {
       kind: "admit",
-      upstreamCreated: claim.outcome.kind === "created",
+      upstreamCreated: stored.kind === "created",
       sessionId,
       disposition: "REPLAY",
-      ...(claim.outcome.kind !== "created" ? { enforcementDetail: claim.outcome } : {}),
+      ...(stored.kind !== "created" ? { enforcementDetail: stored } : {}),
     };
-  }
-  if (claim.kind !== "claimed") {
-    return { kind: "forward-failed", forwardFailureReason: "submission_claim_conflict" };
   }
 
   try {
@@ -324,17 +333,9 @@ export async function coordinateSubmission(
       // that persists review-queue data asynchronously)
       await deadline.run(deps.enforcement.deny(sessionId, decision.disposition, riskProjection, deadline.signal));
       await finalizeStores(deps, sessionId, deadline.signal);
-      // FR-P0-02: the decision denied BEFORE any forward — release the
-      // claim with a transport-failure outcome (the session may legitimately
-      // fix and retry; no upstream act ever happened).
-      try {
-        await deadline.run(deps.submissionStore.complete(claim.claimId, {
-          kind: "transport-failure",
-          reason: `decision_${decision.disposition.toLowerCase()}`,
-        }, deadline.signal));
-      } catch (err) {
-        reportOperationalError(deps, "submissionStore.complete(decision-deny)", err);
-      }
+      // FR-P0-02 (rereview P0-E): the decision denied BEFORE any claim was
+      // ever opened — no forward can happen, so no claim must exist. A
+      // corrected retry (new evidence, fixed form) starts clean.
       return {
         kind: "deny",
         disposition: decision.disposition,
@@ -344,6 +345,45 @@ export async function coordinateSubmission(
         submittedEmail,
         risk: riskProjection,
       };
+    }
+
+    // ── THE IRREVERSIBLE BOUNDARY (FR-P0-02) ────────────────────────────────
+    // Everything above could deny/retry safely with no durable claim. From
+    // here the forward may happen, so the session's single forward slot is
+    // claimed NOW. Three outcomes:
+    //   replay   → between our lookupFinal and this claim, another request
+    //              completed the forward durably; return the STORED outcome
+    //              without touching the upstream again.
+    //   conflict → another in-flight request owns the claim (concurrent
+    //              submits); fail closed as forward-failed — never forward.
+    //   claimed  → this request owns the forward; the claim is completed
+    //              with the outcome below, whichever way it lands.
+    // A claim store that throws or returns a non-contract shape fails CLOSED
+    // (conflict semantics): an unclaimable session is never forwarded.
+    {
+      let claimResult: HostSubmissionClaimResult;
+      try {
+        claimResult = await deadline.run(deps.submissionStore.claim(sessionId, idempotencyKey, deadline.signal));
+      } catch (err) {
+        reportOperationalError(deps, "submissionStore.claim", err);
+        return { kind: "forward-failed", forwardFailureReason: "submission_claim_failed" };
+      }
+      if (claimResult.kind === "replay") {
+        // Another request did the work between lookupFinal and the claim:
+        // its stored outcome is the receipt; the upstream is never called.
+        const o = claimResult.outcome;
+        return {
+          kind: "admit",
+          upstreamCreated: o.kind === "created",
+          sessionId,
+          disposition: "REPLAY",
+          ...(o.kind !== "created" ? { enforcementDetail: o } : {}),
+        };
+      }
+      if (claimResult.kind !== "claimed") {
+        return { kind: "forward-failed", forwardFailureReason: "submission_claim_conflict" };
+      }
+      claim = claimResult;
     }
 
     // Admission allowed: strip FireRaid fields and forward to upstream.
@@ -365,20 +405,26 @@ export async function coordinateSubmission(
     // FR-P1-11: the forward itself is raced against the deadline — a hung
     // upstream (even one the adapter's own timeout misses) becomes a
     // transport failure, never a hang, and never a false created-receipt.
+    // FR-P0-02: the claim's idempotency key travels WITH the forward so a
+    // retry-capable transport can deduplicate the upstream's side.
     let enforcementResult: boolean | EnforcementResult;
     try {
       enforcementResult = await deadline.run(
-        deps.enforcement.allow(deps.upstreamRegisterUrl, cleanForm, cookies, deadline.signal)
+        deps.enforcement.allow(deps.upstreamRegisterUrl, cleanForm, cookies, deadline.signal, {
+          idempotencyKey: claim.idempotencyKey,
+        })
       );
     } catch (err) {
       // DeadlineError (and any abort it surfaces) → the forward never
-      // reached a terminal captured state.
+      // reached a terminal captured state. The request MAY have been sent,
+      // so the outcome is UNCERTAIN (held slot, not released).
       reportOperationalError(deps, "enforcement.allow(deadline)", err);
       try {
         await deadline.run(
           deps.submissionStore.complete(claim.claimId, {
             kind: "transport-failure",
             reason: err instanceof DeadlineError ? "adapter_deadline" : "enforcement_allow_failed",
+            uncertain: true,
           }, deadline.signal)
         );
       } catch (completeErr) {
@@ -477,17 +523,22 @@ export async function coordinateSubmission(
       risk: riskProjection,
     };
   } catch (err) {
-    // FR-P0-02: an evaluation error after the claim must RELEASE it —
-    // nothing was forwarded, so the session may legitimately retry. If the
-    // release fails the claim stays held (fail closed: a later retry gets
-    // conflict rather than risk a second forward on unknown state).
-    try {
-      await deadline.run(deps.submissionStore.complete(claim.claimId, {
-        kind: "transport-failure",
-        reason: "eval_error",
-      }, deadline.signal));
-    } catch (completeErr) {
-      reportOperationalError(deps, "submissionStore.complete(eval_error)", completeErr);
+    // FR-P0-02: an evaluation error BEFORE the claim needs no release —
+    // no claim exists (the corrected-retry guarantee). An error AFTER the
+    // claim but BEFORE the forward call (e.g. a strip/cookie failure) must
+    // RELEASE the claim as a definite transport failure — nothing was sent,
+    // so the session may legitimately retry. If the release fails the claim
+    // stays held (fail closed: a later retry gets conflict rather than risk
+    // a second forward on unknown state).
+    if (claim !== undefined) {
+      try {
+        await deadline.run(deps.submissionStore.complete(claim.claimId, {
+          kind: "transport-failure",
+          reason: "eval_error",
+        }, deadline.signal));
+      } catch (completeErr) {
+        reportOperationalError(deps, "submissionStore.complete(eval_error)", completeErr);
+      }
     }
     // FR-P0-03: the exception is FireRaid/host infrastructure failing —
     // an operational error (5xx), never an applicant-facing denial. The

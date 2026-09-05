@@ -343,7 +343,12 @@ export interface HostEnforcementAdapter {
     upstreamUrl: string,
     form: Record<string, string>,
     cookies: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    // FR-P0-02: the claim's idempotency key. A retry-capable adapter MUST
+    // present it to the upstream (e.g. an `Idempotency-Key` header) so the
+    // upstream can deduplicate its own side of the irreversible act —
+    // exactly-once cannot be guaranteed from the caller alone.
+    opts?: { idempotencyKey?: string }
   ): Promise<boolean | EnforcementResult>;
   /**
    * Record a denied submission (never forwarded).
@@ -372,7 +377,22 @@ export type EnforcementResult =
   | { kind: "created" }
   | { kind: "business-rejected"; status: number; body?: string }
   | { kind: "queued-for-retry"; retryId: string }
-  | { kind: "transport-failure"; reason: string };
+  | {
+      kind: "transport-failure";
+      reason: string;
+      /**
+       * FR-P0-02: TRUE when the adapter cannot tell whether the upstream
+       * RECEIVED the request (a timeout after send, an ambiguous network
+       * error). An uncertain outcome is NOT a definite pre-send failure:
+       * the upstream may have committed the account. The middleware holds
+       * the session's forward slot on uncertain (fail closed — retries
+       * conflict until an operator reconciles) instead of releasing it for
+       * an automatic retry that could create a duplicate. Only a DEFINITE
+       * pre-send failure (connection refused, DNS miss, a received-and-
+       * classified response) may release the slot.
+       */
+      uncertain?: boolean;
+    };
 
 /**
  * FR-P0-02 — the durable one-submission-per-session authority.
@@ -450,13 +470,25 @@ export interface HostSubmissionStore {
    */
   claim(sessionId: string, idempotencyKey: string, signal?: AbortSignal): Promise<HostSubmissionClaimResult>;
   /**
+   * FR-P0-02 (rereview P0-E): read the session's FINALIZED forward outcome,
+   * if one exists, WITHOUT claiming the forward slot. Lets the middleware
+   * serve replays cheaply before evaluation while keeping the claim itself
+   * at the irreversible boundary — an early deny (verification failure,
+   * invalid telemetry, …) never opens a claim, so a corrected retry never
+   * collides with an orphaned one. Returns null when no terminal outcome is
+   * stored. Implementations SHOULD be optional at the type level (an older
+   * store without it simply skips the fast replay path; claim()'s own replay
+   * remains the backstop).
+   */
+  lookupFinal?(sessionId: string, signal?: AbortSignal): Promise<FinalSubmissionOutcome | null>;
+  /**
    * Record the forward's outcome against the claim durably. Called exactly
    * once per successful claim, before the middleware responds. `outcome`
    * covers ALL terminal forward results — created, business-rejected,
    * queued-for-retry, AND transport-failure (a recorded transport failure
    * releases the claim so a genuine client retry may re-attempt).
    */
-  complete(claimId: string, outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string }, signal?: AbortSignal): Promise<void>;
+  complete(claimId: string, outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string; uncertain?: boolean }, signal?: AbortSignal): Promise<void>;
 }
 
 /** Deterministic idempotency key material for one session's forward. */

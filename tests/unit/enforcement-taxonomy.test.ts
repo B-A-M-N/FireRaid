@@ -119,7 +119,9 @@ describe("P0-8: ReferenceEnforcementAdapter classification", () => {
     a.forwardTimeoutMs = 200;
     try {
       const r = await a.allow(url, { a: "b" }, "");
-      expect(r).toEqual({ kind: "transport-failure", reason: "timeout" });
+      // FR-P0-02: a post-send timeout is UNCERTAIN — the upstream may have
+      // committed, so the classification carries uncertain:true.
+      expect(r).toEqual({ kind: "transport-failure", reason: "timeout", uncertain: true });
     } finally {
       server.close();
     }
@@ -141,7 +143,10 @@ describe("P0-8: ReferenceEnforcementAdapter classification", () => {
     });
     try {
       const r = await adapter().allow(url, { a: "b" }, "");
-      expect(r).toEqual({ kind: "transport-failure", reason: "upstream_redirect" });
+      // FR-P0-02: the upstream RECEIVED and answered (a redirect) — the
+      // outcome is known-received but unclassifiable as created, so it is
+      // uncertain (held slot) rather than a definite release.
+      expect(r).toEqual({ kind: "transport-failure", reason: "upstream_redirect", uncertain: true });
     } finally {
       server.close();
     }
