@@ -352,9 +352,13 @@ let _derivationMod = null;
 async function derivationModule() {
   if (!_derivationMod) {
     const profileUrl = new URL("../src/core/profile.ts", import.meta.url).href;
-    _derivationMod = await import("tsx/esm/api").then((tsx) =>
-      tsx.tsImport(profileUrl, import.meta.url).then((m) => m.default ?? m)
-    );
+    const versionsUrl = new URL("../src/core/profile-versions.ts", import.meta.url).href;
+    const tsx = await import("tsx/esm/api");
+    const [profileMod, versionsMod] = await Promise.all([
+      tsx.tsImport(profileUrl, import.meta.url).then((m) => m.default ?? m),
+      tsx.tsImport(versionsUrl, import.meta.url).then((m) => m.default ?? m),
+    ]);
+    _derivationMod = { ...profileMod, ...versionsMod };
   }
   return _derivationMod;
 }
@@ -370,14 +374,19 @@ function workerProfileSecret() {
 /**
  * Verify the production session envelope and re-derive the issued profile
  * the way the middleware does: secret (by kid) + version (payload.pv) +
- * bare sid → deriveProductionProfile. Returns null on ANY verification
- * failure (the harness must never act on an unverified envelope).
+ * bare sid → deriveProductionProfile. Accepts BOTH envelope formats (fr1
+ * legacy, fr2 — FR-P0-G, carries the signed issued profile hash `ph`).
+ * Returns null on ANY verification failure (the harness must never act on
+ * an unverified envelope). For fr2 the re-derived profile hash is checked
+ * against the signed `ph` — a harness-side replay of the worker's own
+ * materialization drift check.
  */
 async function deriveProfileFromEnvelope(cookieValue) {
   try {
     const parts = cookieValue.split(".");
-    if (parts.length !== 3 || parts[0] !== "fr1") return null;
-    const [, bodyB64, sigB64] = parts;
+    if (parts.length !== 3) return null;
+    const [prefix, bodyB64, sigB64] = parts;
+    if (prefix !== "fr1" && prefix !== "fr2") return null;
     const b64urlDecode = (s) =>
       Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
     const body = b64urlDecode(bodyB64);
@@ -395,18 +404,36 @@ async function deriveProfileFromEnvelope(cookieValue) {
       "HMAC",
       key,
       sig,
-      new TextEncoder().encode(`fr1.${bodyB64}`)
+      new TextEncoder().encode(`${prefix}.${bodyB64}`)
     );
     if (!ok) return null;
     const payload = JSON.parse(new TextDecoder().decode(body));
-    if (payload.v !== 1 || typeof payload.sid !== "string" || !payload.sid) return null;
-    const { deriveProductionProfile } = await derivationModule();
-    return await deriveProductionProfile({
+    if (
+      payload.v !== (prefix === "fr2" ? 2 : 1) ||
+      typeof payload.sid !== "string" || !payload.sid ||
+      (prefix === "fr2" && typeof payload.ph !== "string")
+    ) {
+      return null;
+    }
+    const { deriveProductionProfile, hashProfileByVersion } = await derivationModule();
+    const profile = await deriveProductionProfile({
       secret,
       version: payload.pv,
       sessionId: payload.sid,
     });
-  } catch {
+    // FR-P0-G: for fr2, prove the re-derived treatment equals the issued
+    // one — exactly what the worker's materialization asserts.
+    if (prefix === "fr2") {
+      const derivedHash = await hashProfileByVersion(profile, payload.pv);
+      if (derivedHash !== payload.ph) {
+        throw new Error(
+          "verified-canary: fr2 signed profile hash does not match the harness re-derivation (treatment drift)"
+        );
+      }
+    }
+    return profile;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("verified-canary:")) throw err;
     return null;
   }
 }

@@ -63,7 +63,7 @@ import {
 
 // Import compiled TS via tsx at runtime
 import { referenceInject } from "../src/host-adapter/reference-render.js";
-import { createEvaluationOriginServer, closeServer } from "../src/runtime/node.js";
+import { createEvaluationOriginServer, closeServer } from "../src/eval/evaluation-origin.js";
 
 // --- Application HTML (minimal signup form) ---
 const SIGNUP_HTML = `<!DOCTYPE html>

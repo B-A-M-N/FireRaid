@@ -58,7 +58,7 @@ async function adminSessionsCount(): Promise<number> {
 }
 
 interface Signup {
-  /** The __Host-fr_sid cookie VALUE (an fr1 envelope in production mode). */
+  /** The __Host-fr_sid cookie VALUE (an fr2 envelope in production mode — signed profile hash, FR-P0-G). */
   sidValue: string;
   csrf: string;
   html: string;
@@ -73,7 +73,7 @@ async function productionSignup(): Promise<Signup> {
     .map((c) => c.split(";")[0].trim())
     .filter((c) => c.startsWith("__Host-fr_sid="))
     .map((c) => c.split("=").slice(1).join("="))[0];
-  expect(sid).toMatch(/^fr1\./);
+
   const html = await resp.text();
   const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
   if (!csrf) throw new Error("CSRF not found");
@@ -81,10 +81,10 @@ async function productionSignup(): Promise<Signup> {
 }
 
 describe("FR-P1-19 integration: stateless production envelope", () => {
-  it("GET /signup issues an fr1 envelope cookie and performs NO D1 write", async () => {
+  it("GET /signup issues an fr2 envelope cookie and performs NO D1 write", async () => {
     const before = await adminSessionsCount();
     const { sidValue } = await productionSignup();
-    expect(sidValue).toMatch(/^fr1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+    expect(sidValue).toMatch(/^fr2\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
     const after = await adminSessionsCount();
     expect(after).toBe(before); // the stateless claim, measured
   });
@@ -204,6 +204,7 @@ describe("FR-P1-19 integration: stateless production envelope", () => {
     });
     const text = await detail.text();
     expect(text).not.toContain("fr1.");
+    expect(text).not.toContain("fr2.");
   });
 
   it("FR-P1-08: malformed garbage causes ZERO D1 writes (deferred materialization)", async () => {

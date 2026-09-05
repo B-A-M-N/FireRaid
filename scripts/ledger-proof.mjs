@@ -80,6 +80,7 @@ async function main() {
     ReferenceTelemetryAdapter,
     ReferenceEnforcementAdapter,
     ReferenceCanaryStore,
+    ReferenceSubmissionStore,
   } = await import("../src/host-adapter/index.ts");
   const { admitEvaluation } = await import("../src/eval/evaluation-middleware.ts");
 
@@ -90,6 +91,9 @@ async function main() {
   const telemetry = new ReferenceTelemetryAdapter();
   const enforcement = new ReferenceEnforcementAdapter();
   const canaryStore = new ReferenceCanaryStore();
+  // FR-P0-02: the one-submission-per-session authority — required by the
+  // factory and by the coordinator's lookupFinal replay check.
+  const submissionStore = new ReferenceSubmissionStore();
 
   const baseDeps = {
     secret: SECRET,
@@ -101,6 +105,7 @@ async function main() {
     telemetry,
     enforcement,
     canaryStore,
+    submissionStore,
     // The proof asserts that trap evidence BLOCKS forwarding. Advisory mode
     // (the deployment default) never blocks — it forwards everything with a
     // review annotation — so under advisory the ledger assertion would be

@@ -626,13 +626,16 @@ describe("closure 4: durability window survives a spent request deadline", () =>
     const forwards: number[] = [];
     deps.enforcement = recordingEnforcement(forwards) as never;
     (deps.enforcement as { allow: unknown }).allow = async () => {
-      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 5));
       return { kind: "created" } as EnforcementResult;
     };
-    deps.adapterTimeoutMs = 15; // short — but the forward resolves inside it
+    // The forward resolves INSIDE the request budget (well under 200ms —
+    // tight budgets like 15ms race the whole evaluation pipeline and flake);
+    // the durability write then outlives that budget by design.
+    deps.adapterTimeoutMs = 200;
     deps.durabilityTimeoutMs = 2_000;
     // Force the durability write to be slow enough that the REQUEST deadline
-    // (15ms) would already be spent when it finishes; only a separate
+    // (200ms) would already be spent when it finishes; only a separate
     // durability budget lets it complete.
     const store = deps.submissionStore as DurableSubmissionStore;
     const origComplete = (ReferenceSubmissionStore.prototype as unknown as {
@@ -643,7 +646,7 @@ describe("closure 4: durability window survives a spent request deadline", () =>
     (store as unknown as { complete: (id: string, o: unknown) => Promise<void> }).complete =
       async function (this: unknown, id: string, o: unknown) {
         completeStartedAt = Date.now();
-        await new Promise((r) => setTimeout(r, 80));
+        await new Promise((r) => setTimeout(r, 280));
         await origComplete.call(this, id, o);
         completeSettledAt = Date.now();
       };
@@ -653,9 +656,9 @@ describe("closure 4: durability window survives a spent request deadline", () =>
     expect(res.kind).toBe("admit");
     expect(res.upstreamCreated).toBe(true);
     expect(completeSettledAt).toBeGreaterThan(0);
-    // The complete() ran to completion (80ms sleep) — far past the 15ms
+    // The complete() ran to completion (280ms sleep) — past the 200ms
     // request budget — proving it raced the durability window, not the
     // request deadline.
-    expect(completeSettledAt - completeStartedAt).toBeGreaterThanOrEqual(60);
+    expect(completeSettledAt - completeStartedAt).toBeGreaterThanOrEqual(200);
   });
 });

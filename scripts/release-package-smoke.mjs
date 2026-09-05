@@ -90,6 +90,10 @@ try {
     const deps = root.createFireRaidMiddleware({
       profileKeys: { current: { id: "default", secret: "a".repeat(64) } },
       version: 1,
+      // FR-P1-10: the forward target is validated at wiring time — the smoke
+      // points it at an unreachable localhost endpoint by design (the stub
+      // enforcement adapter below never performs a network call).
+      upstreamRegisterUrl: "http://127.0.0.1:1/api/register",
       routes: { applicationPage: "/signup", applicationSubmit: "/api/submit", telemetry: "/api/events", canaryPrefix: "/c/" },
       session: new adapters.ReferenceSessionAdapter("k".repeat(64)),
       render: { inject: adapters.referenceInject },
