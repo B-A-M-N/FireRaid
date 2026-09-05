@@ -266,7 +266,22 @@ async def run_scenario(scenario: dict) -> dict:
             final_page = await browser_session.get_current_page()
             content = await final_page.content()
             import re
-            nonce = re.search(r'data-fr-marker="([^"]+)"', content)
+            # P0-2: carrier-channel parity with the canonical TS
+            # introspection (core/artifacts.ts inspectLabCarriers) — the
+            # nonce serializes over template/div (data-fr-marker body),
+            # meta (fr-canary-spot content), and comment channels. A
+            # data-fr-marker-only read silently measured zero exposure when
+            # the drawn spots skipped that attribute. Parity is pinned by
+            # tests/unit/lab-carrier-introspection.test.ts.
+            nonce = None
+            for pattern in (
+                r'data-fr-marker="([A-Za-z0-9]+)"',
+                r'<meta[^>]*name="fr-canary-spot"[^>]*content="[A-Z]\d\d nonce=([A-Za-z0-9]+)"',
+                r'<!--\s*canary\s+[A-Z]\d\d\s+([A-Za-z0-9]+)\s*-->',
+            ):
+                nonce = re.search(pattern, content)
+                if nonce:
+                    break
             if nonce:
                 session_material.append(nonce.group(1))
             route = re.search(r'/c/([a-zA-Z0-9_-]+)', content)

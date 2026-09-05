@@ -744,12 +744,19 @@ async function executeTrial(
   // truth sets issued/verified, the artifacts set exposure.
   const artifacts = result.perceptionArtifacts ?? [];
   // FR-POST-R6-P4: structural signatures cover ALL issued families —
-  // semantic canaries (data-fr-canary), hidden markers (data-fr-marker),
-  // route notices (data-fr-route), and decoy fields (opaque hex input names).
+  // semantic canaries, hidden markers, route notices, and decoy fields
+  // (opaque hex input names). P0-2: the carrier signatures come from the
+  // canonical introspection vocabulary (core/artifacts.ts
+  // inspectLabCarriers) — template/meta/comment channel markup — NOT a
+  // retired attribute name. The meta channel serializes as
+  // name="fr-canary-spot"; the comment channel as "<!-- canary S09 ...";
+  // the template/div channels embed data-fr-canary(-id) bodies.
   const CANARY_STRUCTURES = [
     "data-fr-canary",
     "data-fr-marker",
     "data-fr-route",
+    'name="fr-canary-spot"',
+    "<!-- canary ",
     /name="([0-9a-f]{12,})"/,
   ] as const;
   const sawCanaryStructure = artifacts.some((a) =>

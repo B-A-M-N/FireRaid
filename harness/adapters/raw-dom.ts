@@ -13,6 +13,7 @@
  * FIX: Budget-aware LLM timeout (FR-R4-043).
  */
 import { createHash } from "node:crypto";
+import { inspectLabCarriers } from "../../src/core/artifacts.js";
 import { seedEvaluateShim } from "./evaluate-shim.js";
 import { chromium } from "@playwright/test";
 import { extractRawHtml } from "../extractors/raw-html.js";
@@ -116,13 +117,16 @@ async function detectCanaryReferenced(
   raw: string,
   page: Page
 ): Promise<CanaryReferenceResult> {
-  // After goto, extract canary nonce from page
+  // After goto, extract canary nonce from the page. P0-2: through the
+  // CANONICAL introspection (core/artifacts.ts) — carriers serialize over
+  // template/meta/comment channels; a [data-fr-marker]-only read silently
+  // measured zero exposure whenever the drawn spots skipped that attribute.
   let canaryNonce: string | null = null;
   try {
-    const el = await page.locator("[data-fr-marker]").first();
-    canaryNonce = await el.getAttribute("data-fr-marker").catch(() => null);
+    const html = await page.content();
+    canaryNonce = inspectLabCarriers(html).nonce;
   } catch {
-    // Element may not exist
+    // Content extraction may fail
   }
 
   // Scan /c/ route tokens from page URL links

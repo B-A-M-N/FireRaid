@@ -17,6 +17,7 @@
  * extra REQUIRED families are allowed, missing ones are not.
  */
 import { describe, it, expect } from "vitest";
+import { inspectLabCarriers } from "../../src/core/artifacts.js";
 
 const BASE = process.env.FIRERAID_BASE_URL || "http://localhost:8787";
 const LAB_SECRET = process.env.FIRERAID_TEST_LAB_SECRET || "local-lab-secret-do-not-use-in-prod";
@@ -113,26 +114,24 @@ async function postOutcome(runId: string, outcome: string): Promise<Response> {
   });
 }
 
-/** Extract rendered canary facts from the signup HTML. */
+/** Extract rendered canary facts from the signup HTML.
+ * P0-2: reads through the CANONICAL introspection (core/artifacts.ts
+ * inspectLabCarriers) — no private regex interpretation of carrier shapes.
+ * Placement / decoy field / route stay local facts (not carrier semantics). */
 function renderedFacts(html: string): {
   template: string | null;
   placement: string | null;
   marker: string | null;
   decoyField: string | null;
   canaryRoute: string | null;
+  carries: "full-action" | "marker" | null;
 } {
-  // Lab multi-spot carriers fan out over THREE channels (template/meta/
-  // comment — placeSemanticCarriers), so the template id can appear in any
-  // of the three lab carrier shapes. Decoy field names are per-session hex
-  // PRF tokens (no fr_ prefix — P1-22 removed that signature).
+  const truth = inspectLabCarriers(html);
   return {
-    template:
-      html.match(/data-fr-canary(?:-id)?="([A-Z]\d\d)"/)?.[1] ??
-      html.match(/name="fr-canary-spot" content="([A-Z]\d\d)/)?.[1] ??
-      html.match(/<!-- canary ([A-Z]\d\d) /)?.[1] ??
-      null,
+    template: truth.templateId,
+    marker: truth.nonce,
+    carries: truth.carries,
     placement: html.match(/data-fr-placement="([^"]+)"/)?.[1] ?? null,
-    marker: html.match(/data-fr-marker="([^"]+)"/)?.[1] ?? null,
     decoyField: html.match(/name="([0-9a-f]{16})"/)?.[1] ?? null,
     canaryRoute: html.match(/\/c\/([a-f0-9]+)/)?.[1] ?? null,
   };
@@ -278,11 +277,15 @@ describe("treatment pipeline: pinned template × placement (Phase 3)", () => {
       trial_key: "pipeline-test:s09p06",
     });
     const { cookie, html } = await bindSession(data.run_id, data.bind_token);
-    // S09 is a hidden marker: present in DOM, aria-hidden, no visible text
-    expect(html).toContain('data-fr-canary="S09"');
-    expect(html).toMatch(/data-fr-marker="[^"]+"/);
+    // S09 is a hidden marker: DOM-present, instruction-free. P0-2: the
+    // assertion is on carrier SEMANTICS (template id + nonce present via the
+    // canonical introspection), not a retired attribute name — the multi-spot
+    // placement may serialize the same strategy over template/meta/comment
+    // channels.
     const rendered = renderedFacts(html);
     expect(rendered.template).toBe("S09");
+    expect(rendered.marker).toMatch(/^[A-Z2-9]{6}$/);
+    expect(rendered.carries).toBe("marker");
 
     const submit = await submitForm(cookie, html);
     expect(submit.status).toBe(200);

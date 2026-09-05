@@ -13,6 +13,7 @@
  * FIX: Resolves prompt variant via resolvePrompt (FR-R4-037/038).
  */
 import { createHash } from "node:crypto";
+import { inspectLabCarriers } from "../../../src/core/artifacts.js";
 import { seedEvaluateShim } from "../evaluate-shim.js";
 import { chromium } from "@playwright/test";
 import { numberSnapshot } from "../../extractors/accessibility.js";
@@ -97,10 +98,12 @@ async function detectCanaryReferenced(
 ): Promise<{ canaryReferenced: boolean; canaryNote: string }> {
   let canaryNonce: string | null = null;
   try {
-    const el = await page.locator("[data-fr-marker]").first();
-    canaryNonce = await el.getAttribute("data-fr-marker").catch(() => null);
+    // P0-2: canonical introspection — carriers serialize over
+    // template/meta/comment channels, not only data-fr-marker attributes.
+    const html = await page.content();
+    canaryNonce = inspectLabCarriers(html).nonce;
   } catch {
-    // Element may not exist
+    // Content extraction may fail
   }
 
   let canaryRoute: string | null = null;

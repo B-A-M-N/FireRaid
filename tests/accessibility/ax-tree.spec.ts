@@ -11,6 +11,7 @@
  * FIX FR-R5-043: Rewrite misnamed canary test with full AX assertions.
  */
 import { test, expect, type APIRequestContext } from "@playwright/test";
+import { inspectLabCarriers } from "../../src/core/artifacts.js";
 
 // ─── Shared helpers (FR-R5-041) ────────────────────────────────────────────
 
@@ -208,15 +209,15 @@ test.describe("AX tree verification", () => {
       ).toMatch(/^(TEMPLATE|DIV|SPAN)$/);
     }
 
-    // Case 3 (negative control): nonce markers in NON-RENDERED positions
-    // (data-fr-marker attributes, inert template fragments) must never
-    // reach the AX snapshot. Visible lab-probe TEXT may legitimately be in
-    // the AX tree (that is the P01–P05 experimental condition) but a
-    // data-fr-marker attribute is a hidden-channel marker — its nonce must
-    // stay out of the AX tree in every plane.
-    const nonceMatches = Array.from(dom.matchAll(/data-fr-marker="([^"]+)"/g)).map((m) => m[1]);
-    for (const nonce of nonceMatches) {
-      expect(ax, `marker nonce must not appear in the AX tree`).not.toContain(nonce);
+    // Case 3 (negative control): nonce markers in NON-RENDERED carrier
+    // channels must never reach the AX snapshot. P0-2: the nonce comes from
+    // the canonical introspection (data-fr-marker attributes AND the
+    // meta/comment channel serializations). Visible lab-probe TEXT may
+    // legitimately be in the AX tree (that is the P01–P05 experimental
+    // condition) but a hidden-channel nonce must stay out in every plane.
+    const carrierTruth = inspectLabCarriers(dom);
+    if (carrierTruth.nonce) {
+      expect(ax, `marker nonce must not appear in the AX tree`).not.toContain(carrierTruth.nonce);
     }
     expect(dom).toContain("data-fr-canary-id");
   });
@@ -279,13 +280,15 @@ test.describe("deterministic canary controls", () => {
     // Navigate to the pinned session
     await page.goto(bindUrl(run));
 
-    // (1) The non-rendered carrier exists in the served HTML. Multi-spot
-    // fan-out wraps non-rendered lab carriers in an INERT <template> — its
-    // children live in a DocumentFragment, NOT the DOM tree, so they are
-    // un-attached by construction (strictly stronger than aria-hidden).
+    // (1) The non-rendered carrier exists in the served HTML. P0-2: assert
+    // carrier SEMANTICS via the canonical introspection — the multi-spot
+    // placement may serialize S09 over template/meta/comment channels; the
+    // retired `data-fr-canary` attribute name is one body serialization,
+    // not the contract.
     const html = await page.content();
-    expect(html).toContain('data-fr-canary="S09"');
-    expect(html).toMatch(/<template[^>]*>[\s\S]*data-fr-canary="S09"/);
+    const carriers1 = inspectLabCarriers(html);
+    expect(carriers1.templateId, "S09 carrier present in served HTML").toBe("S09");
+    expect(carriers1.nonce, "session nonce present in a carrier").toMatch(/^[A-Z2-9]{6}$/);
 
     // (2) Every ATTACHED carrier element is an inert <template>. The
     // template ELEMENT itself attaches at head/body anchors, but its
@@ -300,12 +303,11 @@ test.describe("deterministic canary controls", () => {
       expect(tag, "S09 carrier must be an inert template, never a live wrapper").toBe("TEMPLATE");
     }
 
-    // (3) The marker nonce must be absent from the AX snapshot. The nonce
-    // is derived server-side; grep it from the served HTML.
-    const nonceMatch = html.match(/data-fr-marker="([^"]+)"/);
-    expect(nonceMatch, "S09 marker carries a nonce").not.toBeNull();
+    // (3) The marker nonce must be absent from the AX snapshot. P0-2: the
+    // nonce comes from the canonical introspection (any carrier channel).
+    expect(carriers1.nonce, "S09 marker carries a nonce").not.toBeNull();
     const ax = await page.locator("body").ariaSnapshot();
-    expect(ax).not.toContain(nonceMatch![1]);
+    expect(ax).not.toContain(carriers1.nonce!);
 
     // (4) covered: un-attached template content can never be visible.
 

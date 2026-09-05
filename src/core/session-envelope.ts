@@ -68,6 +68,13 @@ function b64urlDecode(s: string): Uint8Array | null {
   }
 }
 
+// P0-1 (dist build): the shipped product compiles WITHOUT lib.dom (a server
+// library must not pollute consumer globals). Node's @types/node exports the
+// WebCrypto primitives under node:crypto's `webcrypto` namespace — the same
+// primitive the runtime actually provides (Workers and browsers expose the
+// identical interface globally) — so the key type comes from there.
+type CryptoKey = import("node:crypto").webcrypto.CryptoKey;
+
 async function hmacKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     "raw",

@@ -697,3 +697,112 @@ export function applyPlacedCarriers(html: string, placed: PlacedCarrier[]): stri
   }
   return out;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P0-2: canonical lab-carrier introspection.
+//
+// Every consumer that needs to know "did this page carry the semantic canary,
+// and what did it carry?" reads the page through THIS function — never a
+// private regex. The historical contract (catalog `data-fr-canary` /
+// `data-fr-marker` attributes inside a visible div) is one of several
+// equivalent serializations: the multi-spot placement renders the SAME
+// strategy over THREE channels (template / meta / comment), and the catalog
+// body only survives verbatim inside template-channel carriers. A consumer
+// that greps one retired attribute silently measures zero exposure while
+// carriers ship — the exact evidence-integrity defect this closes.
+//
+// Scope: LAB surfaces (evaluation plane). Production carriers are
+// intentionally opaque (bare templates, neutral meta, full-action comments —
+// no strategy id anywhere), so on a production page this returns a null
+// templateId by design.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** What a rendered page actually carried, extracted per carrier channel. */
+export interface LabCarrierTruth {
+  /** Strategy id (e.g. "S09") if any channel named it; null otherwise. */
+  templateId: string | null;
+  /** Session nonce if any channel carried it; null otherwise. */
+  nonce: string | null;
+  /**
+   * The strongest payload observed across channels: "full-action" when any
+   * carrier channel carried actionable instruction material, "marker" when
+   * only detection markers were present, null when no carrier was found.
+   */
+  carries: "full-action" | "marker" | null;
+  /** Per-channel presence — for tests that must reason about the mix. */
+  channels: {
+    template: boolean;
+    meta: boolean;
+    comment: boolean;
+  };
+}
+
+/** All lab carrier shapes placeSemanticCarriers + the renderers emit. */
+const LAB_CARRIER_PATTERNS = {
+  // Template channel: <template data-fr-canary-id="S09" ...>BODY</template>
+  // (body = catalog bodyHtml, which itself carries data-fr-canary + marker).
+  templateIdInTemplate:
+    /<template[^>]*data-fr-canary-id="([A-Z]\d\d)"[^>]*>([\s\S]*?)<\/template>/g,
+  // Visible / fallback div: <div data-fr-canary-id="S09" ...>BODY</div>
+  templateIdInDiv:
+    /<div[^>]*data-fr-canary-id="([A-Z]\d\d)"[^>]*>([\s\S]*?)<\/div>/g,
+  // Meta channel: <meta name="fr-canary-spot" content="S09 nonce=X" ...>
+  templateIdInMeta:
+    /<meta[^>]*name="fr-canary-spot"[^>]*content="([A-Z]\d\d)\s+nonce=([A-Za-z0-9]+)"/g,
+  // Comment channel: <!-- canary S09 X -->
+  templateIdInComment: /<!--\s*canary\s+([A-Z]\d\d)\s+([A-Za-z0-9]+)\s*-->/g,
+  // Catalog-body nonce attribute (template/div channels, S09-style markers).
+  nonceInMarkerAttr: /data-fr-marker="([A-Za-z0-9]+)"/g,
+} as const;
+
+/**
+ * Extract LabCarrierTruth from rendered HTML. One implementation, from the
+ * emitter's own contract (placeSemanticCarriers / the two renderers) —
+ * tests and harness adapters MUST consume this instead of private regexes.
+ */
+export function inspectLabCarriers(html: string): LabCarrierTruth {
+  let templateId: string | null = null;
+  let nonce: string | null = null;
+  let carries: LabCarrierTruth["carries"] = null;
+  const channels = { template: false, meta: false, comment: false };
+
+  const take = (id: string | undefined, n: string | undefined, c: LabCarrierTruth["carries"]) => {
+    if (id && templateId === null) templateId = id;
+    if (n && nonce === null) nonce = n;
+    if (carries === null || (carries === "marker" && c === "full-action")) carries = c;
+  };
+
+  // Body-classification: a template/div channel carries the catalog bodyHtml,
+  // but bodyHtml is only "full-action" when it embeds actionable instruction
+  // material (a route ask or a fill-expressible field ask). Metadata-probe
+  // bodies (S09: a bare nonce marker span) ride the same channel yet carry
+  // NO action — classifying by channel alone would overstate the payload.
+  const FULL_ACTION_BODY = /(?:\/c\/|\broute\b|\btoken\b|\bfield\b|\bsession_response\b)/i;
+
+  // Template channel (carries the full catalog body).
+  for (const m of html.matchAll(LAB_CARRIER_PATTERNS.templateIdInTemplate)) {
+    channels.template = true;
+    const body = m[2] ?? "";
+    const bodyNonce = [...body.matchAll(LAB_CARRIER_PATTERNS.nonceInMarkerAttr)][0]?.[1];
+    take(m[1], bodyNonce, FULL_ACTION_BODY.test(body) ? "full-action" : "marker");
+  }
+  // Visible/fallback div channel (same body semantics).
+  for (const m of html.matchAll(LAB_CARRIER_PATTERNS.templateIdInDiv)) {
+    channels.template = true;
+    const body = m[2] ?? "";
+    const bodyNonce = [...body.matchAll(LAB_CARRIER_PATTERNS.nonceInMarkerAttr)][0]?.[1];
+    take(m[1], bodyNonce, FULL_ACTION_BODY.test(body) ? "full-action" : "marker");
+  }
+  // Meta channel (marker-only in the multi-spot mix).
+  for (const m of html.matchAll(LAB_CARRIER_PATTERNS.templateIdInMeta)) {
+    channels.meta = true;
+    take(m[1], m[2], "marker");
+  }
+  // Comment channel (lab comment carriers are marker-only: id + nonce).
+  for (const m of html.matchAll(LAB_CARRIER_PATTERNS.templateIdInComment)) {
+    channels.comment = true;
+    take(m[1], m[2], "marker");
+  }
+
+  return { templateId, nonce, carries, channels };
+}
