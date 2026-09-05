@@ -2,7 +2,8 @@
  * Node.js origin runtime — a minimal fetch-Request/Response-native adapter.
  *
  * No express or extra dependency — uses only `node:http` plus global fetch
- * primitives (Node 18+).  Type-checked against tsconfig.product.json.
+ * primitives (Node 22.5+, the package `engines` floor).  Type-checked
+ * against tsconfig.product.json.
  *
  * This is NOT the product's middleware — it wraps `createFireRaidMiddleware` +
  * `admit()` so a host can stand up a real origin server that serves the
@@ -75,7 +76,7 @@ export interface OriginServerOptions {
   publicOrigin?: string;
   /**
    * P1-9: timeout for receiving the complete request headers (ms).
-   * Default 60000 (matches Node 18+ default).
+   * Default 60000 (matches the Node 22+ default).
    */
   headersTimeoutMs?: number;
   /**

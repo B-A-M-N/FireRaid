@@ -107,7 +107,7 @@ The **evaluation system** (harness/, experiments, Worker fixture) imports
 the product; the product never imports the harness.  This asymmetry is
 the testable zero-infrastructure thesis — the defense core runs standalone.
 
-`npm run dev:origin` runs the reference origin host on Node (Node 18+).
+`npm run dev:origin` runs the reference origin host on Node (Node 22.5+, the package `engines` floor).
 `npm run test:origin-budget` proves the zero-infrastructure thesis by
 measuring profile generation, GET inject, and POST submit timing budgets
 and asserting zero network egress and zero D1 imports in the product path.

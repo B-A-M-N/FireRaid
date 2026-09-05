@@ -11,6 +11,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    # FR-P1-12: test the EXACT supported minimum, not just "some modern Node".
+    # engines.node is >=22.5.0 (node:sqlite in the test harness); the floor
+    # MUST pass, alongside the latest 22.x — so a claim of support can never
+    # drift from what CI actually verifies again.
+    strategy:
+      matrix:
+        node-version: ["22.5.0", "22"]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,7 +26,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
 
       - name: Install dependencies
         run: npm ci
