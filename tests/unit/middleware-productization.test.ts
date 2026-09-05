@@ -792,3 +792,76 @@ describe("trustedIngress boundary (rereview item 24)", () => {
     expect(seen).toEqual(["203.0.113.7"]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FR-P1-10 — the upstream-forward cookie allowlist (end-to-end through admit)
+// ─────────────────────────────────────────────────────────────────────────────
+describe("FR-P1-10: forward-cookie allowlist through admit", () => {
+  it("forwards only the allowlisted host cookie, stripping the FireRaid envelope", async () => {
+    let forwardedCookies = "UNSET";
+    const deps = baseDeps({
+      cookieForwardAllowlist: ["host_session"],
+      enforcement: {
+        allow: async (_url, _form, cookies) => {
+          forwardedCookies = cookies;
+          return true;
+        },
+        deny: () => {},
+      },
+    });
+    const adapter = new ReferenceSessionAdapter(SECRET);
+    const sid = await adapter.createSession();
+    const cookie = await adapter.sessionCookie(sid); // __Host-fr_sid=...
+    const csrf = await makeCsrf(SECRET, sid);
+    // The client carries the FireRaid envelope AND a host cookie. Only the
+    // allowlisted host cookie may reach the upstream.
+    const rawHeader = `${cookie}; host_session=abc123; theme=dark; __Host-fr_admin_csrf=nope`;
+    const res = await admitEvaluation(
+      new Request("http://mw/anything", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: rawHeader },
+        body: JSON.stringify({ csrf, form: { name: "A", email: "a@b.c" } }),
+      }),
+      deps,
+      async () => SIGNUP_HTML
+    );
+    expect(res.kind).toBe("admit");
+    expect(forwardedCookies).toBe("host_session=abc123");
+    expect(forwardedCookies).not.toContain("__Host-fr");
+    expect(forwardedCookies).not.toContain("theme");
+  });
+
+  it("forwards NOTHING when no allowlist is configured (default deny)", async () => {
+    let forwardedCookies = "UNSET";
+    const deps = baseDeps({
+      enforcement: {
+        allow: async (_url, _form, cookies) => {
+          forwardedCookies = cookies;
+          return true;
+        },
+        deny: () => {},
+      },
+    });
+    const adapter = new ReferenceSessionAdapter(SECRET);
+    const sid = await adapter.createSession();
+    const cookie = await adapter.sessionCookie(sid);
+    const csrf = await makeCsrf(SECRET, sid);
+    const res = await admitEvaluation(
+      new Request("http://mw/anything", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: `${cookie}; host_session=abc` },
+        body: JSON.stringify({ csrf, form: { name: "A", email: "a@b.c" } }),
+      }),
+      deps,
+      async () => SIGNUP_HTML
+    );
+    expect(res.kind).toBe("admit");
+    expect(forwardedCookies).toBe("");
+  });
+
+  it("the production factory rejects a non-http upstreamRegisterUrl at config time", () => {
+    expect(() =>
+      createFireRaidMiddleware(baseDeps({ routes: ROUTES, upstreamRegisterUrl: "javascript:alert(1)" }))
+    ).toThrow(/Invalid upstreamRegisterUrl/);
+  });
+});

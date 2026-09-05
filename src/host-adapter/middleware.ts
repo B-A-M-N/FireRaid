@@ -44,6 +44,7 @@ import { validateSignupForm, type SubmitInbound } from "../security/request-vali
 import { readJsonBody, readBoundedBody } from "../security/body-limits.js";
 import { MAX_HOST_JSON_BYTES } from "../types/telemetry.js";
 import { resolveScoringPolicy } from "./reference-adapters.js";
+import { validateUpstreamUrl, buildForwardCookieHeader } from "./forward-security.js";
 import type {
   VerificationInput,
   MiddlewareRouteConfig,
@@ -159,7 +160,20 @@ export interface MiddlewareDeps {
    * degradation that silently turns into a review-data hole.
    */
   onOperationalError?: (op: string, err: unknown) => void;
+  /**
+   * FR-P1-10: the EXPLICIT allowlist of cookie names (lowercased for
+   * comparison) the middleware forwards to the upstream on admission.
+   * Default EMPTY = forward NO cookies. FireRaid's OWN cookies under the
+   * `__Host-fr_` namespace are excluded regardless of this list — the
+   * envelope and admin CSRF are defense-plane state, never a candidate for
+   * the upstream's view of the applicant. An operator wanting the origin to
+   * see a host-session cookie must name it here explicitly.
+   */
+  cookieForwardAllowlist?: string[];
 }
+
+/** Default forward-cookie spec: forward nothing unless the host opts in. */
+export const DEFAULT_FORWARD_COOKIE_ALLOWLIST: readonly string[] = [];
 
 /**
  * Evaluation-plane controls — the override surface production deliberately
@@ -1077,7 +1091,14 @@ async function handleSubmitPost(
       // never appear here (URLSearchParams yields strings), but the forward
       // payload must stay Record<string,string>-shaped.
       const cleanForm = stripFireRaidFields(form, profile);
-      const cookies = req.headers.get("cookie") ?? "";
+      // FR-P1-10: NEVER forward the client's raw cookie header. Only the
+      // EXPLICITLY allowlisted names reach the upstream, and FireRaid's own
+      // `__Host-fr_*` cookies (the envelope, admin CSRF) are excluded no
+      // matter what. Default allowlist is empty — a host must opt in.
+      const cookies = buildForwardCookieHeader(
+        req.headers.get("cookie"),
+        { allowlist: deps.cookieForwardAllowlist ?? DEFAULT_FORWARD_COOKIE_ALLOWLIST }
+      );
       // P0-4/P0-8: handle the discriminated enforcement result (the bare
       // boolean is legacy — `false` cannot say rejected vs unreachable).
       const enforcementResult = await deps.enforcement.allow(
@@ -1432,6 +1453,28 @@ export function createFireRaidMiddleware(
     throw new MiddlewareConfigError(
       "MiddlewareDeps.csrfSecret must be at least 32 bytes"
     );
+  }
+
+  // FR-P1-10: the upstream forward target is validated AT CONFIG TIME — an
+  // invalid URL fails wiring, never a live submission (where it would POST
+  // the applicant's personal data to the wrong host). The validated,
+  // normalized URL replaces the original so forwarding never uses the raw
+  // unnormalized string.
+  const urlCheck = validateUpstreamUrl(deps.upstreamRegisterUrl);
+  if (!urlCheck.ok) {
+    throw new MiddlewareConfigError(`Invalid upstreamRegisterUrl: ${urlCheck.error}`);
+  }
+  deps.upstreamRegisterUrl = urlCheck.url;
+  // The forward-cookie allowlist, when provided, must be names (strings).
+  if (deps.cookieForwardAllowlist !== undefined) {
+    if (!Array.isArray(deps.cookieForwardAllowlist)) {
+      throw new MiddlewareConfigError("cookieForwardAllowlist must be an array of cookie names");
+    }
+    for (const name of deps.cookieForwardAllowlist) {
+      if (typeof name !== "string" || name.length === 0) {
+        throw new MiddlewareConfigError("cookieForwardAllowlist entries must be non-empty cookie names");
+      }
+    }
   }
 
   // AUDIT (P1 verification capability): the disabled-test no-op is
