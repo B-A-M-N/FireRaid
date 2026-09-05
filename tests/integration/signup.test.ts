@@ -40,6 +40,23 @@ describe("integration: signup flow", () => {
     expect(json.ok).toBe(true);
   });
 
+  it("FR-P1-09: GET /readyz reports ready against the applied migration chain", async () => {
+    // The test DB is migrated via test-worker to the full 0017 chain, so the
+    // current version's schema fingerprint must be present → ready 200. This
+    // is the smoke that a real deployment missing a migration would fail.
+    const resp = await fetch(`${BASE}/readyz`);
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as {
+      ok: boolean;
+      ready: boolean;
+      missingTables: string[];
+      missingColumns: string[];
+    };
+    expect(body.ready).toBe(true);
+    expect(body.missingTables).toEqual([]);
+    expect(body.missingColumns).toEqual([]);
+  });
+
   it("GET /signup sets secure cookies and renders form", async () => {
     const { cookie, html } = await fetchSignup();
     expect(cookie).toContain("__Host-fr_sid=");

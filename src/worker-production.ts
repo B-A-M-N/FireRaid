@@ -28,7 +28,7 @@
  * FR-INV-001: defense path uses no LLM.
  */
 import type { Env } from "./env.js";
-import { health } from "./routes/health.js";
+import { health, readyz } from "./routes/health.js";
 import { signup } from "./routes/signup.js";
 import { submit } from "./routes/submit.js";
 import { canary } from "./routes/canary.js";
@@ -107,6 +107,7 @@ export default {
       // is deliberately NO lab-run, review-decision, or evaluation route
       // here — those handlers are not in this artifact.
       if (path === "/health" && req.method === "GET") return health(req, env);
+      if (path === "/readyz" && req.method === "GET") return readyz(req, env);
 
       if (path === "/signup" && req.method === "GET") return signup(req, env, ctx);
 

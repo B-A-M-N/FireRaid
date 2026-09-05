@@ -17,7 +17,7 @@
  * FR-INV: refuse to start with known test credentials in production.
  */
 import type { Env } from "./env.js";
-import { health } from "./routes/health.js";
+import { health, readyz } from "./routes/health.js";
 import { signup } from "./routes/signup.js";
 import { submit } from "./routes/submit.js";
 import { canary } from "./routes/canary.js";
@@ -128,8 +128,9 @@ export default {
       // constitute the product surface shared with origin deployments.
       // ═══════════════════════════════════════════════════════════════════
 
-      // Health
+      // Health — liveness (/health) + schema readiness (/readyz)
       if (path === "/health" && req.method === "GET") return health(req, env);
+      if (path === "/readyz" && req.method === "GET") return readyz(req, env);
 
       // Signup
       if (path === "/signup" && req.method === "GET") return signup(req, env, ctx);
