@@ -93,7 +93,9 @@ budget inside the trap loop before submitting) rather than scored
 QUARANTINE at admission; both reduce account creation. Single model
 (LongCat-2.0), single agent architecture (raw-dom), n=10/arm — an
 existence proof of mechanism effect, not a deploy-grade estimate. Full
-caveats and evidence pointers: [docs/RELEASE-STATUS.md](docs/RELEASE-STATUS.md) claim 8.
+caveats and evidence pointers: [docs/RELEASE-STATUS.md](docs/RELEASE-STATUS.md)
+claim 8, machine-readable in
+[docs/evidence-ledger.json](docs/evidence-ledger.json).
 
 ## Product vs evaluation
 
@@ -253,7 +255,8 @@ scripts/        Ledger proof, upstream, budget harness, test worker
 public/         Static signup + admin pages
 migrations/     D1 schema (apply the whole chain, never just 0001; optional)
 tests/          Unit, integration, e2e, accessibility
-docs/           Architecture, integration, threat model, invariants
+docs/           Architecture, integration, threat model, invariants;
+                evidence-ledger.json is the machine-readable claim registry
 ```
 
 ## Acknowledgements

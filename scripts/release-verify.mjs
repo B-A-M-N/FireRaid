@@ -3,29 +3,42 @@
  * P2 — release gate aggregator: run every deterministic release gate and
  * write machine-readable evidence to release-evidence.json.
  *
+ * Two modes:
+ *   release:verify:fast  — typecheck, lint, worker-isolation, origin-budget
+ *   release:verify:full  — fast + unit, product-boundary, integration,
+ *                          envelope, budget, ledger-proof, e2e, e2e:production,
+ *                          a11y, examples
+ *
+ * Only `full` may produce release_candidate:true.
+ *
  * What this script deliberately does NOT do:
  *   - It does not run the LLM benchmark. Efficacy is a MEASURED item backed
  *     by a completed experiment directory, not a release gate.
  *   - It does not verify a remote deployment. That is user-gated (needs
  *     real credentials and an internet-facing origin).
  *
- * Claims vocabulary (mirrors docs/RELEASE-STATUS.md):
- *   IMPLEMENTED       — code + a passing test exist for the claim
- *   LOCALLY VERIFIED  — a deterministic local gate passed for this tree
- *   MEASURED          — a completed, matched experiment supports the claim
- *   NOT YET ESTABLISHED — no evidence at the required tier
+ * Claims vocabulary (owned by docs/evidence-ledger.json — the machine
+ * readable registry this script embeds into the evidence file):
+ *   IMPLEMENTED           — code + a passing test exist for the claim
+ *   LOCALLY_VERIFIED      — a deterministic local gate passed for this tree
+ *   PARTIALLY_ESTABLISHED — completed experiments back a bounded, qualified
+ *                           quantitative claim (scope limits are part of it)
+ *   MEASURED              — a completed, matched experiment supports the claim
+ *   NOT_YET_ESTABLISHED   — no evidence at the required tier
  *
  * Exit: 0 iff every gate passed. Evidence is written either way.
  *
- * Usage: npm run release:verify [-- --skip-slow]
+ * Usage:
+ *   npm run release:verify:fast
+ *   npm run release:verify:full
  */
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SKIP_SLOW = process.argv.includes("--skip-slow");
+const MODE = process.argv[2] === "full" ? "full" : "fast";
 
 // --- git provenance ---
 function git(args) {
@@ -37,7 +50,7 @@ const dirty = (git(["status", "--porcelain"]) ?? "").length > 0;
 
 const gates = [];
 function runGate(name, command, args, { slow = false } = {}) {
-  if (slow && SKIP_SLOW) {
+  if (slow && MODE === "fast") {
     gates.push({ name, command: [command, ...args].join(" "), status: "SKIPPED", skipped: true });
     return;
   }
@@ -58,46 +71,77 @@ function runGate(name, command, args, { slow = false } = {}) {
   console.log(`[${passed ? "PASS" : "FAIL"}] ${name} (${Math.round((Date.now() - t0) / 1000)}s)`);
 }
 
-// --- deterministic gates (fast → slow) ---
+// --- fast gates (always run) ---
 runGate("typecheck", "npm", ["run", "typecheck"]);
 runGate("lint", "npm", ["run", "lint"]);
-runGate("unit", "npm", ["run", "test:unit"], { slow: true });
-runGate("product-boundary", "npm", ["run", "test:product"], { slow: true });
 runGate("worker-isolation", "npm", ["run", "test:worker-isolation"]);
 runGate("origin-budget", "npm", ["run", "test:origin-budget"]);
 
+// --- full gates (only in full mode) ---
+runGate("unit", "npm", ["run", "test:unit"], { slow: true });
+runGate("product-boundary", "npm", ["run", "test:product"], { slow: true });
+runGate("integration", "npm", ["run", "test:integration"], { slow: true });
+runGate("envelope", "npm", ["run", "test:envelope"], { slow: true });
+runGate("budget", "npm", ["run", "test:budget"], { slow: true });
+runGate("ledger-proof", "npm", ["run", "test:ledger-proof"], { slow: true });
+runGate("e2e", "npm", ["run", "test:e2e"], { slow: true });
+runGate("e2e:production", "npm", ["run", "test:e2e:production"], { slow: true });
+runGate("a11y", "npm", ["run", "test:a11y"], { slow: true });
+runGate("examples", "npx", ["tsc", "--noEmit"], { slow: true });
+
 const allPassed = gates.every((g) => g.status === "PASS");
 
+// P2: the claim registry lives in docs/evidence-ledger.json (validated by
+// tests/unit/evidence-ledger.test.ts). This run only attests the
+// LOCALLY_VERIFIED tier — the gates above — and embeds the ledger's tier
+// summary verbatim so the evidence file can never drift from the registry.
+let ledgerSummary;
+try {
+  const ledger = JSON.parse(
+    readFileSync(join(ROOT, "docs", "evidence-ledger.json"), "utf-8")
+  );
+  ledgerSummary = Object.fromEntries(
+    ledger.claims.map((c) => [c.id, c.tier])
+  );
+} catch {
+  // Fail-closed: a missing or malformed registry is a release-blocking
+  // inconsistency, not something to paper over with an empty summary.
+  gates.push({
+    name: "evidence-ledger",
+    command: "read docs/evidence-ledger.json",
+    status: "FAIL",
+    exit_code: 1,
+  });
+  ledgerSummary = null;
+}
+
 const evidence = {
-  schema: "fireraid-release-evidence/1",
+  schema: "fireraid-release-evidence/2",
+  mode: MODE,
   generated_at: new Date().toISOString(),
   git: {
     sha,
     dirty,
-    // A release candidate must be a clean tree; dirty evidence is still
-    // written (for iteration) but flagged so it can never masquerade as a
-    // candidate stamp.
-    release_candidate: !dirty && allPassed,
+    // P1-13: only `full` mode may produce release_candidate:true
+    release_candidate: MODE === "full" && !dirty && allPassed,
   },
   gates,
   claim_tiers: {
-    // These are the doc-level claim classifications — see
-    // docs/RELEASE-STATUS.md. This file only attests the LOCALLY VERIFIED
-    // tier; MEASURED claims require a completed experiment directory and
-    // are recorded there, not here.
-    locally_verified_by_this_run: gates.filter((g) => g.status === "PASS").map((g) => g.name),
-    measured: "see docs/RELEASE-STATUS.md — requires a completed experiment (experiment.json status=COMPLETE with matched CONTROL/DEFENDED cells)",
-    not_yet_established: [
-      "autonomous-agent efficacy (real benchmark: CONTROL vs PRODUCTION_DEFAULT, matched cells)",
-      "remote deployment smoke (user-gated)",
-    ],
+    // The tier per claim is OWNED by docs/evidence-ledger.json; this file
+    // only attests which LOCALLY_VERIFIED gates passed for THIS tree.
+    registry: "docs/evidence-ledger.json",
+    claims: ledgerSummary,
+    locally_verified_by_this_run: gates
+      .filter((g) => g.status === "PASS")
+      .map((g) => g.name),
   },
 };
 
 const outPath = join(ROOT, "release-evidence.json");
 writeFileSync(outPath, JSON.stringify(evidence, null, 2) + "\n");
 console.log(`\nevidence: ${outPath}`);
+console.log(`mode: ${MODE}`);
 console.log(`gates: ${gates.filter((g) => g.status === "PASS").length}/${gates.length} passed` +
-  (SKIP_SLOW ? ` (${gates.filter((g) => g.skipped).length} skipped)` : ""));
+  (MODE === "fast" ? ` (${gates.filter((g) => g.skipped).length} skipped in fast mode)` : ""));
 console.log(`release_candidate: ${evidence.git.release_candidate}`);
 process.exit(allPassed ? 0 : 1);

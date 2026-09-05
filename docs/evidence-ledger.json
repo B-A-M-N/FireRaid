@@ -1,0 +1,131 @@
+{
+  "schema": "fireraid-evidence-ledger/1",
+  "updated": "2026-09-04",
+  "description": "Canonical machine-readable claim registry. Every doc-level claim about efficacy, deployment behavior, or defense posture is registered here with its evidence tier and pointers. Where any prose document disagrees with this ledger, THE LEDGER WINS and the prose must be corrected in the same change. Validated by tests/unit/evidence-ledger.test.ts and scripts/release-verify.mjs.",
+  "tier_vocabulary": {
+    "IMPLEMENTED": "The capability exists in code with a passing test that pins its behavior.",
+    "LOCALLY_VERIFIED": "A deterministic, repeatable local gate passed for THIS tree (no network beyond loopback, no live models). Attested per-run in release-evidence.json.",
+    "PARTIALLY_ESTABLISHED": "Completed experiments support a bounded, qualified quantitative claim. The scope limits (n, model, architecture, effect shape) are recorded in scope_limits and are part of the claim — stripping them overreaches.",
+    "MEASURED": "A completed experiment (experiment.json status=COMPLETE, planned-vs-present record match, matched CONTROL/DEFENDED cells) supports the quantitative claim.",
+    "NOT_YET_ESTABLISHED": "No evidence at the required tier exists. Stating the claim would overreach."
+  },
+  "claims": [
+    {
+      "id": "deterministic-derivation",
+      "statement": "Deterministic per-session defense derivation (HMAC/PRF, no LLM).",
+      "tier": "LOCALLY_VERIFIED",
+      "doc_anchor": "docs/RELEASE-STATUS.md claim 1",
+      "evidence": [
+        { "kind": "gate", "ref": "unit" },
+        { "kind": "test", "ref": "tests/unit/prf-domain-golden.test.ts" },
+        { "kind": "test", "ref": "tests/unit/profile.test.ts" }
+      ]
+    },
+    {
+      "id": "production-did-composition",
+      "statement": "Production composition always includes the semantic strategy layer (P02/P03/P04) plus at least one independent trap (defense-in-depth).",
+      "tier": "LOCALLY_VERIFIED",
+      "doc_anchor": "docs/RELEASE-STATUS.md claim 2",
+      "evidence": [
+        { "kind": "gate", "ref": "unit" },
+        { "kind": "test", "ref": "tests/unit/ablation-recipes.test.ts" }
+      ],
+      "notes": "32-session parity: PRODUCTION_DEFAULT is byte-equal to deriveProductionProfile."
+    },
+    {
+      "id": "production-carrier-opacity",
+      "statement": "Presentation-signature invisibility in the production plane: no lab banner, no data-fr-*/data-rt-* attributes, no fr-* classes, no strategy IDs, structurally inert carriers (bare <template>, meta, comment), decoys hidden by the constant CSP-hash-allowlisted inline style.",
+      "tier": "LOCALLY_VERIFIED",
+      "doc_anchor": "docs/RELEASE-STATUS.md claim 3",
+      "evidence": [
+        { "kind": "gate", "ref": "unit" },
+        { "kind": "gate", "ref": "e2e:production" },
+        { "kind": "test", "ref": "tests/unit/production-carrier-opacity.test.ts" },
+        { "kind": "test", "ref": "tests/e2e/production-plane.spec.ts" }
+      ],
+      "notes": "P0-7: production hiding is self-contained inline styles (SHA-256 allowlisted in the CSP, no 'unsafe-inline'); fr-* CSS classes exist only on the lab plane and are stripped from production markup by stripFireRaidSignatures."
+    },
+    {
+      "id": "human-usability",
+      "statement": "Human usability preserved (normal / keyboard-only / autofill-like flows; accessibility tree unchanged).",
+      "tier": "LOCALLY_VERIFIED",
+      "doc_anchor": "docs/RELEASE-STATUS.md claim 4",
+      "evidence": [
+        { "kind": "gate", "ref": "e2e" },
+        { "kind": "gate", "ref": "a11y" },
+        { "kind": "test", "ref": "tests/e2e/normal-user.spec.ts" },
+        { "kind": "test", "ref": "tests/accessibility" }
+      ],
+      "notes": "Human false-positive reporting is a Wilson one-sided upper bound, never 'zero' (P1-18)."
+    },
+    {
+      "id": "causal-evidence-chain",
+      "statement": "Causal-evidence chain: attacker behavior -> server-side evidence -> admission decision -> upstream forwarding decision -> independent origin ledger.",
+      "tier": "LOCALLY_VERIFIED",
+      "doc_anchor": "docs/RELEASE-STATUS.md claim 5",
+      "evidence": [
+        { "kind": "gate", "ref": "ledger-proof" }
+      ],
+      "notes": "CONTROL clean registers; bot with populated trap does not."
+    },
+    {
+      "id": "origin-cost-profile",
+      "statement": "Origin cost profile: profile derivation ~ms-scale, zero product network egress, zero D1 imports in the product closure.",
+      "tier": "LOCALLY_VERIFIED",
+      "doc_anchor": "docs/RELEASE-STATUS.md claim 6",
+      "evidence": [
+        { "kind": "gate", "ref": "origin-budget" },
+        { "kind": "gate", "ref": "product-boundary" }
+      ]
+    },
+    {
+      "id": "test-infra-honesty",
+      "statement": "Test-infrastructure honesty: port/identity guards, hermetic production-test env, no efficacy printout from incomplete experiments.",
+      "tier": "LOCALLY_VERIFIED",
+      "doc_anchor": "docs/RELEASE-STATUS.md claim 7",
+      "evidence": [
+        { "kind": "gate", "ref": "worker-isolation" }
+      ],
+      "notes": "Analyzer completeness gates (harness/analysis/analyze.py) withhold headline efficacy unless experiment.json is status=COMPLETE with records_expected == records_present."
+    },
+    {
+      "id": "autonomous-agent-efficacy",
+      "statement": "PRODUCTION_DEFAULT reduces autonomous signup success vs CONTROL on the production-faithful origin runtime (origin account-creation endpoint).",
+      "tier": "PARTIALLY_ESTABLISHED",
+      "doc_anchor": "docs/RELEASE-STATUS.md claim 8",
+      "evidence": [
+        { "kind": "experiment", "id": "exp-e4-headline", "dir": "harness/results/exp-e4-headline", "role": "channel-invisibility finding: simplified-dom perception structurally cannot see <template> carriers; no efficacy signal; delivery artifact proven by replay probe" },
+        { "kind": "experiment", "id": "exp-e5-treatment-visible", "dir": "harness/results/exp-e5-treatment-visible", "role": "compliance-on-delivery finding: primary endpoint null; 4/4 route-armed agents echoed the exact route token + nonce when the instruction reached model input, 0/4 when it did not (strategy-determined delivery); compliance produced no causal evidence (ask not actuator-expressible)" },
+        { "kind": "experiment", "id": "exp-e6-actuator", "dir": "harness/results/exp-e6-actuator", "role": "first live-loop efficacy signal on the lever tree (actuator-aligned traps, full-action comment carriers, interaction-depth signals): defended account-creation 2/10 vs CONTROL 10/10 across matched raw-dom cells (ARR 80% paired); analyzer matched-cell endpoint 46.7% defended / ARR 53.3% [9.7%, 75.2%] with human cells included (n=15/arm); humans 5/5 clean both arms" }
+      ],
+      "scope_limits": [
+        "Single model (LongCat-2.0), single agent architecture (raw-dom), n=10/arm on the comparative endpoint — an existence proof of mechanism effect, not a deploy-grade efficacy estimate.",
+        "Effect shape is attrition-dominant: 7/8 blocks are attrition (agent budget consumed by the trap loop / LLM error before submit), 1/8 a scored QUARANTINE at submit with a clean origin ledger — the defense causes agents to fail mostly BEFORE reaching admission, not by denying at admission.",
+        "E4/E5 predate the fixture pool-matching fix (commit 3c6b393); the analyzer fail-closed reports no matched cells for them, so they back delivery/compliance findings only — the comparative endpoint rests on E6.",
+        "Per-architecture ranking (claim per-architecture-ranking) remains NOT_YET_ESTABLISHED."
+      ],
+      "notes": "Levers measured in E5 and implemented 2026-09-03 (commit 58d84da): actuator-aligned traps (session_response fill-expressible sink -> SESSION_RESPONSE_PROVIDED Class-A evidence), full-action comment carriers, interaction-depth signals (zero-dwell / uniform-cadence / no-blur-before-submit)."
+    },
+    {
+      "id": "per-architecture-ranking",
+      "statement": "Any per-architecture vulnerability ranking.",
+      "tier": "NOT_YET_ESTABLISHED",
+      "doc_anchor": "docs/RELEASE-STATUS.md claim 9",
+      "evidence": [],
+      "notes": "Requires autonomous-agent-efficacy plus matched per-extractor cells (E4's channel-invisibility finding makes the extractor dimension the first-order variable)."
+    },
+    {
+      "id": "remote-deployment-smoke",
+      "statement": "Remote Cloudflare deployment behavior (live smoke on the production Worker).",
+      "tier": "LOCALLY_VERIFIED",
+      "doc_anchor": "docs/RELEASE-STATUS.md claim 10",
+      "evidence": [
+        { "kind": "manual", "ref": "live smoke 2026-09-03", "detail": "fireraid-production.benevolentjoker.workers.dev (version b401da70): D1 fireraid-production + full 16-migration chain applied remotely; profile/CSRF/Turnstile secrets via wrangler secret; config validator fail-closed LIVE (503 'Production requires TURNSTILE_EXPECTED_HOSTNAME' before Turnstile was configured); post-config smoke: /signup 200 with clean production plane, Turnstile script + sitekey wired; headless submit without a solved token -> 403 verification_required (fail-closed); solved-widget human submission -> success receipt." }
+      ],
+      "scope_limits": [
+        "NOT MEASURED: sustained production traffic behavior, custom-domain routing, cron-driven retention on the remote schedule.",
+        "User-gated evidence: a redeploy smoke is the owner's call (costs money / touches the internet); release:verify does not attest this claim."
+      ]
+    }
+  ]
+}

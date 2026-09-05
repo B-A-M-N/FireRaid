@@ -70,8 +70,16 @@ The value is the combination.
   same unaware-vs-hardened-adversary gap as any prompt-injection channel —
   the causal load-bearing channels remain the decoy route and the
   exact-nonce field, which need no LLM compliance.
-- Efficacy against real autonomous agents is not yet established by a
-  completed LLM pilot — see POST_FR_R7_STATUS.md ("STILL OPEN").
+- Efficacy against real autonomous agents is PARTIALLY_ESTABLISHED, not
+  deploy-grade: E6 (2026-09-03) measured the first live-loop signal
+  (defended account-creation 2/10 vs CONTROL 10/10, matched raw-dom cells)
+  but on a single model, a single agent architecture, n=10/arm, with an
+  attrition-dominant effect shape — an existence proof of mechanism effect.
+  Scope limits and the E4/E5 nulls are recorded in
+  [RELEASE-STATUS.md](RELEASE-STATUS.md) claim 8 /
+  [evidence-ledger.json](evidence-ledger.json) (`autonomous-agent-efficacy`).
+  Per-architecture rankings remain NOT_YET_ESTABLISHED. (POST_FR_R7_STATUS.md
+  is a historical snapshot; do not read its "STILL OPEN" as current.)
 - `CF-Connecting-IP` is a trusted input ONLY behind an edge that
   overwrites it (Cloudflare). This is CODE-ENFORCED on the host middleware:
   the route config carries `trustedIngress` ("cloudflare" | "direct"), and

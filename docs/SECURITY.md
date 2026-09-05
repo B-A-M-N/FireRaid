@@ -53,25 +53,55 @@ Production rendering carries no FIXED greppable FireRaid presentation
 signature (no `data-fr-*` attributes, no `fr-*` class, no strategy IDs,
 no FireRaid route prefix in markup; instruction carriers are structurally
 inert — bare `<template>`, `<meta name="verification-context">`, HTML
-comments — and decoys hide via inline styles, no stable class).
+comments). Since P0-7, production decoys hide via a CONSTANT self-contained
+inline style (fixture parity: hiding must not depend on a host stylesheet
+rule existing); the style string is allowlisted in the CSP via a SHA-256
+hash so `style-src` stays restrictive — the `fr-*` hiding classes in
+signup.css are a LAB-plane presentation and are stripped from production
+markup by `stripFireRaidSignatures`.
 Deliberate residuals: decoy field names, element IDs, and route tokens
 are per-session random hex tokens (session-specific, unpredictable, but
 recognizable in SHAPE to an adversary who knows FireRaid), and the canary
 route prefix is operator-configured. Accepted residual (P1-23),
 regression-pinned by `tests/unit/production-carrier-opacity.test.ts`.
 
+## HTML Injection Boundaries
+
+Values interpolated into emitted markup pass through
+`src/security/html.ts`: `escapeHtml()` for text/attribute contexts
+(client script src, Turnstile site key, CSRF token, decoy field names),
+`jsonForScriptIsland()` for the client-config `<script
+type="application/json">` island (JSON-native `<` escaping, so an
+operator-configured endpoint containing `</script>` cannot terminate the
+island; `JSON.parse` on the client restores the value losslessly).
+Server-internal material (nonce, field name, route token) uses fixed
+reviewed alphabets. Pinned by `tests/unit/html-config-escaping.test.ts`.
+
 ## CSP
 
-Conservative policy compatible with Turnstile (no inline styles — all
-styles ship via stylesheet files):
+Conservative policy compatible with Turnstile. The constant decoy-hiding
+inline style is allowlisted via a SHA-256 hash so `style-src` stays restrictive
+(no `'unsafe-inline'`):
 ```
 default-src 'self';
 script-src 'self' https://challenges.cloudflare.com;
 frame-src https://challenges.cloudflare.com;
 connect-src 'self' https://challenges.cloudflare.com;
-style-src 'self';
+style-src 'self' 'sha256-bR67piDoV29bfjsHPn9ssw5vXmLWyHHw3fPPMv8edFU=';
 img-src 'self' data:;
 object-src 'none';
 base-uri 'none';
 form-action 'self'
 ```
+
+## Supported Versions
+
+FireRaid follows semantic versioning. Security patches are applied to the
+latest minor version. The project maintainers can be contacted via the
+repository's issue tracker for vulnerability disclosure.
+
+## Vulnerability Reporting
+
+To report a security vulnerability, please open a GitHub issue or contact
+the maintainers directly. Do not disclose vulnerabilities publicly until
+a fix has been released.
