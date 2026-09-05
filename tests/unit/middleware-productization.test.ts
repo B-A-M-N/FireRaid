@@ -418,7 +418,7 @@ describe("createFireRaidMiddleware factory (audit item 17 + Batch 1/2)", () => {
         collect: async () => [],
       },
     });
-    expect(() => createFireRaidMiddleware(d)).toThrow(/VOLATILE telemetry/);
+    expect(() => createFireRaidMiddleware(d)).toThrow(/NON-DURABLE telemetry/);
   });
 
   it("a VOLATILE canary store is rejected by the PRODUCTION factory", () => {
@@ -430,7 +430,7 @@ describe("createFireRaidMiddleware factory (audit item 17 + Batch 1/2)", () => {
         readVerified: async () => false,
       } as unknown as MiddlewareDeps["canaryStore"],
     });
-    expect(() => createFireRaidMiddleware(d)).toThrow(/VOLATILE canaryStore/);
+    expect(() => createFireRaidMiddleware(d)).toThrow(/NON-DURABLE canaryStore/);
   });
 
   it("the production factory does NOT reject a DURABLE store (already proven by every test above)", () => {
@@ -863,5 +863,68 @@ describe("FR-P1-10: forward-cookie allowlist through admit", () => {
     expect(() =>
       createFireRaidMiddleware(baseDeps({ routes: ROUTES, upstreamRegisterUrl: "javascript:alert(1)" }))
     ).toThrow(/Invalid upstreamRegisterUrl/);
+  });
+});
+
+// ── Closure 6 (FR-P1-03): exact durability match, no public bypass ───────
+
+describe("closure 6: durability is asserted, not assumed", () => {
+  function baseValidDeps(): MiddlewareDeps {
+    const SECRET = "s".repeat(64);
+    const durable = () => ({ durability: "durable" as const });
+    return {
+      profileKeys: { current: { id: "default", secret: SECRET } },
+      version: 1,
+      upstreamRegisterUrl: "https://upstream.example.com/api/register",
+      routes: {
+        applicationPage: "/signup",
+        applicationSubmit: "/api/submit",
+        telemetry: "/api/events",
+        canaryPrefix: "/c/",
+      },
+      session: new ReferenceSessionAdapter(SECRET),
+      render: { inject: referenceInject },
+      verification: { verificationMode: "host-owned" as const, verify: async () => true },
+      telemetry: {
+        ...durable(),
+        accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
+        collect: async () => [],
+      },
+      enforcement: { allow: async () => true, deny: () => {} },
+      canaryStore: { ...durable(), record: async () => {}, readVerified: async () => null, drop: async () => {} },
+      submissionStore: {
+        ...durable(),
+        claim: async () => ({ kind: "claimed", claimId: "c", idempotencyKey: "k" }),
+        complete: async () => {},
+        lookupFinal: async () => null,
+      },
+    } as unknown as MiddlewareDeps;
+  }
+
+  it("an UNDEFINED durability fails the production factory (fail closed, not assumed durable)", () => {
+    const d = baseValidDeps();
+    delete (d.telemetry as { durability?: string }).durability;
+    expect(() => createFireRaidMiddleware(d)).toThrow(
+      /durability:undefined — must be exactly "durable"/
+    );
+  });
+
+  it("a TYPO durability label fails the production factory", () => {
+    const d = baseValidDeps();
+    (d.canaryStore as { durability?: string }).durability = "durabel";
+    expect(() => createFireRaidMiddleware(d)).toThrow(/NON-DURABLE canaryStore/);
+  });
+
+  it("the evaluation path accepts an explicit 'volatile' store but still rejects undefined", async () => {
+    const { createEvaluationMiddleware } = await import("../../src/eval/evaluation-middleware.js");
+    const ok = baseValidDeps();
+    (ok.telemetry as { durability?: string }).durability = "volatile";
+    expect(() => createEvaluationMiddleware(ok as never)).not.toThrow();
+
+    const bad = baseValidDeps();
+    delete (bad.canaryStore as { durability?: string }).durability;
+    expect(() => createEvaluationMiddleware(bad as never)).toThrow(
+      /NON-DURABLE canaryStore/
+    );
   });
 });

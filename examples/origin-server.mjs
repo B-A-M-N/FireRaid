@@ -1,23 +1,27 @@
 #!/usr/bin/env node
 /**
- * FireRaid origin server — runnable reference host.
+ * FireRaid origin server — runnable reference host (LOCAL DEV).
  *
- * A minimal Node.js server that wires the PRODUCT middleware
- * (createFireRaidMiddleware + admit) behind a node:http handler. No
- * Cloudflare Worker required — and no evaluation machinery either:
+ * A minimal Node.js server that wires the middleware behind a node:http
+ * handler. No Cloudflare Worker required.
  *
- *   - createFireRaidMiddleware: the production factory. It REFUSES the
- *     evaluation controls (labMode / recipe) by construction, so this
- *     example cannot drift into a lab condition.
- *   - admit: the production entry. Derivation goes through
- *     deriveProductionProfile only — the random production composition
- *     (a causal semantic strategy P02/P03/P04 + at least one independent
- *     layer) with no override path.
- *   - canaryStore: REQUIRED (P0 route-evidence capability). The production
- *     strategy pool contains route-dependent strategies, so the factory
- *     refuses to start without a store that can observe that channel.
- *   - verification: a HOST-OWNED verifier (the reference disabled-test
- *     adapter is refused in production posture).
+ * Posture (closure 6 — honesty about durability): this example's evidence
+ * stores are the in-memory reference adapters labeled TRUTHFULLY as
+ * `durability: "volatile"`, so it runs through createEvaluationOriginServer
+ * — the sanctioned non-durable wiring path. A PRODUCTION deployment uses
+ * createOriginServer (strict createFireRaidMiddleware), which REQUIRES
+ * stores asserting `durability === "durable"` exactly, wired over real
+ * durable backends (D1/R2/Postgres/…). Relabeling an in-memory store
+ * "durable" to satisfy the factory is the failure mode the exact-match
+ * check exists to catch — do not do it.
+ *
+ * What stays production-shaped even here:
+ *   - no labMode / recipe overrides are set (the derivation is the
+ *     production random composition);
+ *   - verification: a HOST-OWNED verifier (the disabled-test no-op is
+ *     refused in every production-shaped wiring);
+ *   - canaryStore + submissionStore stay REQUIRED (route evidence and the
+ *     one-submission claim).
  *
  * The runtime serves the REAL browser client (public/signup.js) and injects
  * its <script src> on the application page, so what runs in a browser
@@ -59,7 +63,7 @@ import {
 
 // Import compiled TS via tsx at runtime
 import { referenceInject } from "../src/host-adapter/reference-render.js";
-import { createOriginServer, closeServer } from "../src/runtime/node.js";
+import { createEvaluationOriginServer, closeServer } from "../src/runtime/node.js";
 
 // --- Application HTML (minimal signup form) ---
 const SIGNUP_HTML = `<!DOCTYPE html>
@@ -138,19 +142,19 @@ const upstream = http.createServer((req, res) => {
 });
 await new Promise((resolve) => upstream.listen(5051, "127.0.0.1", resolve));
 
-// --- Wire up middleware dependencies (PRODUCTION posture) ---
-// FR-P1-03: the PRODUCTION constructor (createOriginServer →
-// createFireRaidMiddleware) rejects VOLATILE evidence stores. This is a LOCAL
-// DEV origin (in-memory everywhere), so the reference stores declare
-// durability:"durable" — they stand in for the durable backing a real
-// deployment must wire over the SAME interface. State is lost on restart,
-// which is fine for a local experiment/demo, but NOT a production deployment.
-const telemetryStore = new ReferenceTelemetryAdapter();
-telemetryStore.durability = "durable";
-const canaryStore = new ReferenceCanaryStore();
-canaryStore.durability = "durable";
-const submissionStore = new ReferenceSubmissionStore();
-submissionStore.durability = "durable";
+// --- Wire up middleware dependencies (HONEST local-dev posture) ---
+// FR-P1-03 (closure 6): the PRODUCTION contract demands durability ===
+// "durable", EXACTLY — evidence stores that lose state on restart must say
+// so. These reference stores ARE in-memory, so they keep their true
+// "volatile" label and this example runs through createEvaluationMiddleware
+// (the sanctioned non-durable wiring path — see examples/node-local.ts).
+// A PRODUCTION deployment keeps createOriginServer as-is and wires REAL
+// durable adapters (D1/R2/Postgres/…) over the same interfaces; it must
+// never relabel an in-memory store to satisfy the factory — that lie is
+// exactly what the exact-match durability check exists to catch.
+const telemetryStore = new ReferenceTelemetryAdapter(); // durability: "volatile"
+const canaryStore = new ReferenceCanaryStore(); // durability: "volatile"
+const submissionStore = new ReferenceSubmissionStore(); // durability: "volatile"
 
 const middlewareDeps = {
   // Item 18: profileKeys is the production contract — the ring keys profile
@@ -184,10 +188,11 @@ const middlewareDeps = {
 };
 
 async function main() {
-  // P1-1: createOriginServer CONSTRUCTS the server; the host owns binding
-  // (the removed `port` option was dead configuration).
+  // P1-1: the factory CONSTRUCTS the server; the host owns binding (the
+  // removed `port` option was dead configuration). The EVALUATION factory
+  // is used because these stores are honestly labeled volatile (above).
   const PORT = 3456;
-  const server = createOriginServer({
+  const server = createEvaluationOriginServer({
     middlewareDeps,
     htmlLoader,
     routes: ROUTES,

@@ -59,6 +59,7 @@ export {
 export { hashProfile } from "../core/profile.js";
 export {
   createFireRaidMiddleware,
+  validateProductionDeps,
 } from "./config/validate-production.js";
 export {
   MiddlewareConfigError,

@@ -235,6 +235,7 @@ describe("FR-P0-02: fail-closed claim store", () => {
     };
     const deps = baseDeps();
     (deps as { submissionStore: unknown }).submissionStore = {
+      durability: "durable",
       claim: async () => {
         throw new Error("storage outage");
       },
@@ -256,6 +257,7 @@ describe("FR-P0-02: fail-closed claim store", () => {
     };
     const deps = baseDeps();
     (deps as { submissionStore: unknown }).submissionStore = {
+      durability: "durable",
       claim: async () => ({ ok: true }) as unknown as never,
       complete: async () => {},
     };
@@ -275,6 +277,7 @@ describe("FR-P0-02: fail-closed claim store", () => {
     };
     const deps = baseDeps();
     (deps as { submissionStore: unknown }).submissionStore = {
+      durability: "durable",
       claim: async () => ({ kind: "claimed", claimId: "c1", idempotencyKey: "k1" }),
       complete: async () => {
         throw new Error("durable write failed");

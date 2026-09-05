@@ -30,6 +30,7 @@ import type {
   MiddlewareResult,
 } from "../host-adapter/middleware.js";
 import { admit, createFireRaidMiddleware } from "../host-adapter/middleware.js";
+import { createEvaluationMiddleware } from "../eval/evaluation-middleware.js";
 import type { MiddlewareRouteConfig } from "../host-adapter/interface.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -406,10 +407,17 @@ async function writeResult(
 export function createOriginServer(
   options: OriginServerOptions
 ): http.Server {
-  const deps = createFireRaidMiddleware({
-    ...options.middlewareDeps,
-    routes: options.routes,
-  });
+  return buildOriginServer(options, (deps) =>
+    createFireRaidMiddleware({ ...deps, routes: options.routes })
+  );
+}
+
+/** Shared server construction; `validate` selects the posture's factory. */
+function buildOriginServer(
+  options: OriginServerOptions,
+  validate: (deps: MiddlewareDeps) => MiddlewareDeps
+): http.Server {
+  const deps = validate(options.middlewareDeps);
 
   const htmlLoader = options.htmlLoader;
   const clientScriptPath = options.clientScriptPath ?? "/fireraid-client.js";
@@ -494,5 +502,32 @@ export function createOriginServer(
 export function closeServer(server: http.Server): Promise<void> {
   return new Promise((resolve) => {
     server.close(() => resolve());
+  });
+}
+
+/**
+ * Closure 6: the SANCTIONED local-development / experiment origin server.
+ *
+ * Identical to createOriginServer except the deps go through
+ * createEvaluationMiddleware — the validator's internal evaluation path,
+ * which accepts stores that honestly declare `durability: "volatile"`.
+ * This is where in-memory reference stores belong; a production wiring has
+ * NO way to reach this path (createOriginServer keeps the strict factory,
+ * and createFireRaidMiddleware's public signature has no bypass).
+ */
+export function createEvaluationOriginServer(
+  options: OriginServerOptions & { labMode?: boolean }
+): http.Server {
+  return buildOriginServer(options, (deps) => {
+    const evalDeps: Record<string, unknown> = { ...deps, routes: options.routes };
+    // Only SET labMode when actually requested — a present-but-false key
+    // would trip the validator's smuggle-refusal on a later production pass.
+    if (options.labMode === true) evalDeps.labMode = true;
+    // The evaluation validator runs the SAME structural checks via the
+    // internal evaluation path (honestly-"volatile" stores permitted).
+    const validated = createEvaluationMiddleware(evalDeps as never);
+    // createEvaluationMiddleware runs ensureEvaluationRing: profileKeys is
+    // defined on the returned deps (synthesized from `secret` when needed).
+    return validated as MiddlewareDeps;
   });
 }

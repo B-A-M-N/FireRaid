@@ -37,12 +37,27 @@ function requireMethod(obj: unknown, name: string, label: string): void {
  *   verification → NOT the disabled-test no-op
  * Refuses smuggled lab/recipe configuration outright.
  *
- * `options.allowVolatile` is the EVALUATION constructor's opt-in only; the
- * public production entry point never passes it.
+ * Closure 6: no public volatile opt-out. The durability check is EXACT
+ * (`durability === "durable"`): undefined, "whatever", or any other label
+ * fails — a store must ASSERT durability, not merely fail to deny it.
+ * Volatile wiring is the EVALUATION factory's internal, validated path
+ * (validateEvaluationDeps calls validateProductionDeps with
+ * `internalEvaluation: true`); it is not reachable from this public
+ * signature.
  */
-export function createFireRaidMiddleware(
+export function createFireRaidMiddleware(deps: MiddlewareDeps): MiddlewareDeps {
+  return validateProductionDeps(deps, { internalEvaluation: false });
+}
+
+/**
+ * The full validator. `internalEvaluation` is NOT a public option — only
+ * src/eval/evaluation-middleware.ts may pass true (it is the sanctioned
+ * home of in-memory experiment wiring), and it STILL gets the exact
+ * "durable"|undefined-else shape check per store.
+ */
+export function validateProductionDeps(
   deps: MiddlewareDeps,
-  options?: { allowVolatile?: boolean }
+  internalOptions: { internalEvaluation: boolean }
 ): MiddlewareDeps {
   // AUDIT (P0 product/lab boundary): the production factory accepts NO
   // evaluation overrides. A smuggled labMode/recipe/handle would let a
@@ -260,18 +275,23 @@ export function createFireRaidMiddleware(
     ["submissionStore", deps.submissionStore],
   ];
   for (const [label, store] of evidenceStores) {
-    if (store && store.durability === "volatile") {
-      // FR-P1-03: the PRODUCTION constructor rejects volatile evidence
-      // stores by default. The EVALUATION constructor opts in via
-      // `{ allowVolatile: true }` — it is the sanctioned home of in-memory
-      // integration/experiment wiring.
-      if (!options?.allowVolatile) {
+    // Closure 6: EXACT durability match. `undefined` (a hand-rolled adapter
+    // that never set the field), a typo label, or "volatile" all fail the
+    // production contract — durability must be ASSERTED, not merely not-
+    // denied. The evaluation path (internalEvaluation) tolerates the
+    // explicit "volatile" label only; it still cannot sneak an undefined
+    // shape past a wired production profile — evaluation synthesizes the
+    // reference stores, which always declare the field.
+    if (!store) continue;
+    if (store.durability !== "durable") {
+      if (!(internalOptions.internalEvaluation && store.durability === "volatile")) {
         throw new MiddlewareConfigError(
-          `createFireRaidMiddleware (production) rejects a VOLATILE ${label} ` +
-            `(durability:"${store.durability}", in-memory, lost on restart). ` +
-            `Production review evidence and the one-submission claim must survive ` +
-            `restarts; wire a durable adapter (D1/R2/Postgres/…; INTEGRATION.md). ` +
-            `Volatile reference stores are the EVALUATION constructor's domain.`
+          `createFireRaidMiddleware (production) rejects a NON-DURABLE ${label} ` +
+            `(durability:${JSON.stringify((store as { durability?: unknown }).durability)} — must be ` +
+            `exactly "durable"). Production review evidence and the one-submission ` +
+            `claim must survive restarts; wire a durable adapter (D1/R2/Postgres/…; ` +
+            `INTEGRATION.md). Explicit "volatile" stores are the EVALUATION ` +
+            `constructor's domain.`
         );
       }
     }

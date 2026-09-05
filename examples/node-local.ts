@@ -13,12 +13,13 @@
  * P1-4: renamed from `node-production.ts` to `node-local.ts`. It wires the
  * Reference (VOLATILE, in-memory) stores — telemetry, canary, submission —
  * so it is a LOCAL/INTEGRATION wiring, never a production deployment. Under
- * FR-P1-03, `createFireRaidMiddleware` (the PRODUCTION constructor) REJECTS
- * volatile evidence stores at startup. This example therefore routes through
- * the EVALUATION constructor, `createEvaluationMiddleware` ({ allowVolatile:
- * true } under the hood), which is the sanctioned home of non-durable wiring.
- * A real production host must substitute DURABLE adapters (D1/R2/Postgres/…)
- * over the SAME interface, then use `createFireRaidMiddleware`.
+ * FR-P1-03 (closure 6), the production factory demands EXACT
+ * `durability === "durable"` and has NO public volatile opt-out; these
+ * stores keep their true "volatile" label and the example routes through
+ * `createEvaluationMiddleware` — the validator's internal evaluation path,
+ * the sanctioned home of non-durable wiring. A real production host must
+ * substitute DURABLE adapters (D1/R2/Postgres/…) over the SAME interface,
+ * then use `createFireRaidMiddleware`.
  */
 
 import {
@@ -93,10 +94,12 @@ const middlewareDeps = {
 };
 
 async function main(): Promise<void> {
-  // FR-P1-03/P1-4: LOCAL wiring of volatile reference stores — the EVALUATION
-  // constructor permits these; the PRODUCTION constructor (createFireRaid-
-  // Middleware) would reject them. A production deploy must wire durable
-  // adapters and call createFireRaidMiddleware.
+  // FR-P1-03/P1-4 (closure 6): LOCAL wiring of honestly-volatile reference
+  // stores — the EVALUATION constructor's internal validator path permits
+  // the explicit "volatile" label; the PRODUCTION factory would reject them
+  // (and rejects any durability value that is not exactly "durable"). A
+  // production deploy must wire durable adapters and call
+  // createFireRaidMiddleware.
   const validatedDeps = createEvaluationMiddleware({
     ...middlewareDeps,
     routes: middlewareDeps.routes,

@@ -87,6 +87,7 @@ describe("FR-P1-02: bounded streaming body reader", () => {
   });
 });
 // ── FR-P1-02 closure 5: migrated endpoints enforce the streamed cap ──────
+import type { Env } from "../../src/env.js";
 
 describe("closure 5: migrated route endpoints use the bounded reader", () => {
   const ADMIN_SECRET = "s-secret".padEnd(32, "x");

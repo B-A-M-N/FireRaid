@@ -12,11 +12,11 @@
  */
 import {
   __admitWithEvaluation,
-  createFireRaidMiddleware,
   type MiddlewareDeps,
   type MiddlewareResult,
   type EvaluationControls,
 } from "../host-adapter/middleware.js";
+import { validateProductionDeps } from "../host-adapter/config/validate-production.js";
 import type { ProfileKeyRing } from "../core/session.js";
 import type { ResolvedFireRaidRoutes } from "../host-adapter/interface.js";
 
@@ -100,11 +100,12 @@ function validateEvaluationDeps(deps: EvaluationMiddlewareDeps): EvaluationMiddl
     turnstileRequired: _turnstileRequired,
     ...structural
   } = deps;
-  // FR-P1-03: the EVALUATION constructor permits volatile reference stores
-  // (in-memory telemetry/canary/submission doubles for integration and
-  // experiments). The PRODUCTION constructor (createFireRaidMiddleware with
-  // no allowVolatile) rejects them. The evaluation plane is the documented,
-  // sanctioned home of non-durable wiring.
-  createFireRaidMiddleware(structural as MiddlewareDeps, { allowVolatile: true });
+  // FR-P1-03 (closure 6): the EVALUATION constructor permits explicit
+  // "volatile" reference stores (in-memory telemetry/canary/submission
+  // doubles for integration and experiments) through the validator's
+  // internal evaluation path — no public bypass exists on the production
+  // entry point. Any OTHER non-"durable" durability value (undefined,
+  // typo labels) still fails even here.
+  validateProductionDeps(structural as MiddlewareDeps, { internalEvaluation: true });
   return deps;
 }
