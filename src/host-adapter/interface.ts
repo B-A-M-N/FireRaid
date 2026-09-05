@@ -358,6 +358,89 @@ export type EnforcementResult =
   | { kind: "transport-failure"; reason: string };
 
 /**
+ * FR-P0-02 — the durable one-submission-per-session authority.
+ *
+ * FireRaid's invariant: ONE session causes ONE irreversible forward. The
+ * Worker plane enforces this with an atomic D1 claim (`UPDATE sessions SET
+ * submitted = 1 WHERE id = ? AND submitted = 0`). The host plane — where the
+ * upstream forward is equally irreversible — previously delegated that
+ * guarantee to "the host's idempotency problem", which meant a client retry
+ * (or two concurrent submits) after a lost response could create TWO upstream
+ * accounts for one session.
+ *
+ * The middleware therefore claims BEFORE the forward and completes AFTER:
+ *
+ *   claim(sessionId, idempotencyKey)
+ *     claimed   → this call owns the forward; proceed to enforcement.allow()
+ *     replay    → the session ALREADY finalized durably; the stored result is
+ *                 returned to the applicant WITHOUT calling the upstream
+ *                 again (the lost-response retry converges)
+ *     conflict  → another request holds the unfinished claim (two concurrent
+ *                 submits); fail closed as forward-failed
+ *
+ *   complete(claimId, outcome) is called once the forward outcome exists —
+ *   including transport-failure (the claim is released by recording the
+ *   failure, so a genuine retry may proceed) — and MUST be durable before
+ *   the middleware responds.
+ *
+ * `claim` returning a rejected promise, or an object outside the three
+ * contract kinds, fails CLOSED (conflict semantics): an unclaimable session
+ * is never forwarded.
+ */
+export interface HostSubmissionClaim {
+  kind: "claimed";
+  /** Opaque handle the middleware passes back to complete(). */
+  claimId: string;
+  /**
+   * Deterministic upstream idempotency key derived from
+   * (sessionId, idempotencyKey). An enforcement adapter forwarding through
+   * a retry-capable transport MUST present this so the upstream can
+   * deduplicate its own side of the irreversible act.
+   */
+  idempotencyKey: string;
+}
+export type HostSubmissionReplay = {
+  kind: "replay";
+  outcome: FinalSubmissionOutcome;
+};
+export type HostSubmissionConflict = { kind: "conflict" };
+export type HostSubmissionClaimResult =
+  | HostSubmissionClaim
+  | HostSubmissionReplay
+  | HostSubmissionConflict;
+
+/**
+ * The durable record of how a session's single forward ended. Stored by
+ * complete() and replayed to later POSTs of the same session.
+ */
+export type FinalSubmissionOutcome =
+  | { kind: "created" }
+  | { kind: "business-rejected"; status: number }
+  | { kind: "queued-for-retry"; retryId: string };
+
+export interface HostSubmissionStore {
+  /**
+   * Atomically claim the session's single forward slot. Implementations
+   * MUST be durable and atomic (a unique constraint or conditional UPDATE,
+   * never check-then-insert).
+   */
+  claim(sessionId: string, idempotencyKey: string): Promise<HostSubmissionClaimResult>;
+  /**
+   * Record the forward's outcome against the claim durably. Called exactly
+   * once per successful claim, before the middleware responds. `outcome`
+   * covers ALL terminal forward results — created, business-rejected,
+   * queued-for-retry, AND transport-failure (a recorded transport failure
+   * releases the claim so a genuine client retry may re-attempt).
+   */
+  complete(claimId: string, outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string }): Promise<void>;
+}
+
+/** Deterministic idempotency key material for one session's forward. */
+export function submissionIdempotencyKey(sessionId: string): string {
+  return `fr-forward-${sessionId}`;
+}
+
+/**
  * Host-facing risk annotation. Reviewer tools consume this; it must never
  * be serialized to applicants.
  */

@@ -16,6 +16,7 @@ import {
   ReferenceTelemetryAdapter,
   type HostEnforcementAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
 } from "../../src/host-adapter/index.js";
 import {
   admitEvaluation,
@@ -67,6 +68,7 @@ function deps(over: Partial<EvaluationMiddlewareDeps> = {}): EvaluationMiddlewar
     telemetry: new ReferenceTelemetryAdapter(),
     enforcement: new FakeEnforcement(),
     canaryStore: new ReferenceCanaryStore(),
+    submissionStore: new ReferenceSubmissionStore(),
     labMode: false,
     // These tests assert the fail-closed posture (non-ACCEPT never
     // forwards) — the enforcement mode, not advisory's forward-and-annotate.

@@ -54,6 +54,7 @@ import {
   ReferenceTelemetryAdapter,
   ReferenceEnforcementAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
 } from "../src/host-adapter/index.js";
 
 // Import compiled TS via tsx at runtime
@@ -154,6 +155,10 @@ const middlewareDeps = {
   // P0 route-evidence capability: REQUIRED for the production strategy
   // pool (P02/P04 verify route probes server-side).
   canaryStore: new ReferenceCanaryStore(),
+  // FR-P0-02 one-submission capability: REQUIRED. The reference store is
+  // in-memory; a production host implements HostSubmissionStore over a
+  // durable store (unique-constraint claim per session).
+  submissionStore: new ReferenceSubmissionStore(),
   // P0 CSRF separation: issuance AND verification resolve through this
   // single secret — never the (rotating) profile keys.
   csrfSecret: CSRF_SECRET,

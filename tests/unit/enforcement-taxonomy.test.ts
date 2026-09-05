@@ -19,6 +19,7 @@ import {
   ReferenceSessionAdapter,
   ReferenceTelemetryAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
 import type { MiddlewareDeps } from "../../src/host-adapter/middleware.js";
@@ -160,6 +161,7 @@ describe("P0-8: middleware receipt policy", () => {
       telemetry: new ReferenceTelemetryAdapter(),
       enforcement: new ReferenceEnforcementAdapter(),
       canaryStore: new ReferenceCanaryStore(),
+      submissionStore: new ReferenceSubmissionStore(),
       enforcementMode: "enforcement" as const,
       routes: ROUTES,
     }) as unknown as MiddlewareDeps;

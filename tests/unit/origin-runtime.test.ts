@@ -18,6 +18,7 @@ import {
   ReferenceTelemetryAdapter,
   ReferenceEnforcementAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
 
@@ -45,6 +46,7 @@ function buildDeps() {
     telemetry: new ReferenceTelemetryAdapter(),
     enforcement: new ReferenceEnforcementAdapter(),
     canaryStore: new ReferenceCanaryStore(),
+    submissionStore: new ReferenceSubmissionStore(),
     enforcementMode: "advisory" as const,
     routes: ROUTES,
   };

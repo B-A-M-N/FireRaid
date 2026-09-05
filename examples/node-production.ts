@@ -18,6 +18,7 @@ import {
   ReferenceTelemetryAdapter,
   ReferenceEnforcementAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
   HostOwnedVerificationAdapter,
 } from "../src/host-adapter/index.js";
 import { createOriginServer, closeServer } from "../src/runtime/node.js";
@@ -75,6 +76,10 @@ const middlewareDeps: MiddlewareDeps = {
   telemetry: new ReferenceTelemetryAdapter(),
   enforcement: new ReferenceEnforcementAdapter(),
   canaryStore: new ReferenceCanaryStore(),
+  // FR-P0-02: one session → one irreversible forward. The reference store is
+  // in-memory (volatile — restarts lose claim history); a production host
+  // implements HostSubmissionStore over its own database.
+  submissionStore: new ReferenceSubmissionStore(),
   verification: new HostOwnedVerificationAdapter(verifyHuman),
 };
 

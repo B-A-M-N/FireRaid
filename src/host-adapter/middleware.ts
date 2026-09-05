@@ -56,8 +56,11 @@ import type {
   HostTelemetryAdapter,
   HostEnforcementAdapter,
   HostCanaryStore,
+  HostSubmissionStore,
+  HostSubmissionClaimResult,
   EnforcementResult,
 } from "./interface.js";
+import { submissionIdempotencyKey } from "./interface.js";
 import type { ProfileKeyRing } from "../core/session.js";
 
 const DEFAULT_CANARY_PREFIX = "/c/";
@@ -94,6 +97,15 @@ export interface MiddlewareDeps {
    * is physically incapable of observing one of its causal channels.
    */
   canaryStore: HostCanaryStore;
+  /**
+   * FR-P0-02: durable one-submission-per-session authority. MANDATORY for
+   * the production factory — the upstream forward is irreversible, so the
+   * middleware claims the session's single forward slot BEFORE calling
+   * enforcement.allow() and completes the claim with the outcome after.
+   * Without it, a client retry after a lost response (or two concurrent
+   * submits) can create multiple upstream accounts for one session.
+   */
+  submissionStore: HostSubmissionStore;
   /**
    * P1-AUDIT-2 (P1-14): path the middleware treats as the telemetry-drain
    * carrier (the real client POSTs {events: [...]} there). Default
@@ -791,6 +803,42 @@ async function handleSubmitPost(
     return { kind: "deny", disposition: "CSRF_FAILED" };
   }
 
+  // FR-P0-02: claim the session's single irreversible forward BEFORE any
+  // evaluation work. Three outcomes:
+  //   replay   → the session already finalized durably; return the STORED
+  //              outcome without touching the upstream again (the
+  //              lost-response retry converges to the original receipt).
+  //   conflict → another in-flight request owns the claim (concurrent
+  //              submits); fail closed as forward-failed — never forward.
+  //   claimed  → this request owns the forward; the claim is completed with
+  //              the outcome below, whichever way the forward lands.
+  // A claim store that throws or returns a non-contract shape fails CLOSED
+  // (conflict semantics): an unclaimable session is never forwarded.
+  const idempotencyKey = submissionIdempotencyKey(sessionId);
+  let claim: HostSubmissionClaimResult;
+  try {
+    claim = await deps.submissionStore.claim(sessionId, idempotencyKey);
+  } catch (err) {
+    reportOperationalError(deps, "submissionStore.claim", err);
+    return { kind: "forward-failed", forwardFailureReason: "submission_claim_failed" };
+  }
+  if (claim.kind === "replay") {
+    // The stored outcome IS the receipt: the applicant gets the same neutral
+    // result as the request that actually did the work (created → success
+    // receipt; business-rejected / queued-for-retry → captured-but-not-
+    // created receipt). The upstream is never called again.
+    return {
+      kind: "admit",
+      upstreamCreated: claim.outcome.kind === "created",
+      sessionId,
+      disposition: "REPLAY",
+      ...(claim.outcome.kind !== "created" ? { enforcementDetail: claim.outcome } : {}),
+    };
+  }
+  if (claim.kind !== "claimed") {
+    return { kind: "forward-failed", forwardFailureReason: "submission_claim_conflict" };
+  }
+
   let profileSecret: string;
   try {
     profileSecret = resolveKeySecret(ring, session!.keyId);
@@ -953,6 +1001,17 @@ async function handleSubmitPost(
           evidence: risk.evidence,
         });
         await finalizeStores(deps, sessionId);
+        // FR-P0-02: the decision denied BEFORE any forward — release the
+        // claim with a transport-failure outcome (the session may legitimately
+        // fix and retry; no upstream act ever happened).
+        try {
+          await deps.submissionStore.complete(claim.claimId, {
+            kind: "transport-failure",
+            reason: `decision_${decision.disposition.toLowerCase()}`,
+          });
+        } catch (err) {
+          reportOperationalError(deps, "submissionStore.complete(decision-deny)", err);
+        }
         return {
           kind: "deny",
           disposition: decision.disposition,
@@ -1008,6 +1067,16 @@ async function handleSubmitPost(
       // nothing was captured: answering "received" would be a lie a crash
       // turns into a silently lost application.
       if (detail.kind === "transport-failure") {
+        // FR-P0-02: record the failure against the claim durably — this
+        // RELEASES the slot so a genuine client retry may re-attempt the
+        // forward (the upstream captured nothing). If the release itself
+        // fails, the claim stays held: fail closed (conflict on retry) beats
+        // silently allowing a second forward after an unknown-state first.
+        try {
+          await deps.submissionStore.complete(claim.claimId, detail);
+        } catch (err) {
+          reportOperationalError(deps, "submissionStore.complete(transport-failure)", err);
+        }
         return {
           kind: "forward-failed",
           forwardFailureReason: detail.reason,
@@ -1023,6 +1092,32 @@ async function handleSubmitPost(
             recommendedAction: risk.recommendedAction,
             evidence: risk.evidence,
           },
+        };
+      }
+      // FR-P0-02: the forward reached a TERMINAL captured state (created /
+      // business-rejected / queued-for-retry) — record it durably BEFORE the
+      // receipt leaves, so a later retry of the same session replays THIS
+      // outcome instead of re-forwarding. A complete() failure here means
+      // the durable record may not exist: fail the request (release never
+      // happened → the claim still guards the upstream), never ack blindly.
+      try {
+        await deps.submissionStore.complete(
+          claim.claimId,
+          detail.kind === "created"
+            ? { kind: "created" }
+            : detail.kind === "queued-for-retry"
+              ? { kind: "queued-for-retry", retryId: detail.retryId }
+              : { kind: "business-rejected", status: detail.status }
+        );
+      } catch (err) {
+        reportOperationalError(deps, "submissionStore.complete", err);
+        return {
+          kind: "forward-failed",
+          forwardFailureReason: "submission_complete_failed",
+          sessionId,
+          score: decision.score,
+          submittedEmail,
+          disposition: decision.disposition,
         };
       }
       const upstreamCreated = detail.kind === "created";
@@ -1044,7 +1139,20 @@ async function handleSubmitPost(
           evidence: risk.evidence,
         },
       };
-    } catch {
+    } catch (err) {
+      // FR-P0-02: an evaluation error after the claim must RELEASE it —
+      // nothing was forwarded, so the session may legitimately retry. If the
+      // release fails the claim stays held (fail closed: a later retry gets
+      // conflict rather than risk a second forward on unknown state).
+      try {
+        await deps.submissionStore.complete(claim.claimId, {
+          kind: "transport-failure",
+          reason: "eval_error",
+        });
+      } catch (completeErr) {
+        reportOperationalError(deps, "submissionStore.complete(eval_error)", completeErr);
+      }
+      reportOperationalError(deps, "handleSubmitPost.evaluate", err);
       // Fail-closed: never forward on an evaluation error.
       return { kind: "deny", disposition: "EVAL_ERROR" };
     }
@@ -1189,6 +1297,21 @@ export function createFireRaidMiddleware(
   }
   requireMethod(deps.canaryStore, "record", "canaryStore");
   requireMethod(deps.canaryStore, "readVerified", "canaryStore");
+
+  // FR-P0-02: the one-submission-per-session authority is a MANDATORY
+  // production capability — the upstream forward is irreversible, so the
+  // middleware must own a durable claim/replay/complete record around it.
+  // "Let the host dedupe" was the exact gap that let one session create
+  // multiple upstream accounts after a lost response.
+  if (!deps.submissionStore) {
+    throw new MiddlewareConfigError(
+      "MiddlewareDeps.submissionStore is REQUIRED in production — one session " +
+        "must cause one irreversible forward (claim/replay/complete over a " +
+        "durable store); see HostSubmissionStore in host-adapter/interface.ts"
+    );
+  }
+  requireMethod(deps.submissionStore, "claim", "submissionStore");
+  requireMethod(deps.submissionStore, "complete", "submissionStore");
 
   // Rereview item 3: per-strategy capability enumeration over the ENTIRE
   // production pool. The random composition can draw every entry of

@@ -8,8 +8,12 @@ import type {
   HostTelemetryAdapter,
   HostEnforcementAdapter,
   HostCanaryStore,
+  HostSubmissionStore,
+  HostSubmissionClaimResult,
+  FinalSubmissionOutcome,
   EnforcementResult,
 } from "./interface.js";
+import { submissionIdempotencyKey } from "./interface.js";
 import {
   signSessionEnvelope,
   verifySessionEnvelope,
@@ -438,5 +442,80 @@ export class ReferenceCanaryStore implements HostCanaryStore {
       }
     }
     return evicted;
+  }
+}
+
+/**
+ * FR-P0-02 — reference one-submission-per-session store.
+ *
+ * Atomicity model: the claim record is keyed by sessionId and created only
+ * when absent (Map.set on a fresh key after a has-check is NOT atomic in a
+ * concurrent host — the REFERENCE runs on the single-threaded Node event
+ * loop where the check and set complete without interleaving, and the test
+ * suite's "two simultaneous submissions" case exercises exactly that). A
+ * production host MUST implement the same semantics over its own durable
+ * store with a real atomic primitive — a UNIQUE constraint insert or a
+ * conditional UPDATE (`UPDATE claims SET holder = ? WHERE session_id = ?
+ * AND state = 'open'`), never check-then-insert across an await.
+ *
+ * P1-8 durability declaration: this in-process Map is VOLATILE — like the
+ * other reference stores it exists for local development, integration
+ * tests, and as the behavioral specification for a durable implementation.
+ */
+export class ReferenceSubmissionStore implements HostSubmissionStore {
+  readonly durability = "volatile" as const;
+  /** sessionId → claim state. A completed claim holds its outcome forever. */
+  private readonly claims = new Map<
+    string,
+    { claimId: string; idempotencyKey: string; open: boolean; outcome?: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string } }
+  >();
+
+  async claim(sessionId: string, idempotencyKey: string): Promise<HostSubmissionClaimResult> {
+    const existing = this.claims.get(sessionId);
+    if (existing) {
+      // Open claim held by another in-flight request → conflict.
+      if (existing.open) return { kind: "conflict" };
+      // Finalized claim → replay the durable outcome (idempotent receipt).
+      if (existing.outcome) {
+        const o = existing.outcome;
+        return o.kind === "transport-failure"
+          ? // A recorded transport failure RELEASED the slot: take it over.
+            this.takeOver(sessionId, idempotencyKey)
+          : { kind: "replay", outcome: o };
+      }
+      return { kind: "conflict" };
+    }
+    return this.takeOver(sessionId, idempotencyKey);
+  }
+
+  /** Create a fresh open claim for a session with no live claim. */
+  private takeOver(sessionId: string, idempotencyKey: string): HostSubmissionClaimResult {
+    const claimId = `${sessionId}:${crypto.randomUUID()}`;
+    this.claims.set(sessionId, { claimId, idempotencyKey, open: true });
+    return { kind: "claimed", claimId, idempotencyKey: submissionIdempotencyKey(sessionId) };
+  }
+
+  async complete(
+    claimId: string,
+    outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string }
+  ): Promise<void> {
+    for (const [sessionId, claim] of this.claims) {
+      if (claim.claimId !== claimId) continue;
+      claim.open = false;
+      claim.outcome = outcome;
+      // A transport failure releases the slot entirely — a genuine client
+      // retry must be able to re-attempt the forward.
+      if (outcome.kind === "transport-failure") this.claims.delete(sessionId);
+      return;
+    }
+    // Unknown claimId: the claim record was lost (volatile-store restart).
+    // Fail loudly — the middleware treats a throw as fail-closed.
+    throw new Error(`ReferenceSubmissionStore: unknown claimId ${claimId}`);
+  }
+
+  /** Test/diagnostics accessor. */
+  stateFor(sessionId: string): { open: boolean; outcome?: unknown } | undefined {
+    const c = this.claims.get(sessionId);
+    return c ? { open: c.open, outcome: c.outcome } : undefined;
   }
 }

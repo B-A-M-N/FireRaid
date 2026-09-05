@@ -16,6 +16,7 @@ import {
   ReferenceSessionAdapter,
   ReferenceTelemetryAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
 import type { OriginAssessment } from "../../src/runtime/node.js";
@@ -55,6 +56,7 @@ describe("P0-5: onAssessment durability", () => {
       telemetry: new ReferenceTelemetryAdapter(),
       enforcement: { allow: async () => true, deny: () => {} },
       canaryStore: new ReferenceCanaryStore(),
+    submissionStore: new ReferenceSubmissionStore(),
       enforcementMode: "enforcement" as const,
       routes: ROUTES,
     };

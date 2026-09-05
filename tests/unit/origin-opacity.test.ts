@@ -30,6 +30,7 @@ import {
   ReferenceSessionAdapter,
   ReferenceTelemetryAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
@@ -87,6 +88,7 @@ describe("P0 origin opacity: decision-blind wire", () => {
         deny: () => {},
       },
       canaryStore: new ReferenceCanaryStore(),
+    submissionStore: new ReferenceSubmissionStore(),
       enforcementMode: "enforcement" as const,
       routes: ROUTES,
     };

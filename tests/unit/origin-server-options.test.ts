@@ -21,6 +21,7 @@ import {
   ReferenceTelemetryAdapter,
   ReferenceEnforcementAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
 import type { MiddlewareDeps } from "../../src/host-adapter/middleware.js";
@@ -46,6 +47,7 @@ function deps(): MiddlewareDeps {
     telemetry: new ReferenceTelemetryAdapter(),
     enforcement: new ReferenceEnforcementAdapter(),
     canaryStore: new ReferenceCanaryStore(),
+    submissionStore: new ReferenceSubmissionStore(),
     enforcementMode: "advisory" as const,
     routes: ROUTES,
   } as MiddlewareDeps;

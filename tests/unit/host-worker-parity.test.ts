@@ -26,6 +26,7 @@ import {
   ReferenceVerificationAdapter,
   ReferenceTelemetryAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
 import {
@@ -195,6 +196,7 @@ describe("Worker vs host decision parity (Batch 3)", () => {
             deny: (_sid: string, reason: string) => { denial.reason = reason; },
           },
           canaryStore,
+          submissionStore: new ReferenceSubmissionStore(),
           labMode: modeFor(recipe) === "lab",
           // Decision parity is asserted against the fail-closed posture.
           enforcementMode: "enforcement",
@@ -273,6 +275,7 @@ describe("strict scoring-policy lookup (rereview item 26)", () => {
       verification: new ReferenceVerificationAdapter(),
       telemetry: store,
       canaryStore: new ReferenceCanaryStore(),
+      submissionStore: new ReferenceSubmissionStore(),
       enforcement: { allow: async () => true, deny: () => {} },
     };
     const cookie = await (deps.session as ReferenceSessionAdapter).sessionCookie(sessionId);

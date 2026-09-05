@@ -22,6 +22,7 @@ import {
   ReferenceRenderError,
   ReferenceSessionAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
   referenceInject,
   type MiddlewareDeps,
   type MiddlewareRouteConfig,
@@ -57,6 +58,7 @@ function baseDeps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
     },
     enforcement: { allow: async () => true, deny: () => {} },
     canaryStore: new ReferenceCanaryStore(),
+    submissionStore: new ReferenceSubmissionStore(),
     enforcementMode: "enforcement",
     ...over,
   };

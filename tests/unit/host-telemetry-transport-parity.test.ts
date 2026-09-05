@@ -30,6 +30,7 @@ import {
   ReferenceTelemetryAdapter,
   type HostEnforcementAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
 } from "../../src/host-adapter/index.js";
 import {
   admitEvaluation,
@@ -63,6 +64,7 @@ function deps(telemetry: ReferenceTelemetryAdapter, recipe?: { families: string[
     telemetry,
     enforcement: new CountingEnforcement(),
     canaryStore: new ReferenceCanaryStore(),
+    submissionStore: new ReferenceSubmissionStore(),
     labMode: false,
     recipe: recipe as never,
   };

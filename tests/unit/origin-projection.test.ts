@@ -21,6 +21,7 @@ import {
   ReferenceSessionAdapter,
   ReferenceTelemetryAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
   referenceInject,
 } from "../../src/host-adapter/index.js";
 import type { OriginAssessment } from "../../src/runtime/node.js";
@@ -77,6 +78,7 @@ function boot(opts: {
       telemetry: new ReferenceTelemetryAdapter(),
       enforcement,
       canaryStore: new ReferenceCanaryStore(),
+      submissionStore: new ReferenceSubmissionStore(),
       enforcementMode: opts.enforcementMode,
       routes: ROUTES,
       // deno-lint-ignore no-explicit-any

@@ -24,6 +24,7 @@ import {
   makeCsrf,
   ReferenceSessionAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
 } from "../../src/host-adapter/index.js";
 import {
   admitEvaluation,
@@ -50,6 +51,7 @@ function deps(over: Partial<EvaluationMiddlewareDeps> = {}): EvaluationMiddlewar
     },
     enforcement: { allow: async () => true, deny: () => {} },
     canaryStore: new ReferenceCanaryStore(),
+    submissionStore: new ReferenceSubmissionStore(),
     labMode: false,
     // These tests assert the fail-closed posture (non-ACCEPT never
     // forwards) — the enforcement mode, not advisory's forward-and-annotate.

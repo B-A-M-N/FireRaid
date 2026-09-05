@@ -45,7 +45,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { makeCsrf, ReferenceSessionAdapter, referenceInject, ReferenceVerificationAdapter, ReferenceTelemetryAdapter, ReferenceCanaryStore, type HostEnforcementAdapter } from "../../src/host-adapter/index.js";
+import { makeCsrf, ReferenceSessionAdapter, referenceInject, ReferenceVerificationAdapter, ReferenceTelemetryAdapter, ReferenceCanaryStore, ReferenceSubmissionStore, type HostEnforcementAdapter } from "../../src/host-adapter/index.js";
 import { admitEvaluation, type EvaluationMiddlewareDeps } from "../../src/eval/evaluation-middleware.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
 import type { DefenseRecipe } from "../../src/core/recipe-schema.js";
@@ -232,6 +232,7 @@ export async function startOriginLedgerRuntime(opts: {
     telemetry,
     enforcement,
     canaryStore,
+    submissionStore: new ReferenceSubmissionStore(),
     labMode: opts.labMode,
     recipe: trialRecipe,
     // P2: blocking-by-default here — see the option doc above. The middleware

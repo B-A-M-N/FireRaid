@@ -8,6 +8,7 @@ export {
   ReferenceTelemetryAdapter,
   ReferenceEnforcementAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
 } from "./reference-adapters.js";
 export {
   admit,

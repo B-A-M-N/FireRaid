@@ -24,6 +24,7 @@ import {
   ReferenceTelemetryAdapter,
   type HostEnforcementAdapter,
   ReferenceCanaryStore,
+  ReferenceSubmissionStore,
 } from "../../src/host-adapter/index.js";
 import {
   admitEvaluation,
@@ -53,6 +54,7 @@ function deps(version: number, over: Partial<EvaluationMiddlewareDeps> = {}): Ev
     telemetry: new ReferenceTelemetryAdapter(),
     enforcement: new NullEnforcement(),
     canaryStore: new ReferenceCanaryStore(),
+    submissionStore: new ReferenceSubmissionStore(),
     labMode: false,
     // Fail-closed assertions (non-ACCEPT denies) — enforcement posture.
     enforcementMode: "enforcement",
