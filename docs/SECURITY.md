@@ -30,16 +30,37 @@ All secret/token comparisons go through ONE constant-time primitive
 (`src/core/tokens.ts`); length is folded into the accumulator — comparison
 time never leaks token length.
 
-## Retention (P1-10)
+## Retention (P1-10, FR-P0-01)
+
+The sweep is a dependency-ordered lifecycle: children leave before the
+parents that reference them, and every table has an explicit window — nothing
+is silently immortal.
 
 - Raw telemetry (`event_batches` payloads — keystroke-level events): 7-day
   default window (`FIRERAID_RAW_TELEMETRY_RETENTION_DAYS`), clamped to at
   most the derived-records window. Raw payloads have no reader after the
   30-minute session TTL; this is the most sensitive data the store holds.
-- Derived records (dispositions, evidence, canary hits): 30-day default
-  (`FIRERAID_RETENTION_DAYS`). These are the experiment's durable observables.
+- Derived records (dispositions, evidence, canary hits, per-session compact
+  metrics): 30-day default (`FIRERAID_RETENTION_DAYS`). These are the
+  experiment's durable observables. A session's `session_metrics` row expires
+  WITH the session — it can never pin its parent.
+- Review dataset (`review_queue` + `review_calibration`): 90-day default
+  (`FIRERAID_REVIEW_RETENTION_DAYS`), clocked at `reviewed_at` (or creation
+  for still-pending entries). Deliberately retained longer than derived
+  records for human-calibration work — but explicit, not forever. Review
+  rows pin their submission AND session until swept.
+- Lab runs: `PENDING` past expiry is garbage and leaves on the derived
+  cutoff. Terminal runs (`EXPIRED`/`ABANDONED`/`COMPLETE` — states the lab
+  lifecycle itself creates) live out the 90-day lab window
+  (`FIRERAID_LAB_RETENTION_DAYS`) from their last activity
+  (`completed_at`/`created_at`), then leave. A live `BOUND` run is never
+  age-deleted; stale ones are moved to `ABANDONED` within 24h by the lab
+  lifecycle and are then reclaimed by the lab window.
 - The cron sweep (daily) deletes in bounded batches; `/api/admin/cleanup`
-  runs the same statements unbounded with `?days=` / `?rawDays=` overrides.
+  runs the same statements unbounded with `?days=`, `?rawDays=`,
+  `?reviewDays=`, `?labDays=` overrides. Convergence is pinned by
+  tests/unit/retention-convergence.test.ts: repeated sweeps always reach a
+  fixpoint where only rows inside their windows remain.
 
 ## Canary Safety
 

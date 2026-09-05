@@ -179,13 +179,16 @@ describe("review-store hardening (real SQLite, migration chain)", () => {
     expect(stats.byTier["CAUSAL"]).toEqual({ total: 1, agreed: 1 });
   });
 
-  it("retention sweep keeps sessions that still carry review rows", async () => {
+  it("retention sweep keeps sessions whose review rows are still inside the review window", async () => {
     const { sessionId, publicId } = seedSessionAndSubmission();
     const d = decision(210, "QUARANTINE");
     await store.createEntry(createReviewQueueEntry(sessionId, publicId, d, projectRisk(d.score, causalEvidence())));
 
-    // Everything the sweep could otherwise delete is ancient.
-    const sweep = await runRetentionSweep(makeD1(db), 2 /* cutoff far above created_at=1 */);
+    // Everything the sweep could otherwise delete is ancient (created_at=1
+    // vs cutoff=2), but the review window is still OPEN — review rows pin
+    // their session until the review dataset's own clock (FR-P0-01) expires
+    // them. reviewCutoff=1000 keeps created_at=1 inside the window.
+    const sweep = await runRetentionSweep(makeD1(db), 2, { reviewCutoff: 1000 });
     void sweep;
 
     const row = db.prepare(`SELECT COUNT(*) AS n FROM sessions WHERE id = ?`).get(sessionId) as { n: number };

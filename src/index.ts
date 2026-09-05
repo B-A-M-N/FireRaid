@@ -17,7 +17,12 @@ import { readAdminHtml } from "./core/static.js";
 import { looksLikeTestSiteKey, looksLikeTestSecret } from "./turnstile/verify.js";
 import { isLabMode, validateProfileVersionConfig } from "./env.js";
 import { validateProfileKeyRing } from "./core/session.js";
-import { runRetentionSweep, RAW_TELEMETRY_RETENTION_DAYS } from "./cloudflare/retention.js";
+import {
+  runRetentionSweep,
+  RAW_TELEMETRY_RETENTION_DAYS,
+  REVIEW_RETENTION_DAYS,
+  LAB_RETENTION_DAYS,
+} from "./cloudflare/retention.js";
 
 /**
  * Validate configuration at startup.
@@ -128,9 +133,22 @@ export default {
           1,
           Math.min(Number(env.FIRERAID_RAW_TELEMETRY_RETENTION_DAYS ?? String(RAW_TELEMETRY_RETENTION_DAYS)) || RAW_TELEMETRY_RETENTION_DAYS, retentionDays)
         );
+        // FR-P0-01: the review and lab datasets keep their own (longer)
+        // explicit windows — never silently immortal, never swept by
+        // surprise at the 30-day derived cutoff.
+        const reviewRetentionDays = Math.max(
+          1,
+          Math.min(Number(env.FIRERAID_REVIEW_RETENTION_DAYS ?? String(REVIEW_RETENTION_DAYS)) || REVIEW_RETENTION_DAYS, 365)
+        );
+        const labRetentionDays = Math.max(
+          1,
+          Math.min(Number(env.FIRERAID_LAB_RETENTION_DAYS ?? String(LAB_RETENTION_DAYS)) || LAB_RETENTION_DAYS, 365)
+        );
         const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
         const rawCutoff = Date.now() - rawRetentionDays * 24 * 60 * 60 * 1000;
-        const sweep = await runRetentionSweep(env.DB, cutoff, { rawCutoff });
+        const reviewCutoff = Date.now() - reviewRetentionDays * 24 * 60 * 60 * 1000;
+        const labCutoff = Date.now() - labRetentionDays * 24 * 60 * 60 * 1000;
+        const sweep = await runRetentionSweep(env.DB, cutoff, { rawCutoff, reviewCutoff, labCutoff });
         // FR-P0-15: the lab-run lifecycle sweep (PENDING→EXPIRED,
         // stale-BOUND→ABANDONED) runs in the SAME cron — one scheduled
         // invocation owns all background DB maintenance, so lab-run state

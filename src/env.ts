@@ -51,6 +51,20 @@ export interface Env {
    * FIRERAID_RETENTION_DAYS — raw payloads never outlive derived records.
    */
   FIRERAID_RAW_TELEMETRY_RETENTION_DAYS?: string;
+  /**
+   * FR-P0-01: review dataset (review_queue + review_calibration) retention
+   * window (days). Defaults to REVIEW_RETENTION_DAYS (90); these records
+   * deliberately outlive ordinary derived state for human calibration, but
+   * are never immortal — the sweep reclaims them on this clock.
+   */
+  FIRERAID_REVIEW_RETENTION_DAYS?: string;
+  /**
+   * FR-P0-01: terminal lab-run (EXPIRED/ABANDONED/COMPLETE) retention window
+   * (days). Defaults to LAB_RETENTION_DAYS (90); without it the lab
+   * lifecycle's own terminal states would accumulate forever and pin their
+   * sessions past the derived-records window.
+   */
+  FIRERAID_LAB_RETENTION_DAYS?: string;
   /** FR-R7-021: persist ALL production verification attempts (audit opt-in). */
   FIRERAID_AUDIT_VERIFICATION_ATTEMPTS?: string;
 }

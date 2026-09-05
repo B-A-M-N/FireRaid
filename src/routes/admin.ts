@@ -337,6 +337,9 @@ export async function adminExport(req: Request, env: Env): Promise<Response> {
 const DEFAULT_RETENTION_DAYS = 30;
 // P1-10: raw keystroke telemetry window (matches the cron default).
 const DEFAULT_RAW_RETENTION_DAYS = 7;
+// FR-P0-01: review/lab dataset windows (match the cron defaults).
+const DEFAULT_REVIEW_RETENTION_DAYS = 90;
+const DEFAULT_LAB_RETENTION_DAYS = 90;
 
 export async function adminCleanup(req: Request, env: Env): Promise<Response> {
   if (!(await requireAdmin(req, env))) return error("unauthorized", 401);
@@ -348,32 +351,59 @@ export async function adminCleanup(req: Request, env: Env): Promise<Response> {
   // path; clamp to the derived-records window so raw payloads never outlive
   // dispositions.
   const rawRetentionDays = Math.max(1, Math.min(Number(url.searchParams.get("rawDays")) || DEFAULT_RAW_RETENTION_DAYS, retentionDays));
+  // FR-P0-01: review/lab datasets keep their own explicit windows (longer
+  // than derived records by default), overridable via ?reviewDays= / ?labDays=
+  // — the sweep can now reclaim them, but only on an operator-visible clock.
+  const reviewRetentionDays = Math.max(
+    1,
+    Math.min(
+      Number(url.searchParams.get("reviewDays")) || Number(env.FIRERAID_REVIEW_RETENTION_DAYS) || DEFAULT_REVIEW_RETENTION_DAYS,
+      365
+    )
+  );
+  const labRetentionDays = Math.max(
+    1,
+    Math.min(
+      Number(url.searchParams.get("labDays")) || Number(env.FIRERAID_LAB_RETENTION_DAYS) || DEFAULT_LAB_RETENTION_DAYS,
+      365
+    )
+  );
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   const rawCutoff = Date.now() - rawRetentionDays * 24 * 60 * 60 * 1000;
+  const reviewCutoff = Date.now() - reviewRetentionDays * 24 * 60 * 60 * 1000;
+  const labCutoff = Date.now() - labRetentionDays * 24 * 60 * 60 * 1000;
 
   // P1-AUDIT-2 (ops): delegate to the SHARED sweep module (cloudflare/
   // retention.ts) — the cron path runs it batched; the admin one-shot keeps
   // its unbounded (complete) semantics. The previous duplicate statement
   // list here had already drifted from the cron sweep (no session_metrics
   // orphan cleanup, no lab-run expiry).
-  const sweep = await runRetentionSweep(env.DB, cutoff, { unbounded: true, rawCutoff });
+  const sweep = await runRetentionSweep(env.DB, cutoff, { unbounded: true, rawCutoff, reviewCutoff, labCutoff });
 
   return json({
     ok: true,
     retentionDays,
     rawRetentionDays,
+    reviewRetentionDays,
+    labRetentionDays,
     cutoff,
     rawCutoff,
+    reviewCutoff,
+    labCutoff,
     deleted: {
       telemetryBatches: sweep.telemetryBatches,
       canaryHits: sweep.canaryHits,
       verificationAttempts: sweep.verificationAttempts,
+      sessionMetrics: sweep.sessionMetrics,
+      orphanedSessionMetrics: sweep.orphanedSessionMetrics,
       evidenceRows: sweep.submissionEvidence,
+      reviewCalibration: sweep.reviewCalibration,
+      reviewQueue: sweep.reviewQueue,
       submissions: sweep.submissions,
+      expiredLabRuns: sweep.expiredLabRuns,
+      terminalLabRuns: sweep.labRuns,
       abandonedSessions: sweep.abandonedSessions,
       sessions: sweep.finalizedSessions,
-      orphanedSessionMetrics: sweep.sessionMetrics,
-      expiredLabRuns: sweep.expiredLabRuns,
     },
   });
 }
