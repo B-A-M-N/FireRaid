@@ -21,7 +21,8 @@ import {
 // FR-P1-19: production GET /signup is STATELESS — a signed envelope replaces
 // the D1 write; the session row materializes on the first stateful action.
 import { signSessionEnvelope } from "../core/session-envelope.js";
-import { deriveProfile, hashProfile, type DefenseRecipe } from "../core/profile.js";
+import { deriveEvaluationProfileByVersion, hashProfileByVersion } from "../core/profile-versions.js";
+import { hashProfile, type DefenseRecipe } from "../core/profile.js";
 import { renderSignupPage } from "../core/renderer.js";
 import { makeCsrfToken } from "../security/csrf.js";
 import { readSignupHtml } from "../core/static.js";
@@ -111,7 +112,20 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
     holdoutMode = read.assignment?.holdoutMode ?? false;
     turnstileRequired = read.assignment?.turnstileRequired ?? false;
   }
-  const profile = await deriveProfile(env, sessionId, undefined, recipe, holdoutMode, turnstileRequired);
+  // FR-P0-04: issuance goes through the VERSION DISPATCH — the issued
+  // profile version selects the FROZEN implementation for it, never
+  // whichever engine is live at derivation time.
+  const profile = await deriveEvaluationProfileByVersion(
+    {
+      secret: env.FIRERAID_PROFILE_SECRET,
+      version: profileVersion(env),
+      sessionId,
+      mode: isLabMode(env) ? "lab" : "production",
+      holdoutMode: holdoutMode === true,
+      turnstileRequired: turnstileRequired === true,
+    },
+    recipe
+  );
   // FR-P1-19: the session-cookie VALUE. Lab = bare sid (stateful); production
   // = signed envelope (stateless until first stateful action).
   let cookieValue: string = sessionId;
@@ -182,7 +196,18 @@ export async function signup(req: Request, env: Env, _ctx: ExecutionContext): Pr
     // stateful action (telemetry / canary / audited verification / submit).
     // profileId/profileHash were derived above but are NOT persisted —
     // derivation is deterministic, so materialization recomputes them.
-    cookieValue = await signSessionEnvelope(resolveProfileKey(env), sessionId, now(), profileVersion(env));
+    // FR-P0-G: the envelope now SIGNES the issued profile hash (`ph`, v2
+    // format) so the first stateful write can prove the re-derived profile
+    // is the one actually issued — a deployment straddle can no longer
+    // silently materialize a drifted treatment.
+    const issuedHash = await hashProfileByVersion(profile, profileVersion(env));
+    cookieValue = await signSessionEnvelope(
+      resolveProfileKey(env),
+      sessionId,
+      now(),
+      profileVersion(env),
+      { profileHash: issuedHash }
+    );
   }
 
   let staticHtml: string;

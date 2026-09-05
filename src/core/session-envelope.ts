@@ -5,8 +5,20 @@
  * versioned envelope riding the existing `__Host-fr_sid` cookie:
  *
  *     fr1.<base64url(payload JSON)>.<base64url(HMAC-SHA256)>
+ *     fr2.<base64url(payload JSON)>.<base64url(HMAC-SHA256)>
  *
- * payload = { v: 1, sid, iat, pv, kid }
+ * payload (fr1) = { v: 1, sid, iat, pv, kid }
+ * payload (fr2) = { v: 2, sid, iat, pv, kid, ph }
+ *
+ * FR-P0-G: fr2 adds the signed ISSUED profile hash (`ph`) — the deep
+ * canonical hash of the treatment envelope issuance actually rendered.
+ * Stateless issuance performs no D1 write, so before fr2 the first
+ * stateful action materialized whatever the THEN-deployed derivation
+ * produced and could never detect that it differed from what the applicant
+ * was shown (deployment straddle). fr2 materialization re-derives with the
+ * frozen pv implementation, hashes it with the pv's frozen hash semantics,
+ * and compares against `ph` — a mismatch refuses the write (operational
+ * failure), never silently anchors drifted state.
  *
  * The FIRST stateful action (telemetry batch, canary hit, audited
  * verification failure, or submit) verifies the envelope and atomically
@@ -34,8 +46,8 @@ const ENVELOPE_PREFIX = "fr1";
 const CLOCK_SKEW_SLACK_MS = 30_000;
 
 export interface SessionEnvelope {
-  /** Envelope format version. */
-  v: 1;
+  /** Envelope format version (1 = fr1 legacy, 2 = fr2 with profile hash). */
+  v: 1 | 2;
   /** Opaque 128-bit session id (same entropy as the stateful flow). */
   sid: string;
   /** Issued-at (ms since epoch). */
@@ -44,6 +56,13 @@ export interface SessionEnvelope {
   pv: number;
   /** Profile key id that signed this envelope. */
   kid: string;
+  /**
+   * FR-P0-G (fr2 only): the issued treatment's deep canonical profile hash
+   * (hex SHA-256), signed at issuance. Verified against the re-derived
+   * profile at first materialization — a deployment whose derivation no
+   * longer reproduces the issued treatment fails closed here.
+   */
+  ph?: string;
 }
 
 // ─── Encoding helpers ─────────────────────────────────────────────────────
@@ -96,23 +115,40 @@ import { constantTimeTokenEqual as timingSafeEqual } from "./tokens.js";
 
 // ─── Issue ────────────────────────────────────────────────────────────────
 
+/** Options for envelope issuance. */
+export interface SignEnvelopeOptions {
+  /**
+   * FR-P0-G: the issued profile's deep canonical hash (hex). When present
+   * the envelope is issued in the fr2 format (v: 2) carrying the signed
+   * `ph` claim; when absent the legacy fr1 format (v: 1) is produced.
+   */
+  profileHash?: string;
+}
+
 /**
  * Sign a new production session envelope.
  * @param ring  the profile key ring (envelope uses the CURRENT key)
  * @param sid   the freshly generated session id
  * @param iat   issuance time (ms)
  * @param pv    profile version at issuance
+ * @param opts  when opts.profileHash is set, issue the fr2 format carrying
+ *              the signed profile hash
  */
 export async function signSessionEnvelope(
   ring: ProfileKeyRing,
   sid: string,
   iat: number,
-  pv: number
+  pv: number,
+  opts?: SignEnvelopeOptions
 ): Promise<string> {
-  const payload: SessionEnvelope = { v: 1, sid, iat, pv, kid: ring.current.id };
+  const format = opts?.profileHash !== undefined ? 2 : 1;
+  const prefix = format === 2 ? "fr2" : ENVELOPE_PREFIX;
+  const payload: SessionEnvelope = format === 2
+    ? { v: 2, sid, iat, pv, kid: ring.current.id, ph: opts!.profileHash }
+    : { v: 1, sid, iat, pv, kid: ring.current.id };
   const body = b64urlEncode(new TextEncoder().encode(JSON.stringify(payload)));
-  const sig = await sign(ring.current.secret, `${ENVELOPE_PREFIX}.${body}`);
-  return `${ENVELOPE_PREFIX}.${body}.${sig}`;
+  const sig = await sign(ring.current.secret, `${prefix}.${body}`);
+  return `${prefix}.${body}.${sig}`;
 }
 
 // ─── Verify ───────────────────────────────────────────────────────────────
@@ -143,9 +179,15 @@ export async function verifySessionEnvelope(
   nowMs: number
 ): Promise<EnvelopeVerdict> {
   const parts = envelope.split(".");
-  if (parts.length !== 3 || parts[0] !== ENVELOPE_PREFIX) {
+  if (parts.length !== 3) {
     return { ok: false, code: "MALFORMED" };
   }
+  // Format prefixes: fr1 (legacy) and fr2 (carries the signed profile hash).
+  const format = parts[0];
+  if (format !== "fr1" && format !== "fr2") {
+    return { ok: false, code: "MALFORMED" };
+  }
+  const version: 1 | 2 = format === "fr2" ? 2 : 1;
   const [, bodyB64, sigB64] = parts;
 
   const bodyBytes = b64urlDecode(bodyB64);
@@ -157,7 +199,7 @@ export async function verifySessionEnvelope(
   try {
     const parsed = JSON.parse(new TextDecoder().decode(bodyBytes)) as Partial<SessionEnvelope>;
     if (
-      parsed.v !== 1 ||
+      parsed.v !== version ||
       typeof parsed.sid !== "string" ||
       parsed.sid.length === 0 ||
       typeof parsed.iat !== "number" ||
@@ -166,11 +208,16 @@ export async function verifySessionEnvelope(
       !Number.isInteger(parsed.pv) ||
       parsed.pv < 1 ||
       typeof parsed.kid !== "string" ||
-      parsed.kid.length === 0
+      parsed.kid.length === 0 ||
+      // FR-P0-G: a v2 payload MUST carry the signed profile hash; a v1
+      // payload MUST NOT (the field is meaningless there).
+      (version === 2 && (typeof parsed.ph !== "string" || parsed.ph.length === 0))
     ) {
       return { ok: false, code: "BAD_PAYLOAD" };
     }
-    payload = { v: 1, sid: parsed.sid, iat: parsed.iat, pv: parsed.pv, kid: parsed.kid };
+    payload = version === 2
+      ? { v: 2, sid: parsed.sid, iat: parsed.iat, pv: parsed.pv, kid: parsed.kid, ph: parsed.ph }
+      : { v: 1, sid: parsed.sid, iat: parsed.iat, pv: parsed.pv, kid: parsed.kid };
   } catch {
     return { ok: false, code: "BAD_PAYLOAD" };
   }
@@ -185,9 +232,10 @@ export async function verifySessionEnvelope(
     return { ok: false, code: "UNKNOWN_KEY" };
   }
 
-  // Signature — computed over the ORIGINAL body bytes, so any re-encoding
-  // or payload edit invalidates it. Constant-time compare.
-  const expected = await sign(secret, `${ENVELOPE_PREFIX}.${bodyB64}`);
+  // Signature — computed over the ORIGINAL body bytes and the format
+  // prefix, so any re-encoding or payload edit invalidates it.
+  // Constant-time compare.
+  const expected = await sign(secret, `${format}.${bodyB64}`);
   if (!timingSafeEqual(expected, sigB64)) {
     return { ok: false, code: "BAD_SIGNATURE" };
   }
@@ -209,5 +257,5 @@ export async function verifySessionEnvelope(
  * the legacy fallback window closes).
  */
 export function isEnvelopeCookie(value: string): boolean {
-  return value.startsWith(`${ENVELOPE_PREFIX}.`);
+  return value.startsWith("fr1.") || value.startsWith("fr2.");
 }

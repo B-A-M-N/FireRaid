@@ -31,7 +31,10 @@ import {
   isEnvelopeCookie,
   type SessionEnvelope,
 } from "../core/session-envelope.js";
-import { deriveProfile, hashProfile } from "../core/profile.js";
+import {
+  deriveProductionProfileByVersion,
+  hashProfileByVersion,
+} from "../core/profile-versions.js";
 import { loadSession, type LoadedSession } from "./session.js";
 
 /**
@@ -139,21 +142,40 @@ async function materializeFromVerdict(
 ): Promise<(LoadedSession & { materialized?: boolean }) | null> {
   const payload: SessionEnvelope = verdict.payload;
 
-  // Re-derive exactly what issuance derived. Production mode, the
-  // envelope's pv, and the envelope kid's secret — rotation-safe because
-  // resolveProfileKey() selects by the same kid the derivation will use.
+  // Re-derive exactly what issuance derived — through the VERSION DISPATCH
+  // (FR-P0-04): the envelope's pv selects the FROZEN implementation, never
+  // whichever engine is live at materialization time. Rotation-safe because
+  // resolveProfileKey() selects by the same kid the derivation uses.
   let profileId: string;
   let profileHash: string;
   try {
     const secret = verdict.secret;
-    const profile = await deriveProfile(
-      { ...env, FIRERAID_PROFILE_SECRET: secret } as Env,
-      payload.sid,
-      payload.pv
-    );
+    const profile = await deriveProductionProfileByVersion({
+      secret,
+      version: payload.pv,
+      sessionId: payload.sid,
+    });
+    profileHash = await hashProfileByVersion(profile, payload.pv);
+    // FR-P0-G: a v2 envelope carries the ISSUED profile hash (`ph`). The
+    // first materialization is the one write that anchors the session's
+    // treatment — compare the re-derived hash against the signed claim so a
+    // deployment straddle (deploy B re-deriving a different treatment than
+    // deploy A issued) fails CLOSED instead of inserting drifted state and
+    // then comparing B against B.
+    if (payload.v >= 2 && payload.ph !== undefined && payload.ph !== profileHash) {
+      console.error(
+        "session materialization REFUSED: signed profile hash mismatch " +
+          `(envelope pv=${payload.pv}, signed ph=${payload.ph.slice(0, 12)}…, derived=${profileHash.slice(0, 12)}…) — ` +
+          "the deployed derivation no longer matches the issued treatment"
+      );
+      return null;
+    }
     profileId = profile.profileId;
-    profileHash = await hashProfile(profile);
-  } catch {
+  } catch (err) {
+    console.error(
+      "session materialization derivation failed:",
+      err instanceof Error ? err.message : err
+    );
     return null;
   }
 

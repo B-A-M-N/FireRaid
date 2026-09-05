@@ -34,6 +34,10 @@ import {
   type EvaluationProfileOptions,
   type ProductionProfileOptions,
 } from "./profile.js";
+import {
+  deriveProfileEngineV1,
+  hashProfileV1,
+} from "./profile/v1.js";
 import type { DefenseRecipe } from "./recipe-schema.js";
 import type { DefenseProfile } from "../types/profile.js";
 
@@ -43,6 +47,15 @@ import type { DefenseProfile } from "../types/profile.js";
  * profiles, never edited except to fix a proof of incorrectness in the
  * freeze itself (and then with a ledger note). A semantics change must add
  * `2: ...` here and leave v1 untouched.
+ *
+ * FR-P0-04 (rereview P0-F): v1 is a REAL frozen implementation —
+ * core/profile/v1.ts + profile/catalog-v1.ts, a verbatim engine + catalog
+ * snapshot that the live profile.ts engine no longer shares. The live
+ * catalogs and engine can evolve for v2; v1 keeps deriving exactly what it
+ * derived at the freeze (the goldens pin it). The legacy delegation to
+ * deriveProductionProfile/deriveEvaluationProfile remains ONLY as a
+ * byte-equality cross-check in tests (the live engine has not drifted); it
+ * is NOT the v1 derivation path.
  */
 export const SUPPORTED_PROFILE_VERSIONS = [1] as const;
 
@@ -72,8 +85,17 @@ export async function deriveProductionProfileByVersion(
   opts: ProductionProfileOptions
 ): Promise<DefenseProfile> {
   assertSupportedProfileVersion(opts.version);
-  // v1: the engine as frozen at this tree (pinned by profile-golden tests).
-  return deriveProductionProfile(opts);
+  switch (opts.version) {
+    case 1:
+      // The FROZEN v1 implementation (profile/v1.ts + profile/catalog-v1.ts).
+      return deriveProfileEngineV1({ ...opts, mode: "production" });
+    default: {
+      // Unreachable while SUPPORTED_PROFILE_VERSIONS === [1]; the compiler
+      // knows, the runtime must too.
+      assertSupportedProfileVersion(opts.version);
+      return deriveProductionProfile(opts);
+    }
+  }
 }
 
 /**
@@ -84,5 +106,35 @@ export async function deriveEvaluationProfileByVersion(
   recipe?: DefenseRecipe
 ): Promise<DefenseProfile> {
   assertSupportedProfileVersion(opts.version);
-  return deriveEvaluationProfile(opts, recipe);
+  switch (opts.version) {
+    case 1:
+      return deriveProfileEngineV1(opts, recipe);
+    default: {
+      assertSupportedProfileVersion(opts.version);
+      return deriveEvaluationProfile(opts, recipe);
+    }
+  }
+}
+
+/**
+ * FR-P0-G: hash with the FROZEN semantics of the named version. The signed
+ * profile hash in a v1 envelope (fr2's `ph` claim) must be verifiable with
+ * the SAME hash function that issued it — a future v2 hash change must not
+ * invalidate v1 sessions. Today v1 hashing is identical to the shared
+ * hashProfile; the dispatch is the freeze guarantee.
+ */
+export async function hashProfileByVersion(
+  profile: DefenseProfile,
+  version: number
+): Promise<string> {
+  assertSupportedProfileVersion(version);
+  switch (version) {
+    case 1:
+      return hashProfileV1(profile);
+    default: {
+      assertSupportedProfileVersion(version);
+      const { hashProfile } = await import("./profile.js");
+      return hashProfile(profile);
+    }
+  }
 }

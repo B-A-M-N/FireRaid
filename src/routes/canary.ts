@@ -18,7 +18,8 @@ import {
   verifyEnvelopeOnly,
 } from "../cloudflare/session-envelope.js";;
 import { loadSession } from "../cloudflare/session.js";
-import { deriveProfile, hashProfile } from "../core/profile.js";
+import type { DefenseProfile } from "../types/profile.js";
+import { deriveProductionProfileByVersion, hashProfileByVersion } from "../core/profile-versions.js";
 import { reconstructIssuedProfile } from "../core/reconstruct.js";
 import { readLabAssignment } from "../core/lab-assignment.js";
 
@@ -96,21 +97,23 @@ export async function canary(req: Request, env: Env): Promise<Response> {
   //   - lab: the session row already exists (created at signup), so loading it
   //     is a READ; the bound recipe rides in from the D1 lab_runs read, exactly
   //     as submit.ts does, so the reconstructed token equals the RENDERED token.
-  let profile: Awaited<ReturnType<typeof deriveProfile>>;
+  let profile: DefenseProfile;
   let derivedHash: string | null = null;
   if (!isLabMode(env)) {
     const envelope = await verifyEnvelopeOnly(env, rawCookieSid);
     if (!envelope.ok) return error("invalid session", 403);
     try {
-      // Same exact production derivation materializeFromVerdict uses.
-      profile = await deriveProfile(
-        { FIRERAID_PROFILE_SECRET: envelope.secret, PROFILE_VERSION: String(envelope.pv), LAB_MODE: "false" },
-        envelope.sid,
-        envelope.pv
-      );
+      // FR-P0-04: production reconstruction goes through the VERSION
+      // DISPATCH (the envelope's pv selects the frozen implementation) —
+      // the same derivation materializeFromVerdict uses.
+      profile = await deriveProductionProfileByVersion({
+        secret: envelope.secret,
+        version: envelope.pv,
+        sessionId: envelope.sid,
+      });
       // FR-P0-04: snapshot the derived hash so the post-materialize drift
       // check below detects any issuance/derivation divergence.
-      derivedHash = await hashProfile(profile);
+      derivedHash = await hashProfileByVersion(profile, envelope.pv);
     } catch (err) {
       console.error("canary production derivation failed:", err instanceof Error ? err.message : err);
       return error("profile reconstruction failed", 500);
