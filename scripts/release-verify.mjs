@@ -6,8 +6,8 @@
  * Two modes:
  *   release:verify:fast  — typecheck, lint, worker-isolation, origin-budget
  *   release:verify:full  — fast + unit, product-boundary, integration,
- *                          envelope, budget, ledger-proof, e2e, e2e:production,
- *                          a11y, examples
+ *                          envelope, budget, ledger-proof, package-contract,
+ *                          e2e, e2e:production, a11y, examples
  *
  * Only `full` may produce release_candidate:true.
  *
@@ -84,6 +84,11 @@ runGate("integration", "npm", ["run", "test:integration"], { slow: true });
 runGate("envelope", "npm", ["run", "test:envelope"], { slow: true });
 runGate("budget", "npm", ["run", "test:budget"], { slow: true });
 runGate("ledger-proof", "npm", ["run", "test:ledger-proof"], { slow: true });
+// P0-1/P1-7: the published-package contract — build → pack → install the
+// tarball in a temp project → import every declared subpath → functional
+// middleware round-trip. A release gate must not certify a package that
+// cannot be imported.
+runGate("package-contract", "npm", ["run", "test:package"], { slow: true });
 runGate("e2e", "npm", ["run", "test:e2e"], { slow: true });
 runGate("e2e:production", "npm", ["run", "test:e2e:production"], { slow: true });
 runGate("a11y", "npm", ["run", "test:a11y"], { slow: true });

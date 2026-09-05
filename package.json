@@ -9,9 +9,11 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
+    "build": "tsc -p tsconfig.dist.json",
     "build:product": "tsc -p tsconfig.product.json --noEmit",
     "check:boundary": "node scripts/check-product-boundary.mjs",
     "test:product": "npm run build:product && npm run check:boundary",
+    "test:package": "node scripts/release-package-smoke.mjs",
     "dev:origin": "tsx examples/origin-server.mjs",
     "test:origin-budget": "node --import tsx scripts/origin-budget.mjs",
     "test:integration": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.integration.config.ts",
@@ -31,7 +33,8 @@
     "experiment": "tsx harness/core/runner.ts",
     "analyze": "python3 harness/analysis/analyze.py",
     "release:verify:fast": "node scripts/release-verify.mjs fast",
-    "release:verify:full": "node scripts/release-verify.mjs full"
+    "release:verify:full": "node scripts/release-verify.mjs full",
+    "release:verify": "node scripts/release-verify.mjs full"
   },
   "dependencies": {
     "zod": "^3.23.8"
@@ -54,31 +57,26 @@
     "node": ">=18.0.0"
   },
   "files": [
-    "src/",
-    "public/",
-    "docs/",
-    "examples/",
-    "scripts/",
-    "migrations/",
+    "dist/",
     "README.md",
     "LICENSE"
   ],
   "exports": {
     ".": {
-      "types": "./src/index.d.ts",
-      "import": "./src/index.js"
+      "types": "./dist/host-adapter/index.d.ts",
+      "import": "./dist/host-adapter/index.js"
     },
     "./node": {
-      "types": "./src/runtime/node.d.ts",
-      "import": "./src/runtime/node.js"
+      "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.js"
     },
     "./adapters": {
-      "types": "./src/host-adapter/index.d.ts",
-      "import": "./src/host-adapter/index.js"
+      "types": "./dist/host-adapter/index.d.ts",
+      "import": "./dist/host-adapter/index.js"
     },
     "./evaluation": {
-      "types": "./src/eval/index.d.ts",
-      "import": "./src/eval/index.js"
+      "types": "./dist/eval/index.d.ts",
+      "import": "./dist/eval/index.js"
     }
   }
 }

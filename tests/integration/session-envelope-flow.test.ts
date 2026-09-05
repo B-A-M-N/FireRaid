@@ -106,7 +106,7 @@ describe("FR-P1-19 integration: stateless production envelope", () => {
     expect(after).toBe(before + 1);
   });
 
-  it("submit-first first write: an envelope-only submission MATERIALIZES the session (then hits the challenge gate)", async () => {
+  it("submit-first first write: an envelope-only submission MATERIALIZES the session and gets the neutral receipt", async () => {
     const before = await adminSessionsCount();
     const { sidValue, csrf, html } = await productionSignup();
     // Submit needs the rendered form field nameS; production render is the
@@ -126,15 +126,19 @@ describe("FR-P1-19 integration: stateless production envelope", () => {
       },
       body: JSON.stringify({ csrf, form: fields }),
     });
-    // Production Turnstile verification fails against the dummy local
-    // secret, so the submit itself answers 403 verification_required —
-    // but that is AFTER materialization: the session row must exist now.
-    // (The full-pass submit flow is covered by the lab-mode suites where
-    // Turnstile is disabled; the envelope contract under test here is
-    // "the first stateful action materializes the row", which this path
-    // exercises through the AUDITED-VERIFICATION-FAILURE first-write case.)
-    const body = (await resp.json()) as { status?: string };
-    expect(body.status).toBe("verification_required");
+    // P0-3: production-test runs TURNSTILE_MODE=disabled-test — the bootstrap
+    // hard-fails any worker that enforces verification — so the submit
+    // proceeds to normal admission and returns the NEUTRAL production
+    // receipt (applicant opacity: never the internal disposition). The
+    // envelope contract under test is "the first stateful action
+    // materializes the row"; assert the receipt AND that the session row
+    // now exists (via the admin count, which is the same D1 the worker
+    // wrote). The verification-FAILURE materialization case is a different
+    // environment's job (a provider fixture), not this one.
+    const body = (await resp.json()) as { status?: string; message?: string };
+    expect(resp.status).toBe(200);
+    expect(body.status).toBe("received");
+    expect(body.message).toBe("Submission received.");
     const after = await adminSessionsCount();
     expect(after).toBe(before + 1);
   });

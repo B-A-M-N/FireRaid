@@ -20,8 +20,8 @@
  * plane, so what it measures is exactly what production costs.
  *
  * Scenarios (audit item 28): abandoned signup, normal signup, keyboard-
- * heavy signup, autofill signup, failed verification/retry, verified
- * canary, long telemetry session, agent stop, pagehide.
+ * heavy signup, autofill signup, submit-retry, verified canary, long
+ * telemetry session, agent stop, pagehide.
  *
  * Usage:
  *   node --import tsx scripts/budget-harness.mjs        # run all scenarios
@@ -71,10 +71,22 @@ const BUDGETS = {
   // correctness (the prior forward-only fold could permanently lose
   // events under concurrency and serve known-stale metrics); observed:
   // keyboard-heavy 26/11, long-telemetry 61/25, pagehide 6/3.
-  "normal-signup": { workerRequests: 6, d1Reads: 10, d1Writes: 6 },
+  // P0-4 re-baseline: submits now run the FULL admission path (verify CSRF,
+  // materialize from envelope, correlate evidence, finalize submission,
+  // project the receipt) instead of stopping at a verification gate, so the
+  // submit-carrying scenarios cost more D1 than the old 403 baselines.
+  // (submit-retry was failed-verification-retry: 8/8/8 against a gate that
+  // never reached admission.) Observed under production-test: normal-signup
+  // 8r/4w, autofill 13r/4w (autofill pays a 5-read CAS fold), submit-retry
+  // 9r/2w, agent-stop 6r/2w — budgets sit at observed + headroom. The
+  // submit path's read count varies with the drawn profile (canary-hit
+  // reconciliation) — normal-signup observed 8–13 reads across runs, so its
+  // budget carries the full observed range plus margin.
+  "normal-signup": { workerRequests: 6, d1Reads: 16, d1Writes: 8 },
   "keyboard-heavy-signup": { workerRequests: 10, d1Reads: 32, d1Writes: 14 },
-  "autofill-signup": { workerRequests: 6, d1Reads: 10, d1Writes: 6 },
-  "failed-verification-retry": { workerRequests: 8, d1Reads: 8, d1Writes: 8 },
+  "autofill-signup": { workerRequests: 6, d1Reads: 18, d1Writes: 8 },
+  "submit-retry": { workerRequests: 8, d1Reads: 16, d1Writes: 8 },
+  "agent-stop": { workerRequests: 4, d1Reads: 10, d1Writes: 6 },
   // Includes up to 20 signup probes searching for a route-bearing profile
   // (bounded retry added when the scenario's silent no-op was fixed) — the
   // attempt loop re-signups free (abandoned signups cost 0 D1), and the
@@ -85,7 +97,6 @@ const BUDGETS = {
   // fix. Folding the state load/save into the ingest batch is future work;
   // the budget holds the line until then.
   "long-telemetry-session": { workerRequests: 18, d1Reads: 70, d1Writes: 30 },
-  "agent-stop": { workerRequests: 4, d1Reads: 5, d1Writes: 4 },
   "pagehide-flush": { workerRequests: 4, d1Reads: 8, d1Writes: 4 },
 };
 
@@ -93,11 +104,21 @@ const BUDGETS = {
 
 let worker = null;
 async function startWorker() {
+  // P0-4: production-TEST, never the developer's real `production` env. The
+  // bootstrap writes a hermetic .dev.vars.production-test (synthetic secrets)
+  // and hard-fails if wrangler loads anything else; `production` here used to
+  // pull the developer's local .dev.vars.production (real Turnstile config,
+  // real route shape) into a measurement harness. production-test is the
+  // tracked production-SHAPE env: LAB_MODE=false, stateless envelopes,
+  // TURNSTILE_MODE=disabled-test (verification OFF — the worker deliberately
+  // has no runtime provider mock, so hermetic verification-success/failure
+  // budgets need a provider fixture that does not exist yet; see
+  // "submit-retry" below).
   worker = spawn("node", [
     "scripts/test-worker.mjs",
     "--suite", `budget-${Date.now()}`,
     "--port", String(PORT),
-    "--wrangler-env", "production",
+    "--wrangler-env", "production-test",
   ], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
   worker.stdout.on("data", () => {});
   worker.stderr.on("data", (d) => {
@@ -398,10 +419,16 @@ const SCENARIOS = {
       { seq: 2, dt: 900, kind: "focus", target: "#password" },
       { seq: 3, dt: 1200, kind: "input", target: "#password" },
     ]);
-    // Verification fails against the local dummy Turnstile secret; the
-    // scenario measures the full materialize + submit + audit path.
+    // P0-4: verification is OFF in production-test (TURNSTILE_MODE=
+    // disabled-test), so this measures the full materialize + submit +
+    // correlate + finalize path through normal admission (HTTP 200, the
+    // neutral production receipt). The old expectation — 403 from a dummy
+    // Turnstile secret — depended on the developer's real .dev.vars and is
+    // exactly what this harness must NOT do.
     const resp = await postSubmit(sid, csrf, html);
-    if (resp.status !== 403) throw new Error(`normal-signup submit -> ${resp.status} (expected the local verification gate)`);
+    if (resp.status !== 200) throw new Error(`normal-signup submit -> ${resp.status}`);
+    const body = await resp.json();
+    if (body.status !== "received") throw new Error(`normal-signup: unexpected body ${JSON.stringify(body)}`);
   },
 
   "keyboard-heavy-signup": async () => {
@@ -426,16 +453,24 @@ const SCENARIOS = {
       { seq: 2, dt: 2, kind: "input", target: "#organization", meta: { synthetic: true } },
     ]);
     const resp = await postSubmit(sid, csrf, html);
-    if (resp.status !== 403) throw new Error(`autofill submit -> ${resp.status}`);
+    if (resp.status !== 200) throw new Error(`autofill submit -> ${resp.status}`);
   },
 
-  "failed-verification-retry": async () => {
+  // P0-4 rename: was "failed-verification-retry", whose 403 expectations
+  // assumed the retired dummy-secret verification-failure design. With
+  // verification off in production-test this scenario is the re-submit
+  // path (first submit finalizes the session; the retries exercise the
+  // already-submitted replay projection). A hermetic verification-
+  // failure/success budget needs a provider fixture (a swappable provider
+  // in a budget-only env) that does not exist yet — deliberate scope,
+  // not an omission.
+  "submit-retry": async () => {
     const { sid, csrf, html } = await signup();
-    // Three submit attempts with the unusable local secret (the retry loop
-    // a stuck user performs) — each attempt audits one verification failure.
+    // Three submit attempts (the retry loop a stuck user performs). The
+    // first finalizes; the rest hit the same-session replay projection.
     for (let i = 0; i < 3; i++) {
       const resp = await postSubmit(sid, csrf, html);
-      if (resp.status !== 403) throw new Error(`failed-verification attempt ${i} -> ${resp.status}`);
+      if (resp.status !== 200) throw new Error(`submit-retry attempt ${i} -> ${resp.status}`);
     }
   },
 
@@ -489,7 +524,7 @@ const SCENARIOS = {
     // Minimal agent: signup then a bare submit, no telemetry at all.
     const { sid, csrf, html } = await signup();
     const resp = await postSubmit(sid, csrf, html);
-    if (resp.status !== 403) throw new Error(`agent-stop submit -> ${resp.status}`);
+    if (resp.status !== 200) throw new Error(`agent-stop submit -> ${resp.status}`);
   },
 
   "pagehide-flush": async () => {
