@@ -112,6 +112,18 @@ if (!hostname) {
   pass("production-hostname", `TURNSTILE_EXPECTED_HOSTNAME=${hostname}`);
 }
 
+// ── Production entrypoint import graph (FR-P1-05) ────────────────────────
+// The production Worker must not bundle the evaluation control plane at all
+// (src/eval/, lab routes, the review-decision write). A config that lets the
+// production env regress into the lab plane is a deployment defect even when
+// every runtime test is green.
+const graph = run("node", ["scripts/check-production-graph.mjs"]);
+if (graph.status === 0) {
+  pass("production-graph", "production Worker import graph excludes src/eval/, lab routes, and the review-decision write");
+} else {
+  fail("production-graph", `production Worker import graph reaches the evaluation control plane:\n${graph.stderr || graph.stdout}`);
+}
+
 // ── Dry-run deploy of the production env (no upload) ────────────────────
 
 const dry = run("npx", ["wrangler", "deploy", "--env", "production", "--dry-run"]);

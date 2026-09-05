@@ -480,57 +480,13 @@ export async function adminReviewQueue(req: Request, env: Env): Promise<Response
 }
 
 // ─── Review decision (evaluation plane) ───────────────────────────────────
-// WRITE endpoint: HARD-DISABLED outside lab mode. Reviewer decisions are only
-// writable in the lab/evaluation deployment. Production users decide via
-// FI's own human-reviewer interface.
-
-import { finalizeReview } from "../eval/review-workflow.js";
-import { D1ReviewStore } from "../cloudflare/review-store.js";
-
-export async function adminReviewDecision(req: Request, env: Env): Promise<Response> {
-  // EVALUATION-ONLY GUARD: reviewer decisions are not writable in production.
-  if (env.LAB_MODE !== "true") {
-    return error("not found", 404);
-  }
-
-  if (!(await requireAdmin(req, env))) return error("unauthorized", 401);
-  if (req.method !== "POST") return error("method not allowed", 405);
-
-  let body: { sessionId: string; decision: string; reviewerId?: string; note?: string };
-  try {
-    body = (await req.json()) as typeof body;
-  } catch {
-    return error("invalid JSON", 400);
-  }
-
-  if (!body.sessionId || !body.decision) {
-    return error("missing sessionId or decision", 400);
-  }
-  if (body.decision !== "approved" && body.decision !== "rejected") {
-    return error("decision must be 'approved' or 'rejected'", 400);
-  }
-
-  const store = new D1ReviewStore(env.DB);
-  const entry = await store.getBySession(body.sessionId);
-  if (!entry) return error("not found", 404);
-
-  const { entry: updated, calibration } = finalizeReview(
-    entry,
-    body.decision as "approved" | "rejected",
-    { reviewerId: body.reviewerId, note: body.note }
-  );
-
-  const updatedRows = await store.updateEntry(updated);
-  if (updatedRows === 0) {
-    // Concurrent decision: entry was already finalized by another reviewer.
-    return error("already decided", 409);
-  }
-
-  // Only record calibration when this is the first (winning) decision.
-  await store.recordCalibration(calibration);
-
-  return json({ ok: true, reviewedBy: body.reviewerId ?? "anonymous" });
-}
+// WRITE endpoint moved to src/routes/admin-review-decision.ts (FR-P1-05).
+// That module imports src/eval/review-workflow.ts, so it must NOT be in
+// this eval-free admin module — the production Worker (src/worker-production.ts)
+// imports review queue HOME here for reviews to READ annotations, and pulling
+// the review-decision WRITE would drag the whole eval control plane into the
+// production artifact. The lab Worker (src/index.ts) imports the decision
+// write from the isolated module.
 
 
 /**

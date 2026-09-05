@@ -12,6 +12,7 @@
     "build": "tsc -p tsconfig.dist.json",
     "build:product": "tsc -p tsconfig.product.json --noEmit",
     "check:boundary": "node scripts/check-product-boundary.mjs",
+    "check:production-graph": "node scripts/check-production-graph.mjs",
     "test:product": "npm run build:product && npm run check:boundary",
     "test:package": "node scripts/release-package-smoke.mjs",
     "dev:origin": "tsx examples/origin-server.mjs",

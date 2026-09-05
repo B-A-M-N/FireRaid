@@ -201,18 +201,23 @@ describe("scheduled handler validates config (P1-AUDIT-2 ops)", () => {
   // the source level (the handler is not directly importable without a full
   // workerd env) AND via the exported sweep's signature.
   it("scheduled handler validates config BEFORE ctx.waitUntil and skips on error", async () => {
-    const src = readFileSync(join(process.cwd(), "src", "index.ts"), "utf-8");
-    // Extract the scheduled handler body.
-    const m = src.match(/async scheduled\([\s\S]*?\n  \},/);  // eslint-disable-line no-regex-spaces -- matches the handler's 2-space indentation
-    expect(m, "scheduled handler found").toBeTruthy();
-    const body = m![0];
-    const validatePos = body.indexOf("validateConfig(env)");
-    const waitUntilPos = body.indexOf("ctx.waitUntil");
-    expect(validatePos, "validateConfig called inside scheduled").toBeGreaterThan(-1);
-    expect(waitUntilPos, "work is deferred via waitUntil").toBeGreaterThan(-1);
-    // The validation must precede the work deferral, and the skip must
-    // return WITHOUT scheduling the sweep.
-    expect(validatePos).toBeLessThan(waitUntilPos);
-    expect(body).toMatch(/if \(configProblem\)[\s\S]*?return;/);
+    // Both Worker entrypoints (lab index + production worker-production) gate
+    // the scheduled sweep on config before deferring any work. The gate moved
+    // to the shared worker-common makeConfigGate (FR-P1-05) named checkConfig.
+    for (const file of ["src/index.ts", "src/worker-production.ts"]) {
+      const src = readFileSync(join(process.cwd(), file), "utf-8");
+      // Extract the scheduled handler body.
+      const m = src.match(/async scheduled\([\s\S]*?\n  \},/);  // eslint-disable-line no-regex-spaces -- matches the handler's 2-space indentation
+      expect(m, `scheduled handler found in ${file}`).toBeTruthy();
+      const body = m![0];
+      const validatePos = body.indexOf("checkConfig(env)");
+      const waitUntilPos = body.indexOf("ctx.waitUntil");
+      expect(validatePos, `checkConfig called inside scheduled (${file})`).toBeGreaterThan(-1);
+      expect(waitUntilPos, `work is deferred via waitUntil (${file})`).toBeGreaterThan(-1);
+      // The validation must precede the work deferral, and the skip must
+      // return WITHOUT scheduling the sweep.
+      expect(validatePos).toBeLessThan(waitUntilPos);
+      expect(body).toMatch(/if \(configProblem\)[\s\S]*?return;/);
+    }
   });
 });

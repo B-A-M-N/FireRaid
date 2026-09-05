@@ -153,9 +153,13 @@ Two storage caveats:
 
 - The reference stores (`ReferenceTelemetryAdapter`,
   `ReferenceCanaryStore`) are **volatile** — in-process, lost on restart.
-  They declare `durability: "volatile"` and the production factory logs a
-  warning when handed one. Fine for local development and integration;
-  production deployments must wire durable adapters.
+  They declare `durability: "volatile"` (FR-P1-03) and the PRODUCTION factory
+  (`createFireRaidMiddleware`) THROWS `MiddlewareConfigError` when handed one
+  — evidence that disappears on restart cannot anchor review decisions or a
+  one-submission claim. The EVALUATION constructor (`createEvaluationMiddleware`)
+  permits volatile stores via `{ allowVolatile: true }`. Fine for local
+  development and integration; production deployments must wire durable
+  adapters.
 - **`forward-failed`**: when the upstream registration cannot be forwarded
   AND your enforcement adapter did not durably capture the application,
   `admit()` returns `kind: "forward-failed"` and the reference runtime

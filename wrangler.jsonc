@@ -137,6 +137,11 @@
       }
     },
     "production": {
+      // FR-P1-05: production binds the PRODUCT-ONLY entrypoint — its import
+      // graph excludes src/eval/, the lab routes, and the review-decision
+      // write. A production deployment must never bundle the evaluation
+      // control plane (the handler does not exist, not merely runtime-guarded).
+      "main": "src/worker-production.ts",
       "assets": {
         "directory": "./public",
         "binding": "ASSETS",
@@ -177,6 +182,10 @@
     // rejects in any deployment carrying real credentials. This env replaces
     // the old dependence on a developer's local .dev.vars.production file.
     "production-test": {
+      // FR-P1-05: the production-SHAPE tier binds the SAME product-only
+      // entrypoint the real production env uses, so the E2E/envelope suites
+      // exercise the artifact production actually ships.
+      "main": "src/worker-production.ts",
       "assets": {
         "directory": "./public",
         "binding": "ASSETS",

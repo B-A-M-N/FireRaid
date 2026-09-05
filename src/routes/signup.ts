@@ -25,7 +25,7 @@ import { deriveProfile, hashProfile, type DefenseRecipe } from "../core/profile.
 import { renderSignupPage } from "../core/renderer.js";
 import { makeCsrfToken } from "../security/csrf.js";
 import { readSignupHtml } from "../core/static.js";
-import { constantTimeEqualStr } from "./lab.js";
+import { constantTimeEqualStr } from "../core/tokens.js"; // FR-P1-05: no import out of the eval-plane lab route module
 import { readLabAssignmentByRunId } from "../core/lab-assignment.js";
 
 /** SHA-256 hex of a bind token (mirrors lab.ts storage format). */

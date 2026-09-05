@@ -1,8 +1,20 @@
 /**
- * Worker entry point — router. FR-INV-001: defense path uses no LLM.
+ * LAB / EVALUATION Worker entry point — router for the FULL surface.
+ *
+ * FR-P1-05: this is the lab/evaluation-plane Worker. It serves the product
+ * surface (signup/submit/telemetry/canary/admin-review-READ) AND the eval
+ * control plane (lab runs, review-decision writes, lab lifecycle). A
+ * PRODUCTION deployment must NOT use this entrypoint — it must use
+ * src/worker-production.ts, whose import graph excludes src/eval/, the lab
+ * routes, and the review-decision write (the handler does not exist in the
+ * production artifact at all, not merely runtime-guarded).
+ *
+ * wrangler binds this as the top-level `main` and for the dev/test/public-lab
+ * (LAB_MODE=true) environments. The production and production-test environ-
+ * ments override `main` to the production-only entrypoint.
+ *
+ * FR-INV-001: defense path uses no LLM.
  * FR-INV: refuse to start with known test credentials in production.
- * FIX: Don't expose config errors publicly (FR-030).
- * FIX: Log exceptions with observability (FR-031).
  */
 import type { Env } from "./env.js";
 import { health } from "./routes/health.js";
@@ -10,13 +22,12 @@ import { signup } from "./routes/signup.js";
 import { submit } from "./routes/submit.js";
 import { canary } from "./routes/canary.js";
 import { events } from "./routes/telemetry.js";
-import { adminLogin, adminSummary, adminSessions, adminSessionDetail, adminExperiments, adminExperimentDetail, adminExport, adminLogout, adminCleanup, adminReviewDecision, adminReviewQueue } from "./routes/admin.js";
+import { adminLogin, adminSummary, adminSessions, adminSessionDetail, adminExperiments, adminExperimentDetail, adminExport, adminLogout, adminCleanup, adminReviewQueue } from "./routes/admin.js";
+import { adminReviewDecision } from "./routes/admin-review-decision.js";
 import { createLabRun, getLabRun, ingestLabRuns, postLabRunOutcome, expireStaleLabRuns } from "./routes/lab.js";
 import { error, html } from "./security/headers.js";
 import { readAdminHtml } from "./core/static.js";
-import { looksLikeTestSiteKey, looksLikeTestSecret } from "./turnstile/verify.js";
-import { isLabMode, validateProfileVersionConfig } from "./env.js";
-import { validateProfileKeyRing } from "./core/session.js";
+import { makeConfigGate } from "./worker-common.js";
 import {
   runRetentionSweep,
   RAW_TELEMETRY_RETENTION_DAYS,
@@ -24,80 +35,7 @@ import {
   LAB_RETENTION_DAYS,
 } from "./cloudflare/retention.js";
 
-/**
- * Validate configuration at startup.
- * Production safety: refuse to run with known test Turnstile keys
- * and require properly paired sitekey+secret.
- */
-function validateConfig(env: Env): string | null {
-  // Always validate cryptographic secrets first
-  if (!env.FIRERAID_PROFILE_SECRET || env.FIRERAID_PROFILE_SECRET.length < 32) {
-    return "FIRERAID_PROFILE_SECRET must be at least 32 characters";
-  }
-  if (!env.FIRERAID_CSRF_SECRET || env.FIRERAID_CSRF_SECRET.length < 32) {
-    return "FIRERAID_CSRF_SECRET must be at least 32 characters";
-  }
-
-  // FR-R5-044: PROFILE_VERSION must be valid at startup, not first derivation
-  const versionError = validateProfileVersionConfig(env);
-  if (versionError) return versionError;
-
-  // FR-R7-002: malformed key-ring configuration is a startup failure, not a
-  // silent degradation. A session written today must still reconstruct after
-  // rotation tomorrow — a silently-discarded PREVIOUS map (resolved by an
-  // older resolveProfileKey) would corrupt historical sessions.
-  const keyRingError = validateProfileKeyRing(env);
-  if (keyRingError) return keyRingError;
-
-  // Production-specific restrictions
-  if (!isLabMode(env)) {
-    // P1 (P0-AUDIT-3 follow-up): the ONLY way a LAB_MODE=false deployment may
-    // run without Turnstile is the explicit local-test opt-in — an env var a
-    // real deployment never sets. This keeps release-test infrastructure off
-    // developers' .dev.vars.production files (the review's P1 item) without
-    // weakening real production: absent the flag, production still requires
-    // real credentials.
-    if (env.TURNSTILE_MODE === "disabled-test") {
-      // Local production-shape testing: Turnstile OFF. Any real credential
-      // configured alongside the flag is a configuration mistake.
-      if (env.TURNSTILE_SITE_KEY || env.TURNSTILE_SECRET_KEY) {
-        return "TURNSTILE_MODE=disabled-test forbids TURNSTILE_SITE_KEY/TURNSTILE_SECRET_KEY";
-      }
-    } else {
-      // Production: reject known test sitekeys
-      if (env.TURNSTILE_SITE_KEY && looksLikeTestSiteKey(env.TURNSTILE_SITE_KEY)) {
-        return "Production LAB_MODE=false but TURNSTILE_SITE_KEY looks like a test key";
-      }
-
-      // Production: reject known test secrets
-      if (env.TURNSTILE_SECRET_KEY && looksLikeTestSecret(env.TURNSTILE_SECRET_KEY)) {
-        return "Production LAB_MODE=false but TURNSTILE_SECRET_KEY looks like a test secret";
-      }
-
-      // Production: require TURNSTILE_EXPECTED_HOSTNAME
-      if (!env.TURNSTILE_EXPECTED_HOSTNAME) {
-        return "Production requires TURNSTILE_EXPECTED_HOSTNAME";
-      }
-
-      // Production: require Turnstile to be enabled
-      if (!env.TURNSTILE_SITE_KEY || !env.TURNSTILE_SECRET_KEY) {
-        return "Production requires both TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY";
-      }
-    }
-  }
-
-  // Validate Turnstile sitekey/secret pairing (all environments)
-  if (env.TURNSTILE_SITE_KEY && !env.TURNSTILE_SECRET_KEY) {
-    return "TURNSTILE_SITE_KEY is set but TURNSTILE_SECRET_KEY is missing";
-  }
-  if (env.TURNSTILE_SECRET_KEY && !env.TURNSTILE_SITE_KEY) {
-    return "TURNSTILE_SECRET_KEY is set but TURNSTILE_SITE_KEY is missing";
-  }
-
-  return null;
-}
-
-let configError: string | null | undefined;
+const checkConfig = makeConfigGate();
 
 export default {
   /**
@@ -113,7 +51,7 @@ export default {
     // silently swept with whatever env it had. Validate here too; a config
     // error skips the sweep (deleting rows under an unvalidated key/secret
     // config is worse than deferring cleanup by one cron tick).
-    const configProblem = validateConfig(env);
+    const configProblem = checkConfig(env);
     if (configProblem) {
       console.error("fireraid cron skipped — config error:", configProblem);
       return;
@@ -163,12 +101,10 @@ export default {
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     // Validate config once on first request
-    if (configError === undefined) {
-      configError = validateConfig(env);
-    }
-    if (configError) {
+    const configProblem = checkConfig(env);
+    if (configProblem) {
       // FIX: Don't expose config details publicly
-      console.error("FireRaid config error:", configError);
+      console.error("FireRaid config error:", configProblem);
       return error("Service unavailable", 503);
     }
 

@@ -76,6 +76,10 @@ runGate("typecheck", "npm", ["run", "typecheck"]);
 runGate("lint", "npm", ["run", "lint"]);
 runGate("worker-isolation", "npm", ["run", "test:worker-isolation"]);
 runGate("origin-budget", "npm", ["run", "test:origin-budget"]);
+// FR-P1-05: the production Worker import graph must never reach the eval
+// control plane (src/eval/, lab routes, the review-decision write). A release
+// must not certify a production artifact that bundles the evaluation plane.
+runGate("production-graph", "npm", ["run", "check:production-graph"]);
 
 // --- full gates (only in full mode) ---
 runGate("unit", "npm", ["run", "test:unit"], { slow: true });
