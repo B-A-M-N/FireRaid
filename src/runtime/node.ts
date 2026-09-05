@@ -49,8 +49,12 @@ export interface OriginServerOptions {
   middlewareDeps: MiddlewareDeps;
   /** Async loader for the upstream application HTML. */
   htmlLoader: () => Promise<string>;
-  /** Port to listen on (0 = ephemeral). */
-  port: number;
+  /**
+   * P1-1: REMOVED — this factory CONSTRUCTS the server; the host owns the
+   * binding lifecycle (server.listen). A `port` option here was dead
+   * configuration: accepted, validated nowhere, never used.
+   */
+  port?: never;
   /** Explicit route configuration for the middleware admit() dispatcher. */
   routes: MiddlewareRouteConfig;
   /**
@@ -104,6 +108,23 @@ export interface OriginServerOptions {
 // ─── Request / Response bridge ──────────────────────────────────────────────
 
 /**
+ * P1-13: typed bridge failures. The node→Request bridge can reject for
+ * reasons the CLIENT caused (oversized body, malformed Host) — those are
+ * 4xx transport facts, not server errors. The old bridge threw bare
+ * Errors that collapsed into the generic 500, telling a legitimate client
+ * its recoverable mistake was "our fault, retry forever".
+ */
+class RequestBridgeError extends Error {
+  constructor(
+    readonly status: 400 | 413,
+    readonly wireCode: string
+  ) {
+    super(wireCode);
+    this.name = "RequestBridgeError";
+  }
+}
+
+/**
  * P0-6: validate and parse the publicOrigin option ONCE at server creation.
  *
  * The contract is scheme + host + optional port — a full ORIGIN, never a
@@ -145,13 +166,13 @@ function nodeToRequest(
     let totalSize = 0;
     const contentLength = Number(req.headers["content-length"] || 0);
     if (contentLength > maxBytes) {
-      reject(new Error("payload too large"));
+      reject(new RequestBridgeError(413, "PAYLOAD_TOO_LARGE"));
       return;
     }
     req.on("data", (chunk: Buffer) => {
       totalSize += chunk.length;
       if (totalSize > maxBytes) {
-        reject(new Error("payload too large"));
+        reject(new RequestBridgeError(413, "PAYLOAD_TOO_LARGE"));
         req.destroy();
         return;
       }
@@ -170,7 +191,7 @@ function nodeToRequest(
         const rawHost = req.headers.host ?? "localhost";
         // Reject malformed Host headers (header injection guard)
         if (!/^[a-zA-Z0-9._:-]+$/.test(rawHost)) {
-          reject(new Error("invalid Host header"));
+          reject(new RequestBridgeError(400, "INVALID_HOST_HEADER"));
           return;
         }
         fullUrl = `http://${rawHost}${req.url ?? "/"}`;
@@ -256,6 +277,10 @@ async function writeResult(
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
         "Set-Cookie": result.setCookie ?? "",
+        // P1-11: every Node response branch carries the same security
+        // headers the Worker plane applies — the origin is the same attack
+        // surface regardless of which runtime served the request.
+        ...SECURITY_HEADERS,
       });
       res.end(result.html ?? "");
       break;
@@ -264,7 +289,7 @@ async function writeResult(
       // AUDIT (P0): neutral receipt — no disposition/score/sessionId/risk.
       // P0-8: reached ONLY when the application is durably somewhere
       // (upstream created, or captured in the host's retry queue).
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", ...SECURITY_HEADERS });
       res.end(RECEIVED_RECEIPT);
       break;
 
@@ -282,19 +307,29 @@ async function writeResult(
         // A DECISION denial is indistinguishable from an admit on the wire:
         // same receipt, same status. The upstream never saw it; the host's
         // review workflow sees the annotation through onAssessment.
-        res.writeHead(200, { "Content-Type": "application/json" });
+        res.writeHead(200, { "Content-Type": "application/json", ...SECURITY_HEADERS });
         res.end(RECEIVED_PENDING);
+      } else if (result.disposition === "METHOD_NOT_ALLOWED") {
+        // P1-12: a method problem is a 405 with Allow, not a bare 403 —
+        // the one 4xx where the standards-mandated header carries real
+        // routing information for legitimate clients.
+        res.writeHead(405, {
+          "Content-Type": "application/json",
+          Allow: "GET, POST",
+          ...SECURITY_HEADERS,
+        });
+        res.end(JSON.stringify({ error: "METHOD_NOT_ALLOWED" }));
       } else {
         // Precondition failures (NO_SESSION / CSRF_FAILED / INVALID_FORM /
-        // BAD_JSON / VERIFICATION_FAILED / METHOD_NOT_ALLOWED / etc.) —
-        // transport facts a legitimate client needs.
-        res.writeHead(403, { "Content-Type": "application/json" });
+        // BAD_JSON / VERIFICATION_FAILED / etc.) — transport facts a
+        // legitimate client needs.
+        res.writeHead(403, { "Content-Type": "application/json", ...SECURITY_HEADERS });
         res.end(JSON.stringify({ error: result.disposition ?? "FORBIDDEN" }));
       }
       break;
 
     case "ingest":
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", ...SECURITY_HEADERS });
       res.end(
         JSON.stringify({
           received: result.received,
@@ -304,23 +339,23 @@ async function writeResult(
       break;
 
     case "canary-verified":
-      res.writeHead(204);
+      res.writeHead(204, { ...SECURITY_HEADERS });
       res.end();
       break;
 
     case "not-handled":
-      res.writeHead(404);
+      res.writeHead(404, { ...SECURITY_HEADERS });
       res.end("Not Found");
       break;
 
     case "error":
-      res.writeHead(500, { "Content-Type": "application/json" });
+      res.writeHead(500, { "Content-Type": "application/json", ...SECURITY_HEADERS });
       res.end(JSON.stringify({ error: "Internal Server Error" }));
       break;
 
     default:
       // Exhaustive check — should never happen but TypeScript needs it.
-      res.writeHead(500, { "Content-Type": "application/json" });
+      res.writeHead(500, { "Content-Type": "application/json", ...SECURITY_HEADERS });
       res.end(JSON.stringify({ error: "Internal Server Error" }));
   }
 }
@@ -390,10 +425,20 @@ export function createOriginServer(
         const req = await nodeToRequest(nodeReq, 64 * 1024, publicOrigin);
         const result = await admit(req, renderDeps, htmlLoader);
         await writeResult(nodeRes, result, options.onAssessment);
-      } catch {
+      } catch (err) {
+        // P1-13: client-caused bridge failures are 4xx transport facts.
+        if (err instanceof RequestBridgeError && !nodeRes.headersSent) {
+          nodeRes.writeHead(err.status, { "Content-Type": "application/json", ...SECURITY_HEADERS });
+          nodeRes.end(JSON.stringify({ error: err.wireCode }));
+          return;
+        }
         // Fail-closed: serve a 500 if the bridge itself errors.
-        nodeRes.writeHead(500, { "Content-Type": "application/json", ...SECURITY_HEADERS });
-        nodeRes.end(JSON.stringify({ error: "Internal Server Error" }));
+        if (!nodeRes.headersSent) {
+          nodeRes.writeHead(500, { "Content-Type": "application/json", ...SECURITY_HEADERS });
+          nodeRes.end(JSON.stringify({ error: "Internal Server Error" }));
+        } else {
+          nodeRes.destroy();
+        }
       }
     }
   );

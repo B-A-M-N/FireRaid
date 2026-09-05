@@ -166,11 +166,12 @@ const middlewareDeps = {
 };
 
 async function main() {
+  // P1-1: createOriginServer CONSTRUCTS the server; the host owns binding
+  // (the removed `port` option was dead configuration).
   const PORT = 3456;
   const server = createOriginServer({
     middlewareDeps,
     htmlLoader,
-    port: PORT,
     routes: ROUTES,
     // The REAL shipped client is served and injected on the application
     // page — the browser executes the same code production serves.

@@ -53,6 +53,14 @@
     "wrangler": "^4.0.0"
   },
   "license": "LicenseRef-FireRaid-Community-Source-1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/B-A-M-N/FireRaid.git"
+  },
+  "bugs": {
+    "url": "https://github.com/B-A-M-N/FireRaid/issues"
+  },
+  "homepage": "https://github.com/B-A-M-N/FireRaid#readme",
   "engines": {
     "node": ">=18.0.0"
   },

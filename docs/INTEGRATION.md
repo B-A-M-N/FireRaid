@@ -77,7 +77,9 @@ wiring time and throws `MiddlewareConfigError` on any gap:
 - `csrfSecret` — dedicated CSRF key; issuance and verification resolve
   through ONE resolver, so rotation of profile keys never changes CSRF
   behavior
-- `profileKeys` — optional key ring, validated (ids, lengths, duplicates)
+- `profileKeys` — REQUIRED production key ring, validated (ids, lengths,
+  duplicates); production configurations without it are rejected at
+  wiring time
 
 ```ts
 const deps = createFireRaidMiddleware({
@@ -121,11 +123,11 @@ import { createOriginServer, closeServer } from "../src/runtime/node.js";
 const server = createOriginServer({
   middlewareDeps: deps,          // same shape as above
   htmlLoader: async () => signupHtml,
-  port: 8443,
   routes,
   clientScriptSource: () => readFileSync("public/signup.js", "utf-8"),
   onAssessment: (a) => persistAnnotation(a), // host-internal hook
 });
+server.listen(8443); // the host owns binding (P1-1: no `port` option)
 ```
 
 `onAssessment` receives the full assessment (disposition, score, tier,
@@ -136,6 +138,28 @@ receives the same neutral receipt:
 ```json
 {"status": "received", "message": "Application received."}
 ```
+
+**`onAssessment` is a durability seam**: return a `Promise` and the
+runtime awaits it BEFORE writing the receipt — an application is only
+acked once its annotation is durable. A rejecting hook fails the request
+with a generic 5xx (never a success receipt), because a receipt for an
+annotation that failed to persist is a promise the review pipeline cannot
+keep.
+
+Two storage caveats:
+
+- The reference stores (`ReferenceTelemetryAdapter`,
+  `ReferenceCanaryStore`) are **volatile** — in-process, lost on restart.
+  They declare `durability: "volatile"` and the production factory logs a
+  warning when handed one. Fine for local development and integration;
+  production deployments must wire durable adapters.
+- **`forward-failed`**: when the upstream registration cannot be forwarded
+  AND your enforcement adapter did not durably capture the application,
+  `admit()` returns `kind: "forward-failed"` and the reference runtime
+  answers 502 — never a success receipt. Return
+  `{ kind: "queued-for-retry", retryId }` from `allow()` after capturing
+  the application in your own durable pending store to get the admit path
+  with at-least-once forwarding semantics.
 
 `examples/origin-server.mjs` is a complete runnable integration.
 

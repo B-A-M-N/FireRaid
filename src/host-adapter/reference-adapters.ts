@@ -197,6 +197,15 @@ export function resolveScoringPolicy(
  * store using the same watermark contract.
  */
 export class ReferenceTelemetryAdapter implements HostTelemetryAdapter {
+  /**
+   * P1-8: unmistakably NON-PRODUCTION durability. This store is an
+   * in-process Map — evidence evaporates on restart, and evidence that
+   * evaporates cannot anchor a review decision. `durability` names that
+   * fact on the type (production adapters declare "durable"; the
+   * production factory logs loudly when handed a reference store, and
+   * INTEGRATION.md's production wiring uses a durable adapter).
+   */
+  readonly durability = "volatile" as const;
   /** sessionId → events in seq order (deduplicated by the watermark gate). */
   private readonly streams = new Map<string, ValidatedEvent[]>();
 
@@ -373,6 +382,12 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
  * P1-AUDIT-2 Phase D (audit item 6) — reference canary-hit store.
  */
 export class ReferenceCanaryStore implements HostCanaryStore {
+  /**
+   * P1-8: see ReferenceTelemetryAdapter.durability — in-process Set, not
+   * durable production storage. Causal evidence (Class-A canary hits) that
+   * evaporates on restart cannot anchor an admission decision.
+   */
+  readonly durability = "volatile" as const;
   private readonly hits = new Set<string>();
   /** When true, record() fails (simulates a real storage outage). */
   failStore = false;

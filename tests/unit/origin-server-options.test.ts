@@ -71,13 +71,13 @@ async function listen(server: http.Server): Promise<number> {
 describe("P0-6: publicOrigin parsing", () => {
   it("throws at construction on a malformed URL", () => {
     expect(() =>
-      createOriginServer({ middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, port: 0, routes: ROUTES, publicOrigin: "not a url" })
+      createOriginServer({ middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, routes: ROUTES, publicOrigin: "not a url" })
     ).toThrow(/not a valid URL/);
   });
 
   it("throws on a non-http(s) scheme", () => {
     expect(() =>
-      createOriginServer({ middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, port: 0, routes: ROUTES, publicOrigin: "ftp://example.org" })
+      createOriginServer({ middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, routes: ROUTES, publicOrigin: "ftp://example.org" })
     ).toThrow(/scheme must be http: or https:/);
   });
 
@@ -85,7 +85,7 @@ describe("P0-6: publicOrigin parsing", () => {
     const cases = ["https://example.org/signup", "https://example.org/?a=1", "https://example.org/#x", "https://user:pass@example.org"];
     for (const bad of cases) {
       expect(() =>
-        createOriginServer({ middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, port: 0, routes: ROUTES, publicOrigin: bad }),
+        createOriginServer({ middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, routes: ROUTES, publicOrigin: bad }),
         bad
       ).toThrow(/scheme \+ host/);
     }
@@ -115,7 +115,7 @@ describe("P0-6: publicOrigin parsing", () => {
         enforcement: { allow: async () => ({ kind: "created" }), deny: () => {} },
       },
       htmlLoader: async () => SIGNUP_HTML,
-      port: 0,
+
       routes: ROUTES,
       publicOrigin: "https://signup.example.org:8443",
     });
@@ -149,7 +149,7 @@ describe("P0-7: maxHeaderSize at construction", () => {
     const server = createOriginServer({
       middlewareDeps: deps(),
       htmlLoader: async () => SIGNUP_HTML,
-      port: 0,
+
       routes: ROUTES,
       maxHeaderSize: 1024,
     });
@@ -186,7 +186,7 @@ describe("P0-7: maxHeaderSize at construction", () => {
     const server = createOriginServer({
       middlewareDeps: deps(),
       htmlLoader: async () => SIGNUP_HTML,
-      port: 0,
+
       routes: ROUTES,
       maxHeaderSize: 16_384,
     });

@@ -134,6 +134,14 @@ export interface MiddlewareDeps {
    * the HOST's job (see src/runtime/node.ts clientScriptSource).
    */
   clientScriptSrc?: string;
+  /**
+   * P1-10: operational-error sink for infrastructure failures that must
+   * not corrupt the applicant response path (store TTL sweeps, store
+   * finalization). Default: console.error. A host with a real error
+   * pipeline should wire it here — these failures are exactly the
+   * degradation that silently turns into a review-data hole.
+   */
+  onOperationalError?: (op: string, err: unknown) => void;
 }
 
 /**
@@ -494,16 +502,51 @@ export async function __admitWithEvaluation(
 
 type Swept = { sweepExpired?: () => Promise<number> | number };
 
+/**
+ * P1-9: async sweep results are CONTAINED, not abandoned. The old
+ * `void s.sweepExpired()` left a rejecting Promise as an unhandled
+ * rejection (process-fatal under strict hosts) — a store whose sweep
+ * failed asynchronously would take the whole origin down for a hygiene
+ * miss. The Promise is explicitly observed and routed to the operational
+ * error hook (P1-10); sync throws stay contained here.
+ */
 function sweepStores(deps: MiddlewareDeps): void {
   for (const store of [deps.canaryStore, deps.telemetry as unknown as Swept]) {
     const s = store as Swept | undefined;
     if (s && typeof s.sweepExpired === "function") {
       try {
-        void s.sweepExpired();
-      } catch {
+        const r = s.sweepExpired();
+        if (r && typeof (r as Promise<number>).then === "function") {
+          (r as Promise<number>).catch((err: unknown) => {
+            reportOperationalError(deps, "store-sweep", err);
+          });
+        }
+      } catch (err) {
         // Lifecycle hygiene is best-effort; never fail a request for it.
+        reportOperationalError(deps, "store-sweep", err);
       }
     }
+  }
+}
+
+/**
+ * P1-10: the operational-error seam. Infrastructure failures that must not
+ * corrupt the applicant response path (store sweeps, store finalization)
+ * surface here instead of vanishing — a host that silences them is flying
+ * blind on exactly the degradation that turns into a review-data hole.
+ * Default: console.error (the reference runtime has no other sink).
+ */
+function reportOperationalError(deps: MiddlewareDeps, op: string, err: unknown): void {
+  const hook = (deps as { onOperationalError?: (op: string, err: unknown) => void })
+    .onOperationalError;
+  if (typeof hook === "function") {
+    try {
+      hook(op, err);
+    } catch {
+      // The error sink itself failing must never break the request path.
+    }
+  } else {
+    console.error(`FireRaid middleware: operational error in ${op}:`, err);
   }
 }
 
@@ -513,8 +556,10 @@ async function finalizeStores(deps: MiddlewareDeps, sessionId: string): Promise<
     if (s && typeof s.finalize === "function") {
       try {
         await s.finalize(sessionId);
-      } catch {
-        // Finalization failure must not corrupt the response path.
+      } catch (err) {
+        // Finalization failure must not corrupt the response path — but it
+        // must be SEEN (P1-10), not swallowed.
+        reportOperationalError(deps, "store-finalize", err);
       }
     }
   }
@@ -1211,6 +1256,28 @@ export function createFireRaidMiddleware(
     console.warn(
       "FireRaid middleware: enforcementMode is 'advisory' — submissions are never blocked."
     );
+  }
+
+  // P1-8: volatile reference stores in a production wiring are named, not
+  // silently accepted — telemetry/canary evidence that evaporates on
+  // restart cannot anchor review decisions. (A WARNING, not a rejection:
+  // local integration legitimately uses the reference stores, and
+  // durability is a deployment property the factory cannot prove.)
+  for (const [label, store] of [
+    ["telemetry", deps.telemetry],
+    ["canaryStore", deps.canaryStore],
+  ] as const) {
+    if (
+      store &&
+      (store as { durability?: string }).durability === "volatile"
+    ) {
+      console.warn(
+        `FireRaid middleware: ${label} is a VOLATILE reference store ` +
+        `(in-memory, lost on restart). Acceptable for local development ` +
+        `and integration; production deployments must wire a durable ` +
+        `adapter (INTEGRATION.md).`
+      );
+    }
   }
 
   return deps;

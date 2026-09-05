@@ -63,7 +63,7 @@ describe("origin runtime (node:http adapter)", () => {
     server = createOriginServer({
       middlewareDeps: deps,
       htmlLoader,
-      port: 0, // ephemeral port
+
       routes: ROUTES,
     });
     port = await new Promise<number>((resolve, reject) => {

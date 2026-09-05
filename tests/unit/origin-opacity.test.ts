@@ -93,7 +93,6 @@ describe("P0 origin opacity: decision-blind wire", () => {
     server = createOriginServer({
       middlewareDeps: deps,
       htmlLoader: async () => SIGNUP_HTML,
-      port: 0,
       routes: ROUTES,
       onAssessment: (a) => { assessments.push(a); },
     });
