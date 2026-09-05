@@ -17,3 +17,15 @@ test-results/
 *.log
 .dev.vars.*
 __pycache__/
+# Debug/test capture artifacts (localhost test material — not for commit)
+admin.txt
+cookies.txt
+cookies2.txt
+body.html
+c_1.txt
+c_full.txt
+s_1.html
+s_full.html
+signup.html
+signup2.html
+test.txt

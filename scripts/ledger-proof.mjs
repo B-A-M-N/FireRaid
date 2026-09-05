@@ -86,7 +86,7 @@ async function main() {
   // Secret signs the session cookie + CSRF token (P1-AUDIT-2). Must match the
   // deps.secret below so the GET-issued cookie/token verify on POST.
   const session = new ReferenceSessionAdapter(SECRET);
-  const verification = new HostOwnedVerificationAdapter(() => true);
+  const verification = new HostOwnedVerificationAdapter(async () => true);
   const telemetry = new ReferenceTelemetryAdapter();
   const enforcement = new ReferenceEnforcementAdapter();
   const canaryStore = new ReferenceCanaryStore();

@@ -427,8 +427,10 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
           try {
             const stat = readFileSync("/proc/" + d + "/stat", "utf8");
             const close = stat.lastIndexOf(")");
-            const f = stat.slice(close + 2).split(/\\s+/);
-            procs.set(Number(d), { ppid: Number(f[1]), comm: (readFileSync("/proc/" + d + "/comm", "utf8") || "").trim() });
+            // /proc/<pid>/stat format after comm): state ppid pgrp session ...
+            // state = fields[0], ppid = fields[1], pgrp = fields[2]
+            const fields = stat.slice(close + 2).split(/\s+/);
+            procs.set(Number(d), { ppid: Number(fields[1]), comm: (readFileSync("/proc/" + d + "/comm", "utf8") || "").trim() });
           } catch {}
         }
       } catch {}
@@ -463,7 +465,7 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
         // dead for our purposes.
         const stat = readFileSync("/proc/" + SUP + "/stat", "utf8");
         const close = stat.lastIndexOf(")");
-        const state = stat.slice(close + 2).split(/\\s+/)[0];
+        const state = stat.slice(close + 2).split(/\s+/)[0];
         alive = state !== "Z";
       } catch { alive = false; }
       if (!alive) break;
@@ -477,7 +479,7 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
         try {
           const stat = readFileSync("/proc/" + pid + "/stat", "utf8");
           const close = stat.lastIndexOf(")");
-          pgid = Number(stat.slice(close + 2).split(/\\s+/)[2]);
+          pgid = Number(stat.slice(close + 2).split(/\s+/)[2]);
         } catch {}
         try { process.kill(-pgid, "SIGKILL"); } catch {}
         try { process.kill(pid, "SIGKILL"); } catch {}
@@ -761,13 +763,17 @@ function workerdGroupsForOurRun() {
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
       // comm is parenthesized and may contain spaces — split from the LAST ')'.
       const closeIdx = stat.lastIndexOf(")");
-      const [ppidS, _pgrpS] = stat.slice(closeIdx + 2).split(/\s+/);
-      const pgidS = stat.slice(closeIdx + 2).split(/\s+/)[2];
+      // /proc/<pid>/stat format after comm): state ppid pgrp session ...
+      // state = fields[0], ppid = fields[1], pgrp = fields[2]
+      const fields = stat.slice(closeIdx + 2).split(/\s+/);
+      const state = fields[0];
+      const ppidS = fields[1];
+      const pgidS = fields[2];
       let comm = "";
       let args = "";
       try { comm = readFileSync(`/proc/${pid}/comm`, "utf8").trim(); } catch { /* raced exit */ }
       try { args = readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " "); } catch { /* raced exit */ }
-      procs.set(Number(pid), { ppid: Number(ppidS), pgid: Number(pgidS), comm, args });
+      procs.set(Number(pid), { ppid: Number(ppidS), pgid: Number(pgidS), comm, args, state });
     } catch { /* raced exit */ }
   }
   // Anything in OUR supervisor's descendant set is ours (wrangler, workerd,

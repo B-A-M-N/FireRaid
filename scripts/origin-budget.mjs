@@ -58,7 +58,7 @@ function buildDeps() {
     upstreamRegisterUrl: "http://localhost:5051/api/register",
     session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
     render: { inject: referenceInject },
-    verification: new HostOwnedVerificationAdapter(() => true),
+    verification: new HostOwnedVerificationAdapter(async () => true),
     telemetry: new ReferenceTelemetryAdapter(),
     enforcement: new ReferenceEnforcementAdapter(),
     canaryStore: new ReferenceCanaryStore(),

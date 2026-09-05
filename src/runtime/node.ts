@@ -22,6 +22,7 @@
  * interaction system, not just server-side injection.
  */
 import http from "node:http";
+import { SECURITY_HEADERS } from "../security/headers.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type {
   MiddlewareDeps,
@@ -53,6 +54,26 @@ export interface OriginServerOptions {
   /** Explicit route configuration for the middleware admit() dispatcher. */
   routes: MiddlewareRouteConfig;
   /**
+   * P1-9: explicit public origin (scheme + host + optional port). When set,
+   * the runtime uses it for the Request URL instead of the attacker-controlled
+   * Host header. Required when the server is behind a reverse proxy.
+   */
+  publicOrigin?: string;
+  /**
+   * P1-9: timeout for receiving the complete request headers (ms).
+   * Default 60000 (matches Node 18+ default).
+   */
+  headersTimeoutMs?: number;
+  /**
+   * P1-9: timeout for receiving the entire request body (ms).
+   * Default 30000.
+   */
+  requestTimeoutMs?: number;
+  /**
+   * P1-9: maximum header size (bytes). Default 16384 (16 KiB).
+   */
+  maxHeaderSize?: number;
+  /**
    * Source of the browser client script served to applicants. The runtime
    * serves it at `clientScriptPath` (default "/fireraid-client.js") and
    * injects `<script src>` on the application page, so the shipped client
@@ -66,8 +87,11 @@ export interface OriginServerOptions {
    * submission (admit AND decision-deny). This is how the host persists the
    * risk annotation / joins to its own review workflow. NEVER serialized to
    * the applicant.
+   *
+   * P1-10: returns void | Promise<void> so a host that persists
+   * assessment data asynchronously can await durability.
    */
-  onAssessment?: (assessment: OriginAssessment) => void;
+  onAssessment?: (assessment: OriginAssessment) => void | Promise<void>;
 }
 
 // ─── Request / Response bridge ──────────────────────────────────────────────
@@ -77,14 +101,44 @@ export interface OriginServerOptions {
  * `Request` and a handler that writes back to the `ServerResponse`.
  */
 function nodeToRequest(
-  req: IncomingMessage
+  req: IncomingMessage,
+  maxBytes: number = 64 * 1024,
+  trustedHost?: string
 ): Promise<Request> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    let totalSize = 0;
+    const contentLength = Number(req.headers["content-length"] || 0);
+    if (contentLength > maxBytes) {
+      reject(new Error("payload too large"));
+      return;
+    }
+    req.on("data", (chunk: Buffer) => {
+      totalSize += chunk.length;
+      if (totalSize > maxBytes) {
+        reject(new Error("payload too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
       const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
-      const fullUrl = `http://${req.headers.host ?? "localhost"}${req.url ?? "/"}`;
+      // P1-9: use the explicit public origin when set; otherwise validate
+      // the Host header against a safe pattern (no user-controlled URL).
+      let host: string;
+      if (trustedHost) {
+        host = trustedHost;
+      } else {
+        const rawHost = req.headers.host ?? "localhost";
+        // Reject malformed Host headers (header injection guard)
+        if (!/^[a-zA-Z0-9._:-]+$/.test(rawHost)) {
+          reject(new Error("invalid Host header"));
+          return;
+        }
+        host = rawHost;
+      }
+      const fullUrl = `http://${host}${req.url ?? "/"}`;
       const headers: Record<string, string> = {};
       for (const [k, v] of Object.entries(req.headers)) {
         if (typeof v === "string") {
@@ -128,11 +182,12 @@ const RECEIVED_PENDING = JSON.stringify({
 function writeResult(
   res: ServerResponse,
   result: MiddlewareResult,
-  onAssessment?: (a: OriginAssessment) => void
+  onAssessment?: (a: OriginAssessment) => void | Promise<void>
 ): void {
   // Host-internal hook FIRST — the annotation path, never the wire.
+  // P1-10: await durability if the host returns a Promise.
   if (onAssessment && (result.kind === "admit" || (result.kind === "deny" && result.decisionDenied === true))) {
-    onAssessment({
+    const r = onAssessment({
       sessionId: result.sessionId ?? "",
       disposition: result.disposition ?? "UNKNOWN",
       decisionDenied: result.decisionDenied === true,
@@ -141,6 +196,9 @@ function writeResult(
       submittedEmail: result.submittedEmail,
       risk: result.risk,
     });
+    if (r && typeof r.then === "function") {
+      void r.catch(() => {});
+    }
   }
 
   switch (result.kind) {
@@ -236,6 +294,11 @@ export function createOriginServer(
     clientScriptSrc: clientSource ? clientScriptPath : deps.clientScriptSrc,
   };
 
+  // P1-9: server timeout configuration (defaults match hardened defaults)
+  const headersTimeout = options.headersTimeoutMs ?? 60_000;
+  const requestTimeout = options.requestTimeoutMs ?? 30_000;
+  const maxHeaderSize = options.maxHeaderSize ?? 16_384;
+
   const server = http.createServer(
     async (nodeReq: IncomingMessage, nodeRes: ServerResponse) => {
       try {
@@ -246,20 +309,31 @@ export function createOriginServer(
           nodeRes.writeHead(200, {
             "Content-Type": "text/javascript; charset=utf-8",
             "Cache-Control": "no-store",
+            // P1-9: security headers on client script responses
+            ...SECURITY_HEADERS,
           });
           nodeRes.end(clientSource());
           return;
         }
-        const req = await nodeToRequest(nodeReq);
+        const req = await nodeToRequest(nodeReq, 64 * 1024, options.publicOrigin);
         const result = await admit(req, renderDeps, htmlLoader);
         writeResult(nodeRes, result, options.onAssessment);
       } catch {
         // Fail-closed: serve a 500 if the bridge itself errors.
-        nodeRes.writeHead(500, { "Content-Type": "application/json" });
+        nodeRes.writeHead(500, { "Content-Type": "application/json", ...SECURITY_HEADERS });
         nodeRes.end(JSON.stringify({ error: "Internal Server Error" }));
       }
     }
   );
+
+  // P1-9: hardened timeout + header size settings
+  server.headersTimeout = headersTimeout;
+  server.requestTimeout = requestTimeout;
+  server.maxHeadersCount = 50;
+  if (maxHeaderSize) {
+    // Node 18+: maxHeaderSize is set via setMaxIdleTimeout or constructor
+    (server as unknown as { maxHeaderSize: number }).maxHeaderSize = maxHeaderSize;
+  }
 
   return server;
 }

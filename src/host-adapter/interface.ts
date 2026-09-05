@@ -304,21 +304,41 @@ export interface HostTelemetryAdapter {
 export interface HostEnforcementAdapter {
   /**
    * Forward the (FireRaid-stripped) registration to the upstream.
-   * @returns true if the upstream created the account (the experiment's
-   *          positive event); false if the upstream rejected it.
+   * @returns the result of forwarding — either a simple boolean (true =
+   *          created, false = rejected/failure) or a discriminated
+   *          EnforcementResult for explicit retry/failure handling. A
+   *          retryable-failure must NOT silently discard the application;
+   *          the host should persist a pending/retry record.
    */
   allow(
     upstreamUrl: string,
     form: Record<string, string>,
     cookies: string
-  ): Promise<boolean>;
+  ): Promise<boolean | EnforcementResult>;
   /**
    * Record a denied submission (never forwarded).
    * The annotation carries FireRaid's risk projection so a host queue can
    * surface it to reviewers even when admission was automatic.
+   *
+   * P1-10: returns void | Promise<void> so a host that persists the
+   * annotation/review data asynchronously can await durability. The
+   * middleware awaits the result.
    */
-  deny(sessionId: string, reason: string, annotation?: RiskAnnotation): void;
+  deny(sessionId: string, reason: string, annotation?: RiskAnnotation): void | Promise<void>;
 }
+
+/**
+ * Enforcement result — discriminated outcome of forwarding to the upstream.
+ *
+ * P0-4: the contract is no longer a bare boolean. A retryable failure
+ * (timeout, 502, network error) is distinguished from a business rejection
+ * (409, 422) so the host can persist a durable pending/retry record instead
+ * of silently discarding the application.
+ */
+export type EnforcementResult =
+  | { kind: "created" }
+  | { kind: "business-rejected"; status: number; body?: string }
+  | { kind: "retryable-failure"; reason: string };
 
 /**
  * Host-facing risk annotation. Reviewer tools consume this; it must never

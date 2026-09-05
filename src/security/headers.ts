@@ -7,9 +7,12 @@ export const SECURITY_HEADERS: Record<string, string> = {
     "script-src 'self' https://challenges.cloudflare.com; " +
     "frame-src https://challenges.cloudflare.com; " +
     "connect-src 'self' https://challenges.cloudflare.com; " +
-    // FR-R6-046: all styles ship via /signup.css + admin.css — no inline
-    // style injection, so 'unsafe-inline' is gone.
-    "style-src 'self'; " +
+    // P0-7: the constant inline style used by the decoy-field hiding
+    // technique is allowlisted via a SHA-256 hash so `style-src` can stay
+    // restrictive (no 'unsafe-inline'). The hash is over the exact string:
+    //   position:absolute!important;width:1px!important;height:1px!important;...
+    // If the style string changes, this hash must be recomputed.
+    "style-src 'self' 'sha256-bR67piDoV29bfjsHPn9ssw5vXmLWyHHw3fPPMv8edFU='; " +
     "img-src 'self' data:; " +
     "object-src 'none'; base-uri 'none'; form-action 'self'",
   "X-Content-Type-Options": "nosniff",

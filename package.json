@@ -16,7 +16,7 @@
     "test:origin-budget": "node --import tsx scripts/origin-budget.mjs",
     "test:integration": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.integration.config.ts",
     "test:llm-smoke": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.llm-smoke.config.ts",
-    "test:envelope": "node scripts/test-worker.mjs --suite test-envelope --port 8799 --wrangler-env production -- vitest run --config vitest.envelope.config.ts",
+    "test:envelope": "node scripts/test-worker.mjs --suite test-envelope --port 8799 --wrangler-env production-test -- vitest run --config vitest.envelope.config.ts",
     "test:budget": "node --import tsx scripts/budget-harness.mjs",
     "test:worker-isolation": "node scripts/test-worker-isolation.spec.mjs",
     "test:ledger-proof": "node --import tsx scripts/ledger-proof.mjs",
@@ -30,7 +30,8 @@
     "deploy:production": "wrangler deploy --env production",
     "experiment": "tsx harness/core/runner.ts",
     "analyze": "python3 harness/analysis/analyze.py",
-    "release:verify": "node scripts/release-verify.mjs"
+    "release:verify:fast": "node scripts/release-verify.mjs fast",
+    "release:verify:full": "node scripts/release-verify.mjs full"
   },
   "dependencies": {
     "zod": "^3.23.8"
@@ -48,5 +49,36 @@
     "vitest": "^3.0.0",
     "wrangler": "^4.0.0"
   },
-  "license": "LicenseRef-FireRaid-Community-Source-1.0"
+  "license": "LicenseRef-FireRaid-Community-Source-1.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "src/",
+    "public/",
+    "docs/",
+    "examples/",
+    "scripts/",
+    "migrations/",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./node": {
+      "types": "./src/runtime/node.d.ts",
+      "import": "./src/runtime/node.js"
+    },
+    "./adapters": {
+      "types": "./src/host-adapter/index.d.ts",
+      "import": "./src/host-adapter/index.js"
+    },
+    "./evaluation": {
+      "types": "./src/eval/index.d.ts",
+      "import": "./src/eval/index.js"
+    }
+  }
 }

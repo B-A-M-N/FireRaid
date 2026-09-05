@@ -16,7 +16,7 @@ import {
 } from "../core/session-envelope.js";
 import type { ProfileKeyRing } from "../core/session.js";
 import { validateTelemetryBatch, type ValidatedEvent } from "../security/request-validation.js";
-import type { HostTelemetryIngest, HostSessionContext } from "./interface.js";
+import type { HostTelemetryIngest, HostSessionContext, VerificationInput } from "./interface.js";
 import type { DefenseProfile } from "../types/profile.js";
 import { getPolicyOrThrow, type ScoringPolicy } from "../core/decision.js";
 
@@ -142,12 +142,17 @@ export class ReferenceVerificationAdapter implements HostVerificationAdapter {
  * AUDIT (P1): a host that ALREADY verified the human elsewhere (the FI
  * integration: FI's own verification result consumed, no duplicate widget).
  * Production-legal by declaration — the factory accepts this mode.
+ *
+ * P0-3: the callback is REQUIRED (no default). A production deployment
+ * must supply an explicit verification implementation that receives the
+ * canonical profile + input — a no-default constructor makes it impossible
+ * to accidentally ship a verifier that accepts everything.
  */
 export class HostOwnedVerificationAdapter implements HostVerificationAdapter {
   readonly verificationMode = "host-owned" as const;
-  constructor(private readonly verdict: () => boolean = () => true) {}
-  async verify(): Promise<boolean> {
-    return this.verdict();
+  constructor(private readonly verifier: (profile: DefenseProfile, input: VerificationInput) => Promise<boolean>) {}
+  async verify(profile: DefenseProfile, input: VerificationInput): Promise<boolean> {
+    return this.verifier(profile, input);
   }
 }
 
@@ -291,6 +296,19 @@ export class ReferenceTelemetryAdapter implements HostTelemetryAdapter {
   }
 }
 
+/**
+ * Enforcement result — discriminated outcome of forwarding to the upstream.
+ *
+ * P0-4: the contract is no longer a bare boolean. A retryable failure
+ * (timeout, 502, network error) is distinguished from a business rejection
+ * (409, 422) so the host can persist a durable pending/retry record instead
+ * of silently discarding the application.
+ */
+export type EnforcementResult =
+  | { kind: "created" }
+  | { kind: "business-rejected"; status: number; body?: string }
+  | { kind: "retryable-failure"; reason: string };
+
 /** Reference enforcement adapter — forwards to the upstream over HTTP. */
 export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
   async allow(
@@ -317,11 +335,6 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
 
 /**
  * P1-AUDIT-2 Phase D (audit item 6) — reference canary-hit store.
- *
- * In-memory set of (sessionId) verified hits, mirroring the Worker's
- * canary_hits semantics: idempotent replays succeed; only `failStore` (a
- * test/diagnostics hook) simulates a real storage failure. Hosts with real
- * persistence implement HostCanaryStore over their own store.
  */
 export class ReferenceCanaryStore implements HostCanaryStore {
   private readonly hits = new Set<string>();

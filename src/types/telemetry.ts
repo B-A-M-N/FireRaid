@@ -55,3 +55,5 @@ export const ALLOWED_EVENT_TYPES: ReadonlySet<string> = new Set<TelemetryEventTy
 export const MAX_EVENTS_PER_BATCH = 256;
 export const MAX_EVENT_PAYLOAD_BYTES = 16 * 1024;
 export const MAX_SUBMIT_BODY_BYTES = 32 * 1024;
+/** P1-8: host-plane JSON body limit (telemetry + submit). */
+export const MAX_HOST_JSON_BYTES = 64 * 1024;

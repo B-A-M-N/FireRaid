@@ -10,7 +10,7 @@ import { signup } from "./routes/signup.js";
 import { submit } from "./routes/submit.js";
 import { canary } from "./routes/canary.js";
 import { events } from "./routes/telemetry.js";
-import { adminLogin, adminSummary, adminSessions, adminSessionDetail, adminExperiments, adminExperimentDetail, adminExport, adminLogout, adminCleanup, adminReviewDecision } from "./routes/admin.js";
+import { adminLogin, adminSummary, adminSessions, adminSessionDetail, adminExperiments, adminExperimentDetail, adminExport, adminLogout, adminCleanup, adminReviewDecision, adminReviewQueue } from "./routes/admin.js";
 import { createLabRun, getLabRun, ingestLabRuns, postLabRunOutcome, expireStaleLabRuns } from "./routes/lab.js";
 import { error, html } from "./security/headers.js";
 import { readAdminHtml } from "./core/static.js";
@@ -242,6 +242,11 @@ export default {
       // Review decision — EVALUATION-ONLY WRITE (enforced inside admin.ts)
       const reviewDecisionMatch = path.match(/^\/api\/admin\/review-queue\/([^/]+)$/);
       if (reviewDecisionMatch && req.method === "POST") return adminReviewDecision(req, env);
+
+      // Review-queue READ — product surface (reviewers read FireRaid's annotation)
+      if (path === "/api/admin/review-queue" && req.method === "GET") {
+        return adminReviewQueue(req, env);
+      }
 
       // Admin UI — served in any mode; the fixture uses it for review reads
       if (path === "/admin" || path === "/admin/") {

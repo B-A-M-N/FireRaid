@@ -36,6 +36,8 @@ import { decide } from "../core/decision.js";
 import { projectRisk, getRiskTier, DEFAULT_RISK_TIERS, resolveRuntimeDisposition, validateRiskTierConfig, type RiskTierConfig } from "../core/risk.js";
 import { aggregateTelemetry, type CaptureConfig } from "../telemetry/aggregate.js";
 import { validateSignupForm, type SubmitInbound } from "../security/request-validation.js";
+import { readJsonBody } from "../security/body-limits.js";
+import { MAX_HOST_JSON_BYTES } from "../types/telemetry.js";
 import { resolveScoringPolicy } from "./reference-adapters.js";
 import type {
   VerificationInput,
@@ -194,6 +196,16 @@ export interface MiddlewareResult {
    */
   decisionDenied?: boolean;
   /**
+   * P0-4: the enforcement result detail (set when the adapter returns a
+   * discriminated EnforcementResult instead of a boolean). Lets the host
+   * distinguish a business rejection from a retryable failure.
+   */
+  enforcementDetail?: {
+    kind: "created" | "business-rejected" | "retryable-failure";
+    status?: number;
+    reason?: string;
+  };
+  /**
    * Reviewer-facing risk projection (set on every path that reached decide()).
    */
   risk?: {
@@ -248,7 +260,7 @@ export function resolveRoutes(deps: {
     submitEndpoint: r.client?.submitEndpoint ?? r.applicationSubmit,
     telemetryEndpoint: r.client?.telemetryEndpoint ?? (telemetry === "" ? DEFAULT_TELEMETRY_PATH : telemetry),
   };
-  return {
+  const resolved: ResolvedFireRaidRoutes = {
     applicationPage: r.applicationPage,
     applicationSubmit: r.applicationSubmit,
     telemetry,
@@ -256,6 +268,77 @@ export function resolveRoutes(deps: {
     client,
     trustedIngress: r.trustedIngress ?? "direct",
   };
+  // P1-11: validate the route graph for collisions and malformed paths
+  validateRouteGraph(resolved);
+  return resolved;
+}
+
+/**
+ * P1-11: validate the entire route graph for collisions and malformed paths.
+ * Dispatch precedence creates dangerous configuration collisions:
+ *   - GET canary-prefix matching happens before the application page. A broad
+ *     canaryPrefix can swallow legitimate GET routes.
+ *   - POST telemetry matching happens before submission. telemetry ===
+ *     applicationSubmit makes submissions enter telemetry handling.
+ *   - Client submitEndpoint/telemetryEndpoint overrides can contradict the
+ *     supposedly canonical server route table.
+ * Throws MiddlewareConfigError on any violation.
+ */
+function validateRouteGraph(routes: ResolvedFireRaidRoutes): void {
+  const errors: string[] = [];
+
+  // 1. Absolute-path syntax: must start with /, no query/hash
+  const pathRoutes: Array<[string, string]> = [
+    ["applicationPage", routes.applicationPage],
+    ["applicationSubmit", routes.applicationSubmit],
+  ];
+  if (routes.telemetry) {
+    pathRoutes.push(["telemetry", routes.telemetry]);
+  }
+  for (const [name, value] of pathRoutes) {
+    if (!value.startsWith("/")) {
+      errors.push(`routes.${name} must be an absolute path (start with /): "${value}"`);
+    }
+    if (value.includes("?") || value.includes("#")) {
+      errors.push(`routes.${name} must not contain query or hash: "${value}"`);
+    }
+  }
+
+  // 2. Canary prefix form: must start with /
+  if (!routes.canaryPrefix.startsWith("/")) {
+    errors.push(`routes.canaryPrefix must start with /: "${routes.canaryPrefix}"`);
+  }
+
+  // 3. No overlapping route namespaces (only within the same method)
+  // GET routes: canaryPrefix must not swallow applicationPage
+  // POST routes: telemetry must not collide with applicationSubmit
+  if (routes.telemetry && routes.telemetry === routes.applicationSubmit) {
+    errors.push(`routes.telemetry and routes.applicationSubmit must differ (both are "${routes.applicationSubmit}")`);
+  }
+
+  // 4. Canary prefix must not swallow other GET routes
+  if (routes.applicationPage.startsWith(routes.canaryPrefix)) {
+    errors.push(`routes.canaryPrefix "${routes.canaryPrefix}" is a prefix of routes.applicationPage "${routes.applicationPage}" — canary matching would swallow the application page`);
+  }
+
+  // 5. Valid form selector
+  if (!routes.client.formSelector || routes.client.formSelector.length === 0) {
+    errors.push("routes.client.formSelector must be a non-empty string");
+  }
+
+  // 6. Consistency between client endpoints and server dispatch
+  if (routes.client.submitEndpoint !== routes.applicationSubmit) {
+    errors.push(`routes.client.submitEndpoint "${routes.client.submitEndpoint}" does not match routes.applicationSubmit "${routes.applicationSubmit}" — client and server dispatch must agree`);
+  }
+  if (routes.telemetry && routes.client.telemetryEndpoint !== routes.telemetry) {
+    errors.push(`routes.client.telemetryEndpoint "${routes.client.telemetryEndpoint}" does not match routes.telemetry "${routes.telemetry}" — client and server dispatch must agree`);
+  }
+
+  if (errors.length > 0) {
+    throw new MiddlewareConfigError(
+      "Route graph validation failed:\n  - " + errors.join("\n  - ")
+    );
+  }
 }
 
 // ─── Secret resolution: ONE source per purpose ────────────────────────────
@@ -545,13 +628,16 @@ async function handleIngestPost(
 
   let ingestBody: { events?: unknown };
   try {
-    ingestBody = (await req.json()) as { events?: unknown };
+    // P1-8: bounded JSON reader
+    const parsed = await readJsonBody(req, MAX_HOST_JSON_BYTES);
+    if (!parsed) return { kind: "deny", disposition: "BAD_JSON" };
+    ingestBody = parsed as { events?: unknown };
   } catch {
     return { kind: "deny", disposition: "BAD_JSON" };
   }
   const ingest = await deps.telemetry.accept(sessionId, ingestBody.events ?? []);
   if (ingest.kind === "invalid") {
-    deps.enforcement.deny(sessionId, "INVALID_TELEMETRY");
+    await deps.enforcement.deny(sessionId, "INVALID_TELEMETRY");
     return { kind: "deny", disposition: "INVALID_TELEMETRY" };
   }
   if (ingest.kind === "conflict") {
@@ -585,26 +671,33 @@ async function handleSubmitPost(
   const contentType = (req.headers.get("content-type") ?? "").split(";")[0].trim();
   let body: SubmitInbound;
   if (contentType === "application/x-www-form-urlencoded") {
+    // P1-8: bounded text reader for form posts
+    const contentLength = Number(req.headers.get("content-length") || 0);
+    if (contentLength > MAX_HOST_JSON_BYTES) return { kind: "deny", disposition: "BAD_FORM" };
     let text: string;
     try {
       text = await req.text();
     } catch {
       return { kind: "deny", disposition: "BAD_FORM" };
     }
+    if (new TextEncoder().encode(text).length > MAX_HOST_JSON_BYTES) return { kind: "deny", disposition: "BAD_FORM" };
     const entries: Record<string, string> = {};
     for (const [k, v] of new URLSearchParams(text)) entries[k] = v;
     const { csrf, ...form } = entries;
     body = { csrf, form };
   } else {
     try {
-      body = await req.json();
+      // P1-8: bounded JSON reader
+      const parsed = await readJsonBody(req, MAX_HOST_JSON_BYTES);
+      if (!parsed) return { kind: "deny", disposition: "BAD_JSON" };
+      body = parsed as SubmitInbound;
     } catch {
       return { kind: "deny", disposition: "BAD_JSON" };
     }
   }
   const formCheck = validateSignupForm(body.form ?? {});
   if (!formCheck.ok) {
-    deps.enforcement.deny(sessionId, "INVALID_FORM");
+    await deps.enforcement.deny(sessionId, "INVALID_FORM");
     return { kind: "deny", disposition: "INVALID_FORM" };
   }
   const form = formCheck.form;
@@ -619,7 +712,7 @@ async function handleSubmitPost(
   try {
     profileSecret = resolveKeySecret(ring, session!.keyId);
   } catch {
-    deps.enforcement.deny(sessionId, "UNKNOWN_PROFILE_KEY");
+    await deps.enforcement.deny(sessionId, "UNKNOWN_PROFILE_KEY");
     return { kind: "deny", disposition: "UNKNOWN_PROFILE_KEY" };
   }
   try {
@@ -697,7 +790,7 @@ async function handleSubmitPost(
       // silent repair (FR-R6-035 semantics on the host plane).
       const ingest = await deps.telemetry.accept(sessionId, body.eventBatch ?? []);
       if (ingest.kind === "invalid") {
-        deps.enforcement.deny(sessionId, "INVALID_TELEMETRY");
+        await deps.enforcement.deny(sessionId, "INVALID_TELEMETRY");
         return { kind: "deny", disposition: "INVALID_TELEMETRY" };
       }
       // kind "conflict" on the submit carrier is NOT a denial either — the
@@ -744,7 +837,7 @@ async function handleSubmitPost(
       // too. Unknown policy fails closed (deny, never default-score).
       const policy = resolveScoringPolicy(profile);
       if (!policy) {
-        deps.enforcement.deny(sessionId, "UNKNOWN_SCORING_POLICY");
+        await deps.enforcement.deny(sessionId, "UNKNOWN_SCORING_POLICY");
         return { kind: "deny", disposition: "UNKNOWN_SCORING_POLICY" };
       }
       const decision = decide(evidence, policy);
@@ -767,14 +860,16 @@ async function handleSubmitPost(
       // QUARANTINE are denied (the host's queue can pick them up from the
       // annotation if desired).
       if (runtimeDisposition !== "ACCEPT") {
-        deps.enforcement.deny(sessionId, decision.disposition, {
+        // P1-10: await durability of the deny annotation (e.g. for a host
+        // that persists review-queue data asynchronously)
+        await deps.enforcement.deny(sessionId, decision.disposition, {
           score: risk.score,
           tier: risk.tier,
           confidence: risk.confidence,
           recommendedAction: risk.recommendedAction,
           evidence: risk.evidence,
         });
-        void finalizeStores(deps, sessionId);
+        await finalizeStores(deps, sessionId);
         return {
           kind: "deny",
           disposition: decision.disposition,
@@ -799,16 +894,25 @@ async function handleSubmitPost(
       // payload must stay Record<string,string>-shaped.
       const cleanForm = stripFireRaidFields(form, profile);
       const cookies = req.headers.get("cookie") ?? "";
-      const upstreamCreated = await deps.enforcement.allow(
+      // P0-4: handle discriminated enforcement result (boolean or EnforcementResult)
+      const enforcementResult = await deps.enforcement.allow(
         deps.upstreamRegisterUrl,
         cleanForm,
         cookies
       );
-      void finalizeStores(deps, sessionId);
+      const upstreamCreated = enforcementResult === true
+        ? true
+        : enforcementResult === false
+          ? false
+          : enforcementResult.kind === "created";
+      const enforcementDetail = typeof enforcementResult === "object" ? enforcementResult : undefined;
+      // P1-10: await durability of store finalization
+      await finalizeStores(deps, sessionId);
       return {
         kind: "admit",
         disposition: decision.disposition,
         upstreamCreated,
+        enforcementDetail,
         sessionId,
         score: decision.score,
         submittedEmail,

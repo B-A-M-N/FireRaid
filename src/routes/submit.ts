@@ -49,7 +49,7 @@ import {
   ingestTelemetryBatch,
   type ValidatedEvent,
 } from "./telemetry.js";
-import { aggregateSessionTelemetry, loadSessionMetrics, mergeSessionMetrics, type SessionMetricsRead } from "../cloudflare/session-metrics.js";
+import { aggregateSessionTelemetry, loadSessionMetrics, mergeSessionMetrics } from "../cloudflare/session-metrics.js";
 import { validateSignupForm } from "../security/request-validation.js";
 import type { TelemetryMetrics } from "../telemetry/aggregate.js";
 import { D1SubmissionFinalizer } from "../cloudflare/session-store.js";
@@ -402,28 +402,47 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   // machine proven equivalent to full aggregation by the parity test) in ONE
   // D1 row read; lab mode uses the raw aggregator for research fidelity.
   if (profile.interaction?.scoringEnabled) {
-    // P1-AUDIT-2 (P0-7): the read is an INTEGRITY result. "complete" carries
-    // behavioral evidence; "incomplete" means the server KNOWS the compact
-    // window is truncated (raw rows pruned/missing) and MUST NOT convert
-    // known-incomplete data into behavioral evidence — interaction
-    // observations stay unset, which under scoring can only ever make the
-    // decision LESS incriminating (fail-open for the user, never evidence).
-    // Lab mode bypasses this entirely: the raw aggregator is the
-    // research-authoritative path and raw rows are always retained there.
-    let read: SessionMetricsRead | null = !isLabMode(env)
-      ? await loadSessionMetrics(env.DB, sessionId, {
-          capturePointer: profile.telemetry.capturePointer,
-          captureKey: profile.telemetry.captureKey,
-        }).catch(() => null)
-      : null;
-    if (read && read.status === "incomplete") {
-      console.warn(
-        `interaction metrics incomplete (through ${read.actualThrough}, expected ${read.expectedThrough}) — scoring without interaction evidence`
-      );
-      read = null;
+    // Telemetry state is tri-valued and preserved through submission:
+    //   complete      -> score compact metrics (authoritative behavioral evidence)
+    //   incomplete    -> NO interaction evidence (known unsafe to score)
+    //   absent        -> explicitly chosen fail-open/no-evidence policy
+    //
+    // "incomplete" means the server KNOWS the compact window is truncated
+    // (raw rows pruned/missing) and MUST NOT convert known-incomplete data
+    // into behavioral evidence — interaction observations stay unset, which
+    // under scoring can only ever make the decision LESS incriminating
+    // (fail-open for the user, never evidence). Lab mode bypasses this
+    // entirely: the raw aggregator is the research-authoritative path and
+    // raw rows are always retained there.
+    let telemetryState: "complete" | "incomplete" | "absent" = "absent";
+    let metrics: TelemetryMetrics | null = null;
+
+    if (!isLabMode(env)) {
+      const read = await loadSessionMetrics(env.DB, sessionId, {
+        capturePointer: profile.telemetry.capturePointer,
+        captureKey: profile.telemetry.captureKey,
+      }).catch(() => null);
+
+      if (read) {
+        telemetryState = read.status;
+        if (read.status === "complete" && read.metrics) {
+          metrics = read.metrics;
+        } else if (read.status === "incomplete") {
+          // Known-incomplete: do NOT fall through to raw aggregation.
+          // Partial behavioral history from pruned raw rows must never be
+          // scored as interaction evidence.
+          console.warn(
+            `interaction metrics incomplete (through ${read.actualThrough}, expected ${read.expectedThrough}) — scoring without interaction evidence`
+          );
+        }
+        // absent: metrics stays null, no evidence emitted.
+      }
     }
-    let metrics: TelemetryMetrics | null = read?.metrics ?? null;
-    if (!metrics) {
+
+    if (!metrics && telemetryState === "absent") {
+      // No compact row at all (or lab mode): fall back to raw aggregation
+      // only when the state is genuinely "absent" — NOT when the server
+      // already knows the data is incomplete.
       try {
         metrics = await aggregateSessionTelemetry(env.DB, sessionId, {
           capturePointer: profile.telemetry.capturePointer,
@@ -435,6 +454,7 @@ export async function submit(req: Request, env: Env): Promise<Response> {
         metrics = null;
       }
     }
+
     if (metrics) {
       observations.directFill = metrics.directFill;
       // veryShortCompletion: no dedicated metric field — completionMs < 3s is
@@ -469,6 +489,9 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   // session.submitted=1 with no submission record.
   const finalizer = new D1SubmissionFinalizer(env.DB);
   const publicId = randomUUID();
+  // P0-2: create a review-queue entry for REVIEW/QUARANTINE dispositions
+  // so human reviewers can see FireRaid's annotation.
+  const createReviewEntry = decision.disposition !== "ACCEPT";
   const { claimed } = await finalizer.finalizeSubmission({
     sessionClaim: { sessionId, score: decision.score, disposition: decision.disposition },
     submission: {
@@ -493,6 +516,7 @@ export async function submit(req: Request, env: Env): Promise<Response> {
       verified: e.verified,
       metadata: (e.metadata ?? {}) as Record<string, unknown>,
     })),
+    createReviewEntry,
   });
 
   if (!claimed) {

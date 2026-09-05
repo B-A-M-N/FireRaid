@@ -95,7 +95,7 @@ describe("P0 origin opacity: decision-blind wire", () => {
       htmlLoader: async () => SIGNUP_HTML,
       port: 0,
       routes: ROUTES,
-      onAssessment: (a) => assessments.push(a),
+      onAssessment: (a) => { assessments.push(a); },
     });
     port = await new Promise<number>((resolve, reject) => {
       server.listen(0, "127.0.0.1", () => {

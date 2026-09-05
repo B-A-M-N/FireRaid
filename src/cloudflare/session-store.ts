@@ -120,6 +120,9 @@ export class D1SubmissionFinalizer implements SubmissionFinalizer {
     sessionClaim,
     submission,
     evidence,
+    // P1-AUDIT-2 (P0-2): create a review-queue entry for non-ACCEPT
+    // dispositions so human reviewers can see FireRaid's annotation.
+    createReviewEntry = false,
   }: {
     sessionClaim: {
       sessionId: string;
@@ -138,8 +141,7 @@ export class D1SubmissionFinalizer implements SubmissionFinalizer {
       disposition: string;
       policy: string;
       reasons: string[];
-      // FR-P0-16: which verification provider adjudicated (e.g. "turnstile",
-      // "none" when no provider is configured). Disambiguates turnstile_ok.
+      /** FR-P0-16: provider name (e.g. "turnstile"), or "none" when unset. */
       verificationProvider: string;
     };
     evidence: Array<{
@@ -149,6 +151,8 @@ export class D1SubmissionFinalizer implements SubmissionFinalizer {
       verified: boolean;
       metadata: Record<string, unknown>;
     }>;
+    /** When true, INSERT a review-queue entry (same batch) for reviewer annotation. */
+    createReviewEntry?: boolean;
   }): Promise<{ claimed: boolean }> {
     // Statement 1: conditional session claim
     const claimStmt = this.db
@@ -184,6 +188,28 @@ export class D1SubmissionFinalizer implements SubmissionFinalizer {
         JSON.stringify(submission.reasons)
       );
 
+    // P0-2: review-queue entry for non-ACCEPT dispositions (REVIEW/QUARANTINE).
+    // Human reviewers need FireRaid's annotation to make a decision.
+    // Conditional — only inserted when createReviewEntry is true.
+    let reviewStmt: ReturnType<D1Database["prepare"]> | undefined;
+    if (createReviewEntry) {
+      reviewStmt = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO review_queue (session_id, public_id, created_at, risk_score, risk_tier, disposition, policy, reasons_json, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+        )
+        .bind(
+          submission.sessionId,
+          submission.publicId,
+          submission.createdAt,
+          submission.riskScore,
+          submission.disposition === "REVIEW" ? "ELEVATED" : "HIGH",
+          submission.disposition,
+          submission.policy,
+          JSON.stringify(submission.reasons)
+        );
+    }
+
     // Statements 3: per-evidence inserts — the AUDIT-PRESCRIBED form
     // (INSERT ... SELECT ... WHERE public_id = ?): a raced loser's
     // public_id matches no row, the SELECT yields ZERO rows, and the
@@ -212,7 +238,7 @@ export class D1SubmissionFinalizer implements SubmissionFinalizer {
         );
     });
 
-    const stmts = [claimStmt, insertStmt, ...evidenceStmts];
+    const stmts = [claimStmt, insertStmt, ...(reviewStmt ? [reviewStmt] : []), ...evidenceStmts];
     const results = await this.db.batch(stmts);
 
     // Statement 0 result (claim) — D1 batch returns D1Result[]

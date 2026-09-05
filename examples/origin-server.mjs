@@ -148,7 +148,7 @@ const middlewareDeps = {
   render: { inject: referenceInject },
   // Host-owned verification: this origin answers its own verification
   // challenges. (The reference disabled-test adapter is REFUSED here.)
-  verification: new HostOwnedVerificationAdapter(() => true),
+  verification: new HostOwnedVerificationAdapter(async () => true),
   telemetry: new ReferenceTelemetryAdapter(),
   enforcement: new ReferenceEnforcementAdapter(),
   // P0 route-evidence capability: REQUIRED for the production strategy

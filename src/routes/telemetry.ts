@@ -28,6 +28,7 @@ import {
 import { MAX_EVENT_PAYLOAD_BYTES } from "../types/telemetry.js";
 import { isLabMode } from "../env.js";
 import { foldSessionMetrics } from "../cloudflare/session-metrics.js";
+import { readJsonBody } from "../security/body-limits.js";
 
 /** Canonical validated telemetry event shape. */
 // Canonical batch validation lives in the PRODUCT telemetry module (P0
@@ -213,7 +214,10 @@ export async function events(req: Request, env: Env): Promise<Response> {
 
   let body: { events?: unknown };
   try {
-    body = (await req.json()) as { events?: unknown };
+    // P1-8: bounded JSON reader — rejects oversized payloads before parsing
+    const parsed = await readJsonBody(req, MAX_EVENT_PAYLOAD_BYTES);
+    if (!parsed) return error("invalid JSON or payload too large", 400);
+    body = parsed as { events?: unknown };
   } catch {
     return error("invalid JSON", 400);
   }
