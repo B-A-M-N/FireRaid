@@ -295,8 +295,8 @@ describe("P1-22 opaque production carriers", () => {
       csrfToken: "csrf-x",
       evaluationMode: false,
     });
-    // Production decoy hides via SELF-CONTAINED inline styles — no class
-    // dependency at all (the audit removed fr-hidden-neutral).
+    // P0-7: production decoy hides via self-contained inline styles. The
+    // constant style string is allowlisted in the CSP via a SHA-256 hash.
     const decoyEl = html.match(
       new RegExp(`<input type="text" name="testfield123"[^>]*>`)
     );
@@ -320,6 +320,8 @@ describe("P1-22 opaque production carriers", () => {
       '<html><body><form id="signup-form"></form></body></html>',
       profile, "csrf-x", false
     );
+    // P0-7: production decoy hides via self-contained inline styles. The
+    // constant style string is allowlisted in the CSP via a SHA-256 hash.
     const input = html.match(
       new RegExp(`<input[^>]*hostfield123[^>]*>`)
     )?.[0] ?? "";

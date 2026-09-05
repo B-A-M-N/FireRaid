@@ -81,10 +81,11 @@ wiring time and throws `MiddlewareConfigError` on any gap:
 
 ```ts
 const deps = createFireRaidMiddleware({
-  secret, version: 1,
+  profileKeys: { current: { id: "default", secret } }, // key ring (REQUIRED)
+  version: 1,
   routes: {
     applicationPage: "/signup",
-    applicationSubmit: "/signup",
+    applicationSubmit: "/api/submit",
     telemetry: "/api/events",
     canaryPrefix: "/c/",
   },
@@ -94,12 +95,12 @@ const deps = createFireRaidMiddleware({
   telemetry: new ReferenceTelemetryAdapter(),
   enforcement: { allow: myUpstreamCreate, deny: myDenyHook },
   canaryStore: new ReferenceCanaryStore(),
-  verification: myVerifier, // optional
+  verification: myVerifier, // optional — must be a real verifier
 });
 
 // GET applicationPage → inject page (sets the signed session cookie)
 // POST applicationSubmit → admit():
-const result = await admit(request, deps);
+const result = await admit(request, deps, htmlLoader);
 // result.disposition / result.score / result.risk — HOST-INTERNAL.
 // The middleware's HTTP responses are decision-blind: a denied submission
 // and an accepted one are indistinguishable on the wire.
