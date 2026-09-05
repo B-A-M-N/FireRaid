@@ -1,6 +1,6 @@
 {
   "schema": "fireraid-evidence-ledger/1",
-  "updated": "2026-09-04",
+  "updated": "2026-09-05",
   "description": "Canonical machine-readable claim registry. Every doc-level claim about efficacy, deployment behavior, or defense posture is registered here with its evidence tier and pointers. Where any prose document disagrees with this ledger, THE LEDGER WINS and the prose must be corrected in the same change. Validated by tests/unit/evidence-ledger.test.ts and scripts/release-verify.mjs.",
   "tier_vocabulary": {
     "IMPLEMENTED": "The capability exists in code with a passing test that pins its behavior.",
@@ -120,13 +120,13 @@
       "tier": "LOCALLY_VERIFIED",
       "doc_anchor": "docs/RELEASE-STATUS.md claim 10",
       "evidence": [
-        { "kind": "manual", "ref": "live smoke 2026-09-03", "detail": "fireraid-production.benevolentjoker.workers.dev (version b401da70): D1 fireraid-production + full 16-migration chain applied remotely; profile/CSRF/Turnstile secrets via wrangler secret; config validator fail-closed LIVE (503 'Production requires TURNSTILE_EXPECTED_HOSTNAME' before Turnstile was configured); post-config smoke: /signup 200 with clean production plane, Turnstile script + sitekey wired; headless submit without a solved token -> 403 verification_required (fail-closed); solved-widget human submission -> success receipt.", "deployed_sha": "b401da70" }
+        { "kind": "manual", "ref": "live smoke 2026-09-03", "detail": "fireraid-production.benevolentjoker.workers.dev (version b401da70): D1 fireraid-production + full 16-migration chain applied remotely; profile/CSRF/Turnstile secrets via wrangler secret; config validator fail-closed LIVE (503 'Production requires TURNSTILE_EXPECTED_HOSTNAME' before Turnstile was configured); post-config smoke: /signup 200 with clean production plane, Turnstile script + sitekey wired; headless submit without a solved token -> 403 verification_required (fail-closed); solved-widget human submission -> success receipt." }
       ],
       "scope_limits": [
         "NOT MEASURED: sustained production traffic behavior, custom-domain routing, cron-driven retention on the remote schedule.",
         "User-gated evidence: a redeploy smoke is the owner's call (costs money / touches the internet); release:verify does not attest this claim.",
         "FR-P0-05 freshness: the recorded smoke (2026-09-03) predates migration 0017 and the current HEAD; it does NOT certify that this SHA's 17-migration chain is applied remotely. A stable release requires a fresh post-deploy smoke against the exact deployed worker version, recorded here, before the ledger's smoke tier can be treated as current.",
-        "FR-P1-14 currentness: the release gate 'remote-smoke-current' fails while evidence['remote-deployment-smoke'].deployed_sha does not equal the current HEAD — a stale smoke can no longer be carried forward silently; a new smoke must be recorded with its exact deployed SHA before the release gate goes green."
+        "FR-P0-A currentness: the CURRENT release's smoke attestation lives in the UNTRACKED release-smoke-receipt.json (recorded via npm run release:smoke:record after deploying the exact HEAD SHA), NOT in this ledger — post-deploy evidence cannot be stored inside the git object it certifies. release:verify claims release_ready only when that receipt matches HEAD. This ledger entry records smoke HISTORY; it is never the current release's attestation."
       ]
     }
   ]

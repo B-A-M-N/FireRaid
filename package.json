@@ -30,13 +30,15 @@
     "test:e2e:ci": "playwright install chromium firefox webkit && playwright test",
     "deploy": "wrangler deploy --env production",
     "deploy:lab": "wrangler deploy --env public-lab",
-    "predeploy:production": "node scripts/predeploy-production.mjs",
-    "deploy:production": "npm run predeploy:production && wrangler deploy --env production",
+    "predeploy:production": "node scripts/predeploy-production.mjs --local",
+    "predeploy:production:deploy": "node scripts/predeploy-production.mjs --deploy",
+    "deploy:production": "npm run predeploy:production:deploy && wrangler deploy --env production",
     "experiment": "tsx harness/core/runner.ts",
     "analyze": "python3 harness/analysis/analyze.py",
     "release:verify:fast": "node scripts/release-verify.mjs fast",
     "release:verify:full": "node scripts/release-verify.mjs full",
-    "release:verify": "node scripts/release-verify.mjs full"
+    "release:verify": "node scripts/release-verify.mjs full",
+    "release:smoke:record": "node scripts/release-smoke-record.mjs"
   },
   "dependencies": {
     "@types/node": "^22.20.1",

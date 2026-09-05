@@ -57,7 +57,7 @@ Summary (tiers as of the ledger's `updated` date):
 - `npm run release:verify` — runs the deterministic gates (typecheck, lint,
   unit, product boundary, worker isolation, origin budget) and stamps
   `release-evidence.json` with git SHA + dirty flag + the ledger tier map.
-  `release_candidate: true` requires a CLEAN tree in FULL mode; dirty
+  `local_candidate: true` requires a CLEAN tree in FULL mode; dirty
   evidence is still written for iteration but flagged. A missing or
   malformed evidence ledger fails the run (fail-closed).
 - Items 8 and 10 are user-gated: a real benchmark run, and a remote deploy

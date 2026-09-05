@@ -223,13 +223,15 @@ npx wrangler d1 migrations apply fireraid-production --env production --remote
 #    REFUSED until this is declared (FR-P1-07).
 #    → wrangler.jsonc → env.production.vars.FIRERAID_RATE_LIMIT_LOGIN
 
-# 5. Preflight + deploy. predeploy:production runs FIRST and fails closed on
-#    a placeholder/absent production DB id, a collision with the public-lab DB,
-#    LAB_MODE != false, a missing TURNSTILE_EXPECTED_HOSTNAME, an undeclared
-#    AUTHORITATIVE LOGIN LIMITER, a production Worker that bundles the eval
-#    control plane, a failed dry-run, or unapplied remote migrations (it
-#    refuses to certify "none" without a live CLOUDFLARE_API_TOKEN).
-npm run deploy:production        # == predeploy:production && wrangler deploy --env production
+# 5. Preflight + deploy. The deploy runs the preflight in --deploy mode FIRST
+#    (FR-P0-D): remote migration verification is REQUIRED there — a missing
+#    CLOUDFLARE_API_TOKEN, an auth failure, or unparseable wrangler output is a
+#    HARD failure, never a skip. It also fails closed on a placeholder/absent
+#    production DB id, a collision with the public-lab DB, LAB_MODE != false, a
+#    missing TURNSTILE_EXPECTED_HOSTNAME, an undeclared AUTHORITATIVE LOGIN
+#    LIMITER, a production Worker that bundles the eval control plane, or a
+#    failed dry-run.
+npm run deploy:production        # == predeploy(--deploy mode) && wrangler deploy --env production
 npm run deploy:lab               # named-env deploys only
 
 # The production Worker (env production / production-test) binds
@@ -240,12 +242,21 @@ npm run deploy:lab               # named-env deploys only
 ```
 
 After the deploy, smoke the **exact deployed worker version** against the
-production Worker (see `docs/evidence-ledger.json` → `remote-deployment-smoke`
-for the canonical smoke record): `/signup` 200 on the clean production plane,
-a headless submit without a solved Turnstile token returns `403
-verification_required` (fail-closed), and a solved-widget submission reaches a
-success receipt. Record the fresh smoke (with the deployed version string) in
-the ledger before treating the SHA as a stable release.
+production Worker: `/signup` 200 on the clean production plane, a headless
+submit without a solved Turnstile token returns `403 verification_required`
+(fail-closed), and a solved-widget submission reaches a success receipt. Then
+record the EXTERNAL smoke receipt (FR-P0-A — post-deploy evidence must not be
+committed into the git object it certifies, so the receipt is untracked):
+
+    npm run release:smoke:record -- \
+      --git-sha "$(git rev-parse HEAD)" \
+      --worker-version <wrangler version id from the deploy output> \
+      --url https://fireraid-production.<subdomain>.workers.dev \
+      --checks signup_page,submit_failclosed,human_submit
+
+The next `npm run release:verify` run reads the receipt and claims
+`release_ready` for that SHA. (The ledger's `remote-deployment-smoke` entry
+records smoke HISTORY; the current release's attestation is the receipt.)
 
 ## Testing
 

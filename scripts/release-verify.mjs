@@ -9,13 +9,31 @@
  *                          envelope, budget, ledger-proof, package-contract,
  *                          e2e, e2e:production, a11y, examples
  *
- * Only `full` may produce release_candidate:true.
+ * Only `full` may produce local_candidate:true.
  *
  * What this script deliberately does NOT do:
  *   - It does not run the LLM benchmark. Efficacy is a MEASURED item backed
  *     by a completed experiment directory, not a release gate.
  *   - It does not verify a remote deployment. That is user-gated (needs
  *     real credentials and an internet-facing origin).
+ *
+ * FR-P0-A — THREE RELEASE TIERS, externally attested:
+ *
+ *   local_candidate  — every deterministic local (source/package) gate
+ *                      passed for this exact clean tree. What this script
+ *                      computes directly.
+ *   deploy_ready     — local_candidate + production preflight fully passing
+ *                      (no FAIL, no SKIP — the remote migration state was
+ *                      actually verified against the live database).
+ *   release_ready    — deploy_ready + an EXTERNAL smoke receipt
+ *                      (release-smoke-receipt.json, untracked) proving the
+ *                      exact candidate SHA was deployed and the deployed
+ *                      artifact smoked. The receipt lives OUTSIDE git
+ *                      because post-deploy evidence cannot be stored inside
+ *                      the git object it certifies: committing
+ *                      deployed_sha=<A> into a tracked file makes HEAD move
+ *                      to B and the attestation self-invalidating (the old
+ *                      remote-smoke-current gate had no fixed point).
  *
  * Claims vocabulary (owned by docs/evidence-ledger.json — the machine
  * readable registry this script embeds into the evidence file):
@@ -26,19 +44,32 @@
  *   MEASURED              — a completed, matched experiment supports the claim
  *   NOT_YET_ESTABLISHED   — no evidence at the required tier
  *
- * Exit: 0 iff every gate passed. Evidence is written either way.
+ * Exit: 0 iff every source/package gate passed. Evidence is written either way.
  *
  * Usage:
  *   npm run release:verify:fast
  *   npm run release:verify:full
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MODE = process.argv[2] === "full" ? "full" : "fast";
+
+// Expected production-preflight check IDs (FR-P0-B: fail closed when one
+// disappears — a silently renamed check must never read as "absent = fine").
+const EXPECTED_PREFLIGHT_CHECKS = new Set([
+  "lab-mode",
+  "production-db-id",
+  "production-db-distinct",
+  "production-hostname",
+  "rate-limit-login",
+  "production-graph",
+  "dry-run",
+  "remote-migrations",
+]);
 
 // --- git provenance ---
 function git(args) {
@@ -81,55 +112,79 @@ runGate("origin-budget", "npm", ["run", "test:origin-budget"]);
 // must not certify a production artifact that bundles the evaluation plane.
 runGate("production-graph", "npm", ["run", "check:production-graph"]);
 
-// ── FR-P1-13: deterministic production preflight in the release evidence ──
-// release_candidate above attests the LOCALLY VERIFIED source/package tier.
-// "deploy-ready" additionally requires the deterministic production preflight
-// (config gates, production-graph, prod dry-run) to pass AND the deploy-
-// verifiable remote-migration check to not be skipped. With no Cloudflare
-// token the remote check SKIPs, so deploy_ready stays false — a deploy cannot
-// be certified deploy-ready against an unverifiable live database.
-let preflight = { checks: [], passed: 0, skipped: 0, failed: 0, exit: -1 };
+// ── FR-P0-B: deterministic production preflight, fail-closed parse ──────
+// local_candidate attests the LOCALLY VERIFIED source/package tier.
+// "deploy_ready" additionally requires the production preflight to pass
+// with NO skip (a --local preflight run without a Cloudflare token leaves
+// remote-migrations SKIPped → deploy_ready stays false — a deploy cannot
+// be certified deploy-ready against an unverifiable live database).
+//
+// FAIL-CLOSED PARSING: a preflight that emitted unparseable stdout, or a
+// check set missing an expected ID, is a FAILING preflight — never a
+// synthesized zero-failure result.
+let preflight = null;
+let preflightParseError = null;
 {
   const t0 = Date.now();
-  const r = spawnSync("node", ["scripts/predeploy-production.mjs", "--json"], {
+  const r = spawnSync("node", ["scripts/predeploy-production.mjs", "--local", "--json"], {
     cwd: ROOT,
     encoding: "utf-8",
     timeout: 5 * 60_000,
     shell: false,
   });
+  let parsed = null;
   try {
-    preflight = JSON.parse(r.stdout);
-    preflight.exit = r.status;
-  } catch {
-    // Preflight did not emit parseable JSON — treat as a failed gate.
-    preflight = { checks: [], passed: 0, skipped: 0, failed: 0, exit: r.status };
+    parsed = JSON.parse(r.stdout);
+  } catch (err) {
+    preflightParseError = `unparseable preflight stdout (${err.message}): ${String(r.stdout).slice(0, 400)}`;
   }
-  // FR-P1-13: a DEPLOY gate, not a source/package gate. It is recorded in the
-  // evidence and drives deploy_ready, but does NOT pull release_candidate: a
-  // bad deploy config (a placeholder edge-limiter, an unlabelled env) must be
-  // an operator action, not a false "the source is not a release candidate".
-  // The code-bound halves of preflight (production-graph, prod dry-run) are
-  // ALSO independently gated above/below so a code defect still fails the
-  // release, not just the deploy.
+  if (parsed && typeof parsed === "object" && Array.isArray(parsed.checks)) {
+    const presentIds = new Set(parsed.checks.map((c) => c?.name));
+    const missing = [...EXPECTED_PREFLIGHT_CHECKS].filter((id) => !presentIds.has(id));
+    if (missing.length > 0) {
+      preflightParseError = `preflight check set is missing expected IDs: ${missing.join(", ")}`;
+    } else if (typeof parsed.failed !== "number" || typeof parsed.skipped !== "number") {
+      preflightParseError = "preflight JSON lacks numeric failed/skipped counts";
+    } else {
+      preflight = parsed;
+      preflight.exit = r.status;
+    }
+  } else if (!preflightParseError) {
+    preflightParseError = "preflight JSON lacks a checks array";
+  }
+  // A parse/validation failure synthesizes a FAILING preflight — never a
+  // zero-failure one.
+  if (!preflight) {
+    preflight = {
+      mode: "local",
+      checks: [],
+      passed: 0,
+      skipped: 0,
+      failed: 1,
+      exit: r.status,
+      parse_error: preflightParseError,
+    };
+  }
   gates.push({
     name: "production-preflight",
     deploy_gate: true,
-    command: "node scripts/predeploy-production.mjs --json",
-    status: r.status === 0 && preflight.failed === 0 ? "PASS" : "FAIL",
+    command: "node scripts/predeploy-production.mjs --local --json",
+    status: preflight.failed === 0 ? "PASS" : "FAIL",
     exit_code: r.status,
     duration_ms: Date.now() - t0,
-    detail: `${preflight.passed} passed, ${preflight.skipped} skipped, ${preflight.failed} failed`,
+    detail: preflightParseError
+      ? `parse/validation error: ${preflightParseError}`
+      : `${preflight.passed} passed, ${preflight.skipped} skipped, ${preflight.failed} failed`,
   });
   console.log(`[${preflight.failed === 0 ? "PASS" : "FAIL"}] production-preflight (deploy gate) (${preflight.passed}p/${preflight.skipped}s/${preflight.failed}f)`);
 }
 const preflightLocalClean = preflight.failed === 0; // no FAIL in local determinism
 const preflightNoSkips = preflight.skipped === 0;   // no SKIP (remote verified)
 
-// P2 / FR-P1-14: the claim registry lives in docs/evidence-ledger.json
-// (validated by tests/unit/evidence-ledger.test.ts). Load it HIGH so both the
-// smoke-currentness gate below and the release_tiers summary can read it.
-// Fail-closed: a missing or malformed registry is a release-blocking
-// inconsistency, not something to paper over.
+// P2: the claim registry lives in docs/evidence-ledger.json (validated by
+// tests/unit/evidence-ledger.test.ts). Load it HIGH so the release_tiers
+// summary can read it. Fail-closed: a missing or malformed registry is a
+// release-blocking inconsistency, not something to paper over.
 let ledgerRegistry = null;
 let ledgerSummary = null;
 try {
@@ -148,48 +203,79 @@ try {
   });
 }
 
-// FR-P1-14: the recorded remote-deployment smoke must have been performed on
-// THIS exact HEAD — a smoke recorded for an older SHA certifies nothing about
-// the tree being released. This gate reads the machine-readable deployed_sha
-// from the ledger's remote-deployment-smoke claim and fails while it does not
-// equal the current HEAD. It is a SOURCE/PACKAGE gate (not a deploy gate): a
-// stale smoke means the operational evidence attached to this release is
-// stale, so it blocks release_candidate too, forcing a fresh post-deploy smoke
-// record before the release can be certified. The re-run itself is user-gated
-// (needs a live CLOUDFLARE_API_TOKEN and touches the internet) — this gate
-// makes the requirement enforced rather than aspirational.
+// ── FR-P0-A: the EXTERNAL smoke receipt (release_ready tier) ────────────
+// release-smoke-receipt.json is UNTRACKED (.gitignore) — post-deployment
+// evidence must not live inside the git object it certifies. When present,
+// this gate validates it: schema, exact-SHA match against HEAD, and the
+// required smoke checks. When absent, release_ready is simply not claimable
+// this run (the receipt is recorded post-deploy, by the deploy runbook) —
+// this does NOT block local_candidate, which is the tier this script
+// certifies. The recorded receipt is what a release announcer must check
+// before declaring release_ready.
+let smokeReceipt = null;
 {
   const t0 = Date.now();
-  const smokeClaim = ledgerRegistry?.claims?.find(
-    (c) => c.id === "remote-deployment-smoke"
-  );
-  const smokeEv = smokeClaim?.evidence?.find(
-    (e) => typeof e?.deployed_sha === "string" && e.deployed_sha.length > 0
-  );
-  const smokeSha = smokeEv?.deployed_sha ?? null;
-  const smokeDetail = smokeEv?.detail ?? null;
-  const smokeCurrent = smokeSha !== null && smokeSha === sha;
-  gates.push({
-    name: "remote-smoke-current",
-    command: "docs/evidence-ledger.json remote-deployment-smoke evidence[].deployed_sha === HEAD",
-    status: smokeCurrent ? "PASS" : "FAIL",
-    exit_code: smokeCurrent ? 0 : 1,
-    duration_ms: Date.now() - t0,
-    detail: smokeCurrent
-      ? "recorded live smoke was performed on this exact HEAD"
-      : smokeSha === null
-        ? "no machine-readable deployed_sha recorded on the remote-deployment-smoke claim — a stale manual smoke is being carried forward; record a fresh smoke with its exact deployed SHA against the current HEAD, then re-run"
-        : `recorded smoke is for ${smokeSha}, but current HEAD is ${sha} — the smoke evidence is STALE and certifies nothing about this tree; perform a fresh post-deploy smoke against this HEAD and record its deployed_sha, then re-run`,
-  });
-  gates.push({
-    name: "smoke-evidence-recorded",
-    command: "docs/evidence-ledger.json remote-deployment-smoke evidence detail",
-    status: smokeDetail ? "PASS" : "FAIL",
-    exit_code: smokeDetail ? 0 : 1,
-    duration_ms: 0,
-    detail: smokeDetail ? "human smoke record present" : "remote-deployment-smoke claim carries no detail record",
-  });
-  console.log(`[${smokeCurrent ? "PASS" : "FAIL"}] remote-smoke-current (deployed_sha ${smokeSha ?? "none"} vs HEAD ${sha})`);
+  const receiptPath = join(ROOT, "release-smoke-receipt.json");
+  let gate;
+  if (!existsSync(receiptPath)) {
+    gate = {
+      name: "release-smoke-receipt",
+      release_tier_gate: true,
+      command: "read release-smoke-receipt.json",
+      status: "ABSENT",
+      exit_code: 0,
+      duration_ms: Date.now() - t0,
+      detail: "no external smoke receipt present — release_ready is not claimable for this SHA until a receipt is recorded post-deploy (npm run release:smoke:record -- …); local_candidate/deploy_ready are unaffected",
+    };
+  } else {
+    try {
+      const parsed = JSON.parse(readFileSync(receiptPath, "utf-8"));
+      const requiredChecks = ["signup_page", "submit_failclosed", "human_submit"];
+      const missingChecks = requiredChecks.filter(
+        (c) => parsed.checks?.[c]?.ok !== true
+      );
+      const shaMatch = parsed.git_sha === sha;
+      const workerVersion = typeof parsed.worker_version_id === "string" && parsed.worker_version_id.length > 0;
+      if (!shaMatch || !workerVersion || missingChecks.length > 0) {
+        gate = {
+          name: "release-smoke-receipt",
+          release_tier_gate: true,
+          command: "read release-smoke-receipt.json",
+          status: "FAIL",
+          exit_code: 1,
+          duration_ms: Date.now() - t0,
+          detail: !shaMatch
+            ? `receipt git_sha ${parsed.git_sha} does not match HEAD ${sha}`
+            : !workerVersion
+              ? "receipt lacks a worker_version_id"
+              : `receipt smoke checks failed/missing: ${missingChecks.join(", ")}`,
+        };
+      } else {
+        gate = {
+          name: "release-smoke-receipt",
+          release_tier_gate: true,
+          command: "read release-smoke required checks",
+          status: "PASS",
+          exit_code: 0,
+          duration_ms: Date.now() - t0,
+          detail: `receipt matches HEAD ${sha}; worker_version_id ${parsed.worker_version_id}`,
+        };
+        smokeReceipt = parsed;
+      }
+    } catch (err) {
+      gate = {
+        name: "release-smoke-receipt",
+        release_tier_gate: true,
+        command: "read release-smoke-receipt.json",
+        status: "FAIL",
+        exit_code: 1,
+        duration_ms: Date.now() - t0,
+        detail: `receipt present but unparseable: ${err.message}`,
+      };
+    }
+  }
+  gates.push(gate);
+  console.log(`[${gate.status}] release-smoke-receipt (${gate.detail})`);
 }
 
 // --- full gates (only in full mode) ---
@@ -209,51 +295,48 @@ runGate("e2e:production", "npm", ["run", "test:e2e:production"], { slow: true })
 runGate("a11y", "npm", ["run", "test:a11y"], { slow: true });
 runGate("examples", "npx", ["tsc", "--noEmit"], { slow: true });
 
-// FR-P1-13: release_candidate / exit code reflect the SOURCE/PACKAGE gates
-// only. A deploy-gate (production-preflight) FAIL records in evidence and
-// drives deploy_ready but does not make "the locally verified source is not a
-// release candidate" — deploy config is an operator decision at deploy time.
-const sourceGates = gates.filter((g) => !g.deploy_gate);
+// FR-P1-13: the three release tiers. local_candidate reflects the
+// SOURCE/PACKAGE gates only. deploy_ready additionally requires the
+// preflight deploy gate. release_ready additionally requires the external
+// smoke receipt matching THIS HEAD.
+const sourceGates = gates.filter((g) => !g.deploy_gate && !g.release_tier_gate);
 const allPassed = sourceGates.every((g) => g.status === "PASS");
-const preflightGate = gates.find((g) => g.name === "production-preflight");
 
-// P2: the claim registry (ledgerRegistry / ledgerSummary) was loaded high,
-// above the smoke currentness gate. This run only attests the LOCALLY_VERIFIED
-// tier — the gates above — and embeds the ledger's tier summary verbatim so
-// the evidence file can never drift from the registry.
-
-// FR-P1-13 distinction: release_candidate is the LOCALLY VERIFIED source/
-// package tier — a full clean local gate for this SHA. deploy_ready is a
-// STRONGER claim: it additionally requires the deterministic production
-// preflight to fully pass (no FAIL) AND no preflight SKIP — meaning the
-// deploy-verifiable remote-migration state was actually checked (a live
-// CLOUDFLARE_API_TOKEN), so this SHA is safe to deploy against the current
-// live database. Without a token, deploy_ready is false even though the local
-// candidate is sound: a deploy's permissions are decided at deploy time.
+const localCandidate = MODE === "full" && !dirty && allPassed;
 const deployReady =
   MODE === "full" && !dirty && allPassed &&
   preflightLocalClean && preflightNoSkips;
+const releaseReady = deployReady && smokeReceipt !== null;
 
 const evidence = {
-  schema: "fireraid-release-evidence/3",
+  schema: "fireraid-release-evidence/4",
   mode: MODE,
   generated_at: new Date().toISOString(),
   git: {
     sha,
     dirty,
-    // Only `full` mode may produce release_candidate:true.
-    release_candidate: MODE === "full" && !dirty && allPassed,
+    // Only `full` mode may produce local_candidate:true.
+    local_candidate: localCandidate,
   },
-  // FR-P1-13: local source/package candidate vs deploy-ready against the live
-  // database are now distinct, machine-readable facts.
+  // FR-P1-13/FR-P0-A: local source/package candidate vs deploy-ready vs
+  // release-ready are distinct, machine-readable facts.
   production: {
+    local_candidate: localCandidate,
     deploy_ready: deployReady,
+    release_ready: releaseReady,
     preflight_checks: preflight.checks,
     preflight_local_clean: preflightLocalClean,
     preflight_no_skips: preflightNoSkips,
-    note: deployReady
-      ? "deterministic preflight passed AND remote migration state verified against the live database"
-      : "release_candidate attests the locally-verified source/package tier; deploy_ready additionally requires a fully-passing production preflight with the remote migration check run (CLOUDFLARE_API_TOKEN).",
+    smoke_receipt: smokeReceipt
+      ? { git_sha: smokeReceipt.git_sha, worker_version_id: smokeReceipt.worker_version_id, recorded_at: smokeReceipt.recorded_at }
+      : null,
+    note: releaseReady
+      ? "all three release tiers satisfied: local gates, verified remote migrations, exact-SHA smoke receipt"
+      : deployReady
+        ? "local gates passed AND remote migration state verified; record the post-deploy smoke receipt (release-smoke-receipt.json) to claim release_ready"
+        : localCandidate
+          ? "locally-verified source/package tier; deploy_ready additionally requires a fully-passing production preflight with the remote migration check run (CLOUDFLARE_API_TOKEN)."
+          : "local gates failing or fast mode — not a local candidate",
   },
   gates,
   claim_tiers: {
@@ -272,14 +355,19 @@ writeFileSync(outPath, JSON.stringify(evidence, null, 2) + "\n");
 console.log(`\nevidence: ${outPath}`);
 console.log(`mode: ${MODE}`);
 console.log(`gates: ${sourceGates.filter((g) => g.status === "PASS").length}/${sourceGates.length} source/package gates passed` +
-  (preflightGate ? `; production-preflight (deploy gate): ${preflightGate.status}` : "") +
   (MODE === "fast" ? ` (${sourceGates.filter((g) => g.skipped).length} skipped in fast mode)` : ""));
-console.log(`release_candidate: ${evidence.git.release_candidate}`);
-let deployReadyNote = "full mode required";
+console.log(`local_candidate: ${localCandidate}`);
+let deployNote = "full mode required";
 if (MODE === "full") {
-  if (!preflightLocalClean) deployReadyNote = "production preflight has FAILs";
-  else if (!preflightNoSkips) deployReadyNote = "preflight passed; remote migration check SKIPPED (no CLOUDFLARE_API_TOKEN)";
-  else deployReadyNote = "preflight passed + remote migrations verified";
+  if (!preflightLocalClean) deployNote = "production preflight has FAILs";
+  else if (!preflightNoSkips) deployNote = "preflight passed; remote migration check SKIPPED (no CLOUDFLARE_API_TOKEN)";
+  else deployNote = "preflight passed + remote migrations verified";
 }
-console.log(`deploy_ready: ${deployReady} (${deployReadyNote})`);
+console.log(`deploy_ready: ${deployReady} (${deployNote})`);
+const releaseNote = !deployReady
+  ? "deploy_ready required first"
+  : smokeReceipt
+    ? "smoke receipt matches this HEAD"
+    : "record the post-deploy smoke receipt to claim release_ready";
+console.log(`release_ready: ${releaseReady} (${releaseNote})`);
 process.exit(allPassed ? 0 : 1);

@@ -42,7 +42,7 @@ interface EvidenceLedger {
     statement: string;
     tier: string;
     doc_anchor: string;
-    evidence: Array<{ kind: string; ref?: string; id?: string; dir?: string; role?: string; detail?: string; deployed_sha?: string }>;
+    evidence: Array<{ kind: string; ref?: string; id?: string; dir?: string; role?: string; detail?: string }>;
     scope_limits?: string[];
     notes?: string;
   }>;
@@ -94,13 +94,18 @@ describe("evidence ledger schema", () => {
         if (ev.kind === "manual") {
           expect(typeof ev.detail, `${claim.id} manual detail`).toBe("string");
         }
-        // FR-P1-14: a live-deployment smoke recorded as manual evidence must
-        // carry a machine-readable deployed_sha so release-verify's
-        // remote-smoke-current gate can compare it to HEAD. Without it, a stale
-        // smoke can be carried forward silently.
+        // FR-P0-A: the remote-deployment-smoke claim must carry a scope limit
+        // pointing at the EXTERNAL smoke receipt mechanism — post-deploy
+        // evidence lives in the untracked release-smoke-receipt.json (and
+        // must never be committed into the git object it certifies), so the
+        // ledger's manual entry records history, not the current release's
+        // mutable attestation.
         if (claim.id === "remote-deployment-smoke") {
-          expect(typeof ev.deployed_sha, `${claim.id} deployed_sha`).toBe("string");
-          expect(ev.deployed_sha!.length, `${claim.id} deployed_sha nonempty`).toBeGreaterThan(0);
+          const limits = claim.scope_limits ?? [];
+          expect(
+            limits.some((s) => s.includes("release-smoke-receipt.json")),
+            `${claim.id}: must reference the external release-smoke-receipt.json mechanism in scope_limits`
+          ).toBe(true);
         }
       }
     }

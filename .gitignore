@@ -12,6 +12,9 @@ harness/results/**/*.json
 !harness/results/.gitkeep
 # Per-tree release evidence (npm run release:verify) — regenerated per run.
 release-evidence.json
+# FR-P0-A: the post-deploy smoke receipt — external evidence by design; it
+# must never be committed into the git object it certifies.
+release-smoke-receipt.json
 playwright-report/
 test-results/
 *.log
