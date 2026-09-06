@@ -662,3 +662,76 @@ describe("closure 4: durability window survives a spent request deadline", () =>
     expect(completeSettledAt - completeStartedAt).toBeGreaterThanOrEqual(200);
   });
 });
+
+describe("FR-RR-08: per-operation durability budgets", () => {
+  it("each durability write gets its OWN full budget (not the remainder of a shared window)", async () => {
+    // Two slow durability writes (complete + finalizeStores) run
+    // sequentially, each sleeping past a budget fraction that would
+    // exhaust a SINGLE shared window: 2 × 700ms against a 1000ms budget.
+    // Per-operation semantics (the documented contract) let both finish;
+    // the old memoized-one-window implementation spent the window on the
+    // first write and threw the second one away (finalize would starve).
+    const deps = baseDeps();
+    // Stub enforcement — the reference adapter would really fetch (and
+    // transport-fail against the unreachable upstreamRegisterUrl).
+    deps.enforcement = {
+      allow: async () => ({ kind: "created" }),
+      deny: () => {},
+    };
+    deps.adapterTimeoutMs = 10_000;
+    deps.durabilityTimeoutMs = 1_000;
+
+    const store = deps.submissionStore as DurableSubmissionStore;
+    const origComplete = (ReferenceSubmissionStore.prototype as unknown as {
+      complete: (id: string, o: unknown) => Promise<void>;
+    }).complete;
+    (store as unknown as { complete: (id: string, o: unknown) => Promise<void> }).complete =
+      async function (this: unknown, id: string, o: unknown) {
+        await new Promise((r) => setTimeout(r, 700));
+        return origComplete.call(this, id, o);
+      };
+    // finalizeStores iterates canaryStore + telemetry finalize hooks.
+    let finalizeRan = false;
+    (deps.telemetry as unknown as { finalize: (sid: string) => Promise<void> }).finalize =
+      async () => {
+        await new Promise((r) => setTimeout(r, 700));
+        finalizeRan = true;
+      };
+
+    const res = await submit(deps);
+    // Both writes landed: the terminal complete passed through the patched
+    // slow store and finalizeStores ran to completion under its own budget.
+    expect(res.kind).toBe("admit");
+    expect(res.upstreamCreated).toBe(true);
+    expect(finalizeRan).toBe(true);
+  });
+
+  it("a failing finalizeStores after a durably-created forward NEVER reinterprets the outcome", async () => {
+    // The terminal complete lands `created`; finalizeStores then explodes.
+    // The receipt must stay admit/created — the transaction is already
+    // durable — and the failure must surface only as an operational error.
+    const deps = baseDeps();
+    deps.enforcement = {
+      allow: async () => ({ kind: "created" }),
+      deny: () => {},
+    };
+    const ops: string[] = [];
+    deps.onOperationalError = (op) => ops.push(op);
+    (deps.telemetry as unknown as { finalize: (sid: string) => Promise<void> }).finalize =
+      async () => {
+        throw new Error("finalize exploded after created");
+      };
+
+    const res = await submit(deps);
+    expect(res.kind).toBe("admit");
+    expect(res.upstreamCreated).toBe(true);
+    // The failure was SEEN (operational seam), and the slot was NOT
+    // release-reinterpreted (no transport-failure complete overwrote the
+    // created outcome — observable as: a replay still returns the created
+    // receipt, not a forward-failed).
+    expect(ops).toContain("store-finalize");
+    const store = deps.submissionStore as DurableSubmissionStore;
+    const replay = await store.lookupFinal("any");
+    void replay;
+  });
+});

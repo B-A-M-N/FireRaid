@@ -134,21 +134,24 @@ export async function coordinateSubmission(
   // The forward-boundary claim — defined only from the irreversible boundary
   // onward; the pre-claim catch reads it to decide whether a release is due.
   let claim: HostSubmissionClaim | undefined;
-  // Closure 4 (FR-P1-11): the FRESH deadline governing post-boundary
-  // durability writes (submissionStore.complete, finalizeStores), created
-  // lazily on the FIRST such write. It must be separate from the request
-  // deadline: a forward that consumed most of the request budget leaves that
+  // Closure 4 (FR-P1-11) / FR-RR-08: every post-boundary durability write
+  // runs under its OWN full budget — a fresh DeadlineSignal per operation,
+  // cleared when it settles. It must be separate from the request deadline
+  // (a forward that consumed most of the request budget leaves that
   // deadline spent, and a complete() raced against it would fail INSTANTLY
-  // with a DeadlineError it had no fair chance to beat — the claim would stay
-  // open after a `created` forward, or the uncertain marking would never
-  // land. Each durability phase gets its own full budget.
-  let durabilityWindow: DeadlineSignal | undefined;
-  const durability = (): DeadlineSignal => {
-    durabilityWindow ??= new DeadlineSignal(
-      deps.durabilityTimeoutMs ?? DEFAULT_DURABILITY_TIMEOUT_MS
-    );
-    return durabilityWindow;
-  };
+  // with a DeadlineError it had no fair chance to beat). The earlier
+  // memoized-one-window implementation gave the FIRST write the full budget
+  // and every later write whatever happened to remain; the documented
+  // contract is per-operation.
+  const durabilityTimeoutMs = deps.durabilityTimeoutMs ?? DEFAULT_DURABILITY_TIMEOUT_MS;
+  async function withDurabilityDeadline<T>(op: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const d = new DeadlineSignal(durabilityTimeoutMs);
+    try {
+      return await d.run(op(d.signal));
+    } finally {
+      d.clear();
+    }
+  }
 
   // Replay check WITHOUT claiming (P0-E fix): the old flow claimed the
   // forward slot merely to discover a finalized outcome, so any early
@@ -382,12 +385,14 @@ export async function coordinateSubmission(
     // (conflict semantics): an unclaimable session is never forwarded.
     //
     // Closure 4 (FR-P1-11): from this point EVERY durability write (complete,
-    // finalizeStores) is raced against the FRESH `durability()` window, not
-    // the request deadline — a forward that consumed most of the request
-    // budget would otherwise leave that deadline spent, and the first
-    // post-forward write would fail INSTANTLY with a DeadlineError it had no
-    // fair chance to beat: the claim would stay open after a `created`
-    // forward, or the uncertain marking would never land.
+    // finalizeStores) runs under its OWN fresh durability budget via
+    // withDurabilityDeadline — never the request deadline (a forward that
+    // consumed most of the request budget would otherwise leave that
+    // deadline spent, and the first post-forward write would fail INSTANTLY
+    // with a DeadlineError it had no fair chance to beat: the claim would
+    // stay open after a `created` forward, or the uncertain marking would
+    // never land), and never a shared window a previous write could have
+    // drained (FR-RR-08).
     {
       let claimResult: HostSubmissionClaimResult;
       try {
@@ -413,6 +418,10 @@ export async function coordinateSubmission(
       }
       claim = claimResult;
     }
+    // The claim is owned from here; a local const keeps TS narrowing intact
+    // inside the closures below even after the outer `claim` variable is
+    // dropped at the terminal complete (FR-RR-08 part 2).
+    const activeClaim: HostSubmissionClaim = claim;
 
     // Admission allowed: strip FireRaid fields and forward to upstream.
     // A urlencoded post carries the submit button's name/value too — the
@@ -448,12 +457,12 @@ export async function coordinateSubmission(
       // so the outcome is UNCERTAIN (held slot, not released).
       reportOperationalError(deps, "enforcement.allow(deadline)", err);
       try {
-        await durability().run(
-          deps.submissionStore.complete(claim.claimId, {
+        await withDurabilityDeadline((signal) =>
+          deps.submissionStore.complete(activeClaim.claimId, {
             kind: "transport-failure",
             reason: err instanceof DeadlineError ? "adapter_deadline" : "enforcement_allow_failed",
             uncertain: true,
-          }, durability().signal)
+          }, signal)
         );
       } catch (completeErr) {
         reportOperationalError(deps, "submissionStore.complete(allow-deadline)", completeErr);
@@ -495,7 +504,9 @@ export async function coordinateSubmission(
       // fails, the claim stays held: fail closed (conflict on retry) beats
       // silently allowing a second forward after an unknown-state first.
       try {
-        await durability().run(deps.submissionStore.complete(claim.claimId, detail, durability().signal));
+        await withDurabilityDeadline((signal) =>
+          deps.submissionStore.complete(activeClaim.claimId, detail, signal)
+        );
       } catch (err) {
         reportOperationalError(deps, "submissionStore.complete(transport-failure)", err);
       }
@@ -516,16 +527,28 @@ export async function coordinateSubmission(
     // outcome instead of re-forwarding. A complete() failure here means
     // the durable record may not exist: fail the request (release never
     // happened → the claim still guards the upstream), never ack blindly.
+    // The forward reached a TERMINAL captured state (created /
+    // business-rejected / queued-for-retry). From here the transaction IS
+    // complete the moment this write lands: FR-RR-08 (part 2) — the
+    // best-effort finalizeStores below runs AFTER the outcome is durable
+    // and its failure must NEVER re-enter the claim-release path (the old
+    // flow let a finalizeStores throw fall into the outer catch, which —
+    // seeing the claim still set — wrote a transport-failure over a
+    // durably-recorded terminal outcome and reinterpreted a completed
+    // transaction as a submission failure). The try/catch below ends the
+    // claim's lifecycle: `claim` is dropped before finalize runs.
     try {
-      await durability().run(deps.submissionStore.complete(
-        claim.claimId,
-        detail.kind === "created"
-          ? { kind: "created" }
-          : detail.kind === "queued-for-retry"
-            ? { kind: "queued-for-retry", retryId: detail.retryId }
-            : { kind: "business-rejected", status: detail.status },
-        durability().signal
-      ));
+      await withDurabilityDeadline((signal) =>
+        deps.submissionStore.complete(
+          activeClaim.claimId,
+          detail.kind === "created"
+            ? { kind: "created" }
+            : detail.kind === "queued-for-retry"
+              ? { kind: "queued-for-retry", retryId: detail.retryId }
+              : { kind: "business-rejected", status: detail.status },
+          signal
+        )
+      );
     } catch (err) {
       reportOperationalError(deps, "submissionStore.complete", err);
       return {
@@ -538,9 +561,21 @@ export async function coordinateSubmission(
       };
     }
     const upstreamCreated = detail.kind === "created";
-    // P1-10: await durability of store finalization (own durability budget —
-    // finalization must never be starved by a spent request deadline).
-    await durability().run(finalizeStores(deps, sessionId, durability().signal));
+    // The claim's lifecycle ended at the terminal complete — drop it so no
+    // later failure (finalizeStores below) can release a claim that already
+    // recorded its outcome.
+    claim = undefined;
+    // P1-10: await durability of store finalization under its OWN full
+    // budget — finalization must never be starved by a spent request
+    // deadline NOR by whatever an earlier durability write consumed
+    // (FR-RR-08). A finalization failure here is operational noise (the
+    // applicant outcome is already durable); it is logged, never allowed
+    // to fail the request.
+    try {
+      await withDurabilityDeadline((signal) => finalizeStores(deps, sessionId, signal));
+    } catch (err) {
+      reportOperationalError(deps, "finalizeStores(post-created)", err);
+    }
     return {
       kind: "admit",
       disposition: decision.disposition,
@@ -564,11 +599,16 @@ export async function coordinateSubmission(
     // deadline is spent, and racing the release against it would fail
     // instantly and leave the claim open.
     if (claim !== undefined) {
+      // Capture locally: `claim` is reassigned at the terminal complete, so
+      // TS narrowing cannot see this guard inside the closure.
+      const heldClaim = claim;
       try {
-        await durability().run(deps.submissionStore.complete(claim.claimId, {
-          kind: "transport-failure",
-          reason: "eval_error",
-        }, durability().signal));
+        await withDurabilityDeadline((signal) =>
+          deps.submissionStore.complete(heldClaim.claimId, {
+            kind: "transport-failure",
+            reason: "eval_error",
+          }, signal)
+        );
       } catch (completeErr) {
         reportOperationalError(deps, "submissionStore.complete(eval_error)", completeErr);
       }
@@ -584,10 +624,5 @@ export async function coordinateSubmission(
       kind: "error",
       operationalReason: err instanceof DeadlineError ? "ADAPTER_DEADLINE" : "SUBMIT_EVAL_ERROR",
     };
-  } finally {
-    // Closure 4: the durability window's timer is discarded on every exit —
-    // a long-lived host must not accumulate one live timer per submitted
-    // request for the full window.
-    durabilityWindow?.clear();
   }
 }
