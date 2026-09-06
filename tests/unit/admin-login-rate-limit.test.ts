@@ -10,12 +10,12 @@
  * isolate is never the ONLY defense for /api/admin/login.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { adminLogin } from "../../src/routes/admin.js";
+import { adminLogin } from "../../src/routes/admin/index.js";
 import {
   MAX_LOGIN_TRACKED_IPS,
   LOGIN_SWEEP_INTERVAL_MS,
   pruneLoginAttempts,
-} from "../../src/routes/admin.js";
+} from "../../src/routes/admin/index.js";
 import type { Env } from "../../src/env.js";
 
 const ADMIN_SECRET = "s-secret".padEnd(32, "x");

@@ -113,6 +113,27 @@ export interface RetentionSweepResult {
   finalizedSessions: number;
 }
 
+/**
+ * FR-RR-01: which schema plane the sweep runs against.
+ *
+ *   "lab"         — the full schema (production tables + the evaluation
+ *                   control-plane tables). The lab Worker cron and the
+ *                   convergence tests run this.
+ *   "production"  — the PRODUCT schema only. The production Worker cron and
+ *                   /api/admin/cleanup run this: NO statement may name
+ *                   lab_runs, a table a production deployment's data plane
+ *                   does not own. (The migration chain still creates it in a
+ *                   shared D1, but the production plane's persistence
+ *                   contract — PRODUCT_REQUIRED_TABLES + this sweep — must
+ *                   never DEPEND on evaluation tables.)
+ *
+ * The production persistence-closure test
+ * (tests/unit/production-persistence-closure.test.ts) enforces the negative
+ * property behaviorally: no SQL statement emitted by a production-plane
+ * lifecycle names a lab-only table.
+ */
+export type RetentionPlane = "production" | "lab";
+
 export async function runRetentionSweep(
   db: D1Database,
   cutoff: number,
@@ -121,10 +142,14 @@ export async function runRetentionSweep(
     rawCutoff?: number;
     /** FR-P0-01: review-queue/calibration window (defaults to `cutoff`). */
     reviewCutoff?: number;
-    /** FR-P0-01: terminal lab-run window (defaults to `cutoff`). */
+    /** FR-P0-01: terminal lab-run window (defaults to `cutoff`; ignored on
+     *  the production plane — that plane emits no lab_runs SQL). */
     labCutoff?: number;
+    /** FR-RR-01: schema plane (default "lab" — the full schema). */
+    plane?: RetentionPlane;
   } = {}
 ): Promise<RetentionSweepResult> {
+  const plane = opts.plane ?? "lab";
   const results: RetentionSweepResult = {
     telemetryBatches: 0,
     canaryHits: 0,
@@ -226,6 +251,9 @@ export async function runRetentionSweep(
   );
 
   // ── 5. LAB RUNS ────────────────────────────────────────────────────────
+  // FR-RR-01: the lab-run statements run ONLY on the lab plane. A production
+  // sweep never emits SQL naming lab_runs — the evaluation control plane's
+  // table is not part of the production persistence contract.
   // PENDING runs past expiry are garbage (never bound) — derived-cutoff
   // clock, as before. Terminal runs (EXPIRED/ABANDONED/COMPLETE — states the
   // lab lifecycle itself manufactures) live out the explicit LAB window from
@@ -234,18 +262,20 @@ export async function runRetentionSweep(
   // is mid-experiment, and a stale one is moved to ABANDONED by
   // expireStaleLabRuns within 24h — after which this window reclaims it.
   // Bounded AND convergent (convergence tests pin the BOUND path).
-  results.expiredLabRuns = await count(
-    boundedWhere("lab_runs", `status = 'PENDING' AND expires_at IS NOT NULL AND expires_at < ?`),
-    cutoff
-  );
-  results.labRuns = await count(
-    boundedWhere(
-      "lab_runs",
-      `status IN ('EXPIRED','ABANDONED','COMPLETE')
-       AND COALESCE(completed_at, reconciled_at, created_at) < ?`
-    ),
-    labCutoff
-  );
+  if (plane === "lab") {
+    results.expiredLabRuns = await count(
+      boundedWhere("lab_runs", `status = 'PENDING' AND expires_at IS NOT NULL AND expires_at < ?`),
+      cutoff
+    );
+    results.labRuns = await count(
+      boundedWhere(
+        "lab_runs",
+        `status IN ('EXPIRED','ABANDONED','COMPLETE')
+         AND COALESCE(completed_at, reconciled_at, created_at) < ?`
+      ),
+      labCutoff
+    );
+  }
 
   // ── 6. ROOT ────────────────────────────────────────────────────────────
   // Session deletes are FK-guarded: D1 enforces the child references, and
@@ -254,12 +284,15 @@ export async function runRetentionSweep(
   // child rows remain anywhere; capped-out parents simply stay until a
   // later cron pass — bounded AND convergent. (FR-P0-01: review_calibration
   // joined review_queue in the guard — both FK-pin sessions.)
+  // FR-RR-01: the lab_runs guard is lab-plane only — production sessions
+  // cannot have lab runs, and a production sweep must not reference the
+  // evaluation table at all.
   const noChildren = `NOT EXISTS (SELECT 1 FROM event_batches WHERE session_id = sessions.id)
        AND NOT EXISTS (SELECT 1 FROM canary_hits WHERE session_id = sessions.id)
        AND NOT EXISTS (SELECT 1 FROM verification_attempts WHERE session_id = sessions.id)
        AND NOT EXISTS (SELECT 1 FROM submissions WHERE session_id = sessions.id)
        AND NOT EXISTS (SELECT 1 FROM session_metrics WHERE session_id = sessions.id)
-       AND NOT EXISTS (SELECT 1 FROM lab_runs WHERE session_id = sessions.id)
+       ${plane === "lab" ? "AND NOT EXISTS (SELECT 1 FROM lab_runs WHERE session_id = sessions.id)" : ""}
        AND NOT EXISTS (SELECT 1 FROM review_queue WHERE session_id = sessions.id)
        AND NOT EXISTS (SELECT 1 FROM review_calibration WHERE session_id = sessions.id)`;
   results.abandonedSessions = await count(

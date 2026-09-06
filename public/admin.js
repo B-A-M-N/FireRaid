@@ -93,7 +93,11 @@
       document.getElementById("m-submitted").textContent = data.submitted;
       document.getElementById("m-quarantined").textContent = data.quarantined;
       document.getElementById("m-causal").textContent = data.causalHits;
-      document.getElementById("m-experiments").textContent = data.experiments;
+      // FR-RR-01: `experiments` is present only on the LAB Worker's summary
+      // (the evaluation plane adds it). A production deployment omits the
+      // metric rather than query a lab-only table it does not own.
+      const mExp = document.getElementById("m-experiments");
+      if (mExp) mExp.textContent = data.experiments ?? "—";
     } catch {
       // Not logged in
     }
@@ -194,7 +198,19 @@
         tbody.appendChild(tr);
       });
     } catch {
-      // ignore
+      // FR-RR-01: the experiments endpoint does not exist on a production
+      // deployment (the handler is not in the production artifact) — the
+      // table body keeps its placeholder. This is expected there.
+      const tbody = document.getElementById("experiments-body");
+      if (tbody) {
+        tbody.innerHTML = "";
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 4;
+        td.textContent = "Experiments unavailable on this deployment";
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+      }
     }
   }
 

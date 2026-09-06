@@ -104,7 +104,7 @@ describe("closure 5: migrated route endpoints use the bounded reader", () => {
   }
 
   it("admin login rejects an oversize body with 413 BEFORE any JSON parse", async () => {
-    const { adminLogin } = await import("../../src/routes/admin.js");
+    const { adminLogin } = await import("../../src/routes/admin/index.js");
     const big = JSON.stringify({ secret: "x".repeat(10_000) });
     const res = await adminLogin(
       new Request("http://admin.test/api/admin/login", {

@@ -26,14 +26,28 @@
 
 
 /**
- * Closure 8 (FR-P1-09): PRODUCT vs LAB schema requirements are DIFFERENT
- * planes. The production Worker never reads lab_runs/experiments/harness_runs
- * (they are the evaluation control plane's tables), so a production
- * deployment must not fail readiness over them — nor should its readiness
- * probe reveal the full evaluation schema. Conversely the lab fixture needs
- * both sets.
+ * Closure 8 (FR-P1-09) / FR-RR-01: PRODUCT vs LAB schema requirements are
+ * DIFFERENT planes, and the split now matches the production artifact's
+ * REAL reachability (verified behaviorally by
+ * tests/unit/production-persistence-closure.test.ts):
+ *
+ *   - review_queue / review_calibration ARE PRODUCT tables: the production
+ *     submit route writes review annotations through D1SubmissionFinalizer,
+ *     the production admin review-queue READ serves them, and the retention
+ *     sweep must reclaim them or they pin their submission + session
+ *     forever. A production deployment fails readiness without them.
+ *   - lab_runs / experiments / harness_runs are LAB-ONLY: after FR-RR-01
+ *     the production Worker bundle contains no module that queries them
+ *     (admin/evaluation.ts is not in the artifact; the production retention
+ *     sweep runs the PRODUCT plane). The lab fixture needs all of them.
  */
-const PRODUCT_REQUIRED_TABLES = [
+/**
+ * FR-RR-01: exported so the production persistence-closure test can pin
+ * readiness === reachability against the statements production code actually
+ * emits. Changing this list is a release-relevant act: every entry must be
+ * a table a production deployment can genuinely reach.
+ */
+export const PRODUCT_REQUIRED_TABLES = [
   "sessions",
   "event_batches",
   "canary_hits",
@@ -41,11 +55,11 @@ const PRODUCT_REQUIRED_TABLES = [
   "submission_evidence",
   "verification_attempts",
   "session_metrics",
+  "review_queue",
+  "review_calibration",
 ] as const;
 
 const LAB_ONLY_TABLES = [
-  "review_queue",
-  "review_calibration",
   "lab_runs",
   "experiments",
   "harness_runs",

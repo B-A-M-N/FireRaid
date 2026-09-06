@@ -9,7 +9,11 @@
  *   - src/eval/            (evaluation control plane; review-workflow)
  *   - src/routes/lab.ts    (lab-run create/ingest/outcome lifecycle)
  *   - src/routes/admin-review-decision.ts  (reviewer-decision WRITE)
+ *   - src/routes/admin/evaluation.ts (experiments / harness-run export /
+ *                            lab-aware session detail — lab-only tables)
  *   - expireStaleLabRuns   (lab lifecycle mutation in the cron)
+ *   - lab_runs SQL         (the production retention sweep runs the
+ *                          PRODUCT plane — see runRetentionSweep's plane)
  *
  * A production FireRaid deployment gets the attack surface FireRaid actually
  * ships for: the enrollment page, submission, telemetry, canaries, the
@@ -33,7 +37,21 @@ import { signup } from "./routes/signup.js";
 import { submit } from "./routes/submit.js";
 import { canary } from "./routes/canary.js";
 import { events } from "./routes/telemetry.js";
-import { adminLogin, adminSummary, adminSessions, adminSessionDetail, adminExperiments, adminExperimentDetail, adminExport, adminLogout, adminCleanup, adminReviewQueue } from "./routes/admin.js";
+// FR-RR-01: the production artifact imports ONLY product-plane admin
+// modules — auth + product. The evaluation-plane analytics (experiments,
+// harness-run export, lab-aware session detail) live in ./admin/evaluation,
+// which this bundle must never reach: every function there reads a lab-only
+// table, so shipping it would make the /readyz product schema contract a
+// lie about the artifact's real persistence dependencies.
+import { adminLogin, adminLogout } from "./routes/admin/auth.js";
+import {
+  adminSummary,
+  adminSessions,
+  adminSessionDetail,
+  adminExportSessions,
+  adminCleanup,
+  adminReviewQueue,
+} from "./routes/admin/product.js";
 import { error, html } from "./security/headers.js";
 import { readAdminHtml } from "./core/static.js";
 import { makeConfigGate } from "./worker-common.js";
@@ -83,7 +101,11 @@ export default {
         const rawCutoff = Date.now() - rawRetentionDays * 24 * 60 * 60 * 1000;
         const reviewCutoff = Date.now() - reviewRetentionDays * 24 * 60 * 60 * 1000;
         const labCutoff = Date.now() - labRetentionDays * 24 * 60 * 60 * 1000;
-        const sweep = await runRetentionSweep(env.DB, cutoff, { rawCutoff, reviewCutoff, labCutoff });
+        // FR-RR-01: the production plane's sweep — the PRODUCT schema only.
+        // A production deployment's data plane does not include lab_runs
+        // (the evaluation control plane's table); its lifecycle maintenance
+        // must not emit SQL against it.
+        const sweep = await runRetentionSweep(env.DB, cutoff, { rawCutoff, reviewCutoff, labCutoff, plane: "production" });
         console.log("fireraid production retention sweep", { retentionDays, cutoff, ...sweep });
       } catch (err) {
         console.error("fireraid production retention sweep failed:", err);
@@ -129,14 +151,15 @@ export default {
       const sessionMatch = path.match(/^\/api\/admin\/sessions\/(.+)$/);
       if (sessionMatch && req.method === "GET") return adminSessionDetail(req, env, sessionMatch[1]);
 
-      // Admin maintenance
+      // Admin maintenance — sweeps the PRODUCT schema plane only
       if (path === "/api/admin/cleanup" && req.method === "POST") return adminCleanup(req, env);
 
-      // Authenticated read-only analytics
-      if (path === "/api/admin/experiments" && req.method === "GET") return adminExperiments(req, env);
-      const experimentMatch = path.match(/^\/api\/admin\/experiments\/(.+)$/);
-      if (experimentMatch && req.method === "GET") return adminExperimentDetail(req, env, experimentMatch[1]);
-      if (path === "/api/admin/export" && req.method === "GET") return adminExport(req, env);
+      // FR-RR-01: the evaluation-plane analytics routes (experiments,
+      // experiment detail, harness-run export) are ABSENT here — the
+      // handlers do not exist in this bundle. A production deployment
+      // cannot serve them because the code is not in the artifact.
+      // Authenticated product export (sessions CSV only).
+      if (path === "/api/admin/export" && req.method === "GET") return adminExportSessions(req, env);
 
       // Review-queue READ — reviewers read FireRaid's annotation.
       // (The review-queue WRITE, /api/admin/review-queue/:id POST, is a

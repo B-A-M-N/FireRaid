@@ -22,7 +22,22 @@ import { signup } from "./routes/signup.js";
 import { submit } from "./routes/submit.js";
 import { canary } from "./routes/canary.js";
 import { events } from "./routes/telemetry.js";
-import { adminLogin, adminSummary, adminSessions, adminSessionDetail, adminExperiments, adminExperimentDetail, adminExport, adminLogout, adminCleanup, adminReviewQueue } from "./routes/admin.js";
+// FR-RR-01: the LAB Worker serves the FULL admin surface — the barrel
+// re-exports auth + product + evaluation planes. The production Worker
+// imports only ./routes/admin/auth + ./routes/admin/product.
+import {
+  adminLogin,
+  adminLogout,
+  adminSummary,
+  adminSessions,
+  adminExperiments,
+  adminExperimentDetail,
+  adminExportSessions,
+  adminExportRuns,
+  adminLabSessionDetail,
+  adminCleanup,
+  adminReviewQueue,
+} from "./routes/admin/index.js";
 import { adminReviewDecision } from "./routes/admin-review-decision.js";
 import { createLabRun, getLabRun, ingestLabRuns, postLabRunOutcome, expireStaleLabRuns } from "./routes/lab.js";
 import { error, html } from "./security/headers.js";
@@ -86,7 +101,7 @@ export default {
         const rawCutoff = Date.now() - rawRetentionDays * 24 * 60 * 60 * 1000;
         const reviewCutoff = Date.now() - reviewRetentionDays * 24 * 60 * 60 * 1000;
         const labCutoff = Date.now() - labRetentionDays * 24 * 60 * 60 * 1000;
-        const sweep = await runRetentionSweep(env.DB, cutoff, { rawCutoff, reviewCutoff, labCutoff });
+        const sweep = await runRetentionSweep(env.DB, cutoff, { rawCutoff, reviewCutoff, labCutoff, plane: "lab" });
         // FR-P0-15: the lab-run lifecycle sweep (PENDING→EXPIRED,
         // stale-BOUND→ABANDONED) runs in the SAME cron — one scheduled
         // invocation owns all background DB maintenance, so lab-run state
@@ -153,8 +168,11 @@ export default {
       // Admin summary / sessions (product read surfaces)
       if (path === "/api/admin/summary" && req.method === "GET") return adminSummary(req, env);
       if (path === "/api/admin/sessions" && req.method === "GET") return adminSessions(req, env);
+      // FR-RR-01: the LAB Worker serves the lab-AWARE detail (bound-recipe
+      // reconstruction via the lab_runs read). The production Worker serves
+      // the product variant (no lab read) from ./routes/admin/product.
       const sessionMatch = path.match(/^\/api\/admin\/sessions\/(.+)$/);
-      if (sessionMatch && req.method === "GET") return adminSessionDetail(req, env, sessionMatch[1]);
+      if (sessionMatch && req.method === "GET") return adminLabSessionDetail(req, env, sessionMatch[1]);
 
       // Admin maintenance
       if (path === "/api/admin/cleanup" && req.method === "POST") return adminCleanup(req, env);
@@ -180,8 +198,15 @@ export default {
       const experimentMatch = path.match(/^\/api\/admin\/experiments\/(.+)$/);
       if (experimentMatch && req.method === "GET") return adminExperimentDetail(req, env, experimentMatch[1]);
 
-      // Admin export — authenticated read, available in any mode
-      if (path === "/api/admin/export" && req.method === "GET") return adminExport(req, env);
+      // Admin export — authenticated read, available in any mode. type=
+      // sessions is product data; type=runs reads harness_runs (evaluation
+      // plane — fine here, this IS the lab fixture).
+      if (path === "/api/admin/export" && req.method === "GET") {
+        const type = new URL(req.url).searchParams.get("type") || "sessions";
+        return type === "runs"
+          ? adminExportRuns(req, env)
+          : adminExportSessions(req, env);
+      }
 
       // Lab correlation API (EVALUATION-ONLY — disabled outside lab mode)
       // Each handler self-guards with isLabMode(env) → 404 when not lab.

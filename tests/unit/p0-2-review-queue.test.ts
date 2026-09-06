@@ -12,7 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { adminReviewQueue } from "../../src/routes/admin.js";
+import { adminReviewQueue } from "../../src/routes/admin/index.js";
 import { createAdminToken } from "../../src/security/admin-auth.js";
 import { D1SubmissionFinalizer } from "../../src/cloudflare/session-store.js";
 import type { Env } from "../../src/env.js";

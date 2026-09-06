@@ -35,6 +35,11 @@ const FORBIDDEN = [
   "src/routes/lab.ts",
   "src/routes/admin-review-decision.js",
   "src/routes/admin-review-decision.ts",
+  // FR-RR-01: the evaluation-plane admin analytics read lab-only tables
+  // (experiments / harness_runs / lab_runs); the production artifact must
+  // never bundle them, or the /readyz product schema contract lies.
+  "src/routes/admin/evaluation.js",
+  "src/routes/admin/evaluation.ts",
 ];
 
 /** A module whose presence in production is itself the violation (it only

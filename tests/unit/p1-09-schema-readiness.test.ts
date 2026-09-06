@@ -156,8 +156,11 @@ describe("FR-P1-09: schema readiness", () => {
 
 describe("closure 8: product/lab plane split + opaque readyz body", () => {
   it("PRODUCTION readiness does NOT require the evaluation control-plane tables", async () => {
-    // A production D1 with ONLY the product tables is READY — lab_runs /
-    // experiments / harness_runs / review_* belong to the lab plane.
+    // FR-RR-01: a production D1 with ONLY the product tables is READY —
+    // lab_runs / experiments / harness_runs belong to the lab plane, and
+    // the production artifact contains no module that reads them (the
+    // production-persistence-closure test proves reachability). review_* IS
+    // product: production submit writes review annotations.
     const productOnly = [
       "sessions",
       "event_batches",
@@ -166,6 +169,8 @@ describe("closure 8: product/lab plane split + opaque readyz body", () => {
       "submission_evidence",
       "verification_attempts",
       "session_metrics",
+      "review_queue",
+      "review_calibration",
     ];
     const db = fakeD1({
       tables: productOnly,
@@ -174,6 +179,26 @@ describe("closure 8: product/lab plane split + opaque readyz body", () => {
     const check = await checkSchemaReadiness(db, false);
     expect(check.ready).toBe(true);
     expect(check.missingTables).toEqual([]);
+  });
+
+  it("PRODUCTION readiness FAILS on a missing review table (review_* is product)", async () => {
+    // FR-RR-01 regression: review_queue moved INTO the product contract —
+    // production submit writes it and reviewers read it; a deployment
+    // without it is not ready to serve.
+    const noReview = [
+      "sessions",
+      "event_batches",
+      "canary_hits",
+      "submissions",
+      "submission_evidence",
+      "verification_attempts",
+      "session_metrics",
+      "review_calibration",
+    ];
+    const db = fakeD1({ tables: noReview });
+    const check = await checkSchemaReadiness(db, false);
+    expect(check.ready).toBe(false);
+    expect(check.missingTables).toEqual(["review_queue"]);
   });
 
   it("PRODUCTION readiness still fails on a missing PRODUCT table", async () => {
