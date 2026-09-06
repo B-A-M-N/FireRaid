@@ -354,8 +354,14 @@ async function writeResult(
       } else {
         // Precondition failures (NO_SESSION / CSRF_FAILED / INVALID_FORM /
         // BAD_JSON / VERIFICATION_FAILED / etc.) — transport facts a
-        // legitimate client needs.
-        res.writeHead(403, { "Content-Type": "application/json", ...SECURITY_HEADERS });
+        // legitimate client needs. FR-RR-09: when the middleware pinned an
+        // explicit status (413 oversize, 400 malformed/absent body), it is
+        // honored instead of the blanket 403 — a body-level protocol problem
+        // is a client error, not an admission denial.
+        res.writeHead(result.httpStatus ?? 403, {
+          "Content-Type": "application/json",
+          ...SECURITY_HEADERS,
+        });
         res.end(JSON.stringify({ error: result.disposition ?? "FORBIDDEN" }));
       }
       break;

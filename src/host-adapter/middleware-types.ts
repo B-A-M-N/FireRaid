@@ -155,6 +155,18 @@ export interface MiddlewareResult {
   setCookie?: string;
   /** Disposition recorded (admit/deny paths). */
   disposition?: string;
+  /**
+   * FR-RR-09: the HTTP STATUS this deny carries, when the middleware knows
+   * better than a blanket 403. A request whose BODY is a protocol problem
+   * (too large, unparseable, absent) is a 413/400 client error — not an
+   * admission denial. The middleware keeps emitting kind "deny" (hosts
+   * project dispositions as they always have); when `httpStatus` is
+   * present, a conforming runtime uses it instead of the default 403. The
+   * Worker plane already answered these correctly; this preserves the same
+   * semantics through the generic host middleware. Only ever a 4xx in
+   * {400, 403, 405, 413}.
+   */
+  httpStatus?: 400 | 403 | 405 | 413;
   /** Whether the upstream ledger created the account (the experiment's truth). */
   upstreamCreated?: boolean;
   /** Ingest ACK (kind === "ingest"): events accepted, stream watermark. */

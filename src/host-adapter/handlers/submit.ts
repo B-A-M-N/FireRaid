@@ -35,11 +35,16 @@ export async function handleSubmitPost(
     // P1-8 / FR-P1-02: bounded STREAMING text reader for form posts — counts
     // bytes as they arrive and cancels mid-body on oversize (the old
     // Content-Length-then-req.text() variant buffered the whole form first).
+    // FR-RR-09: the body-level failure reason is preserved with its HTTP
+    // semantics (OVERSIZE → 413, MISSING/BAD → 400) — these are transport
+    // facts, not admission denials; the runtime projects httpStatus when
+    // present instead of the blanket 403.
     const read = await readBoundedBody(req, MAX_HOST_JSON_BYTES);
     if (!read.ok) {
       return {
         kind: "deny",
         disposition: read.reason === "MISSING" ? "MISSING_BODY" : "BAD_FORM",
+        ...(read.reason === "OVERSIZE" ? { httpStatus: 413 as const } : { httpStatus: 400 as const }),
       };
     }
     const entries: Record<string, string> = {};
@@ -48,12 +53,13 @@ export async function handleSubmitPost(
     body = { csrf, form };
   } else {
     // P1-8 / FR-P1-02: bounded STREAMING JSON reader — counts bytes as they
-    // arrive and cancels mid-body on oversize.
+    // arrive and cancels mid-body on oversize. FR-RR-09: 413/400 preserved.
     const read = await readJsonBody(req, MAX_HOST_JSON_BYTES);
     if (!read.ok) {
       return {
         kind: "deny",
         disposition: read.reason === "MISSING" ? "MISSING_BODY" : "BAD_JSON",
+        ...(read.reason === "OVERSIZE" ? { httpStatus: 413 as const } : { httpStatus: 400 as const }),
       };
     }
     body = read.data as SubmitInbound;

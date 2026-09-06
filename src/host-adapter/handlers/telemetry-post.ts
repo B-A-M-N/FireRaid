@@ -19,15 +19,16 @@ export async function handleIngestPost(
   let ingestBody: { events?: unknown };
   {
     // P1-8 / FR-P1-02: bounded STREAMING JSON reader — counts bytes as they
-    // arrive and cancels mid-body on oversize.
+    // arrive and cancels mid-body on oversize. FR-RR-09: the body-level
+    // failure reason is preserved with its HTTP semantics (OVERSIZE → 413,
+    // MISSING/BAD → 400) — a too-large batch is not the server's fault, and
+    // these are transport facts, not admission denials.
     const read = await readJsonBody(req, MAX_HOST_JSON_BYTES);
     if (!read.ok) {
-      // OVERSIZE and BAD_JSON are both applicant-side malformed-transport
-      // failures (a too-large batch is not the server's fault). A MISSING
-      // body is a precondition gap, not malformed JSON.
       return {
         kind: "deny",
         disposition: read.reason === "MISSING" ? "MISSING_BODY" : "BAD_JSON",
+        ...(read.reason === "OVERSIZE" ? { httpStatus: 413 as const } : { httpStatus: 400 as const }),
       };
     }
     ingestBody = read.data as { events?: unknown };
