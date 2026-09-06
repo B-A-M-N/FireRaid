@@ -84,6 +84,31 @@ export class HumanizedPwAdapter implements AgentAdapter {
       for (let i = 0; i < count; i++) {
         const el = visible.nth(i);
         const name = (await el.getAttribute("name")) ?? "";
+        // PERCEPTION GATE — a human fills only what they can perceive and
+        // operate. Playwright's `:visible` accepts any non-empty bounding
+        // box, which a visually-hidden field (1px box + clip-path/clip
+        // zero-area technique) passes while being imperceptible to a
+        // human. Filling such a field IS bot behavior — the traps depend
+        // on it — so a human-plausible actor must hit-test before typing:
+        // a usable size, no zero-area clip, and a center point whose
+        // topmost element is the field itself.
+        const perceivable = await el
+          .evaluate((node) => {
+            const r = node.getBoundingClientRect();
+            if (r.width < 8 || r.height < 8) return false;
+            const cs = getComputedStyle(node);
+            if (cs.visibility === "hidden" || cs.display === "none") return false;
+            if (parseFloat(cs.opacity) < 0.1) return false;
+            const clip = `${cs.clipPath} ${cs.clip}`;
+            if (/inset\(50%\)|rect\(0(px)?,\s*0(px)?,\s*0(px)?,\s*0(px)?\)/.test(clip))
+              return false;
+            const cx = r.left + r.width / 2;
+            const cy = r.top + r.height / 2;
+            const top = document.elementFromPoint(cx, cy);
+            return top === node || node.contains(top) === true;
+          })
+          .catch(() => false);
+        if (!perceivable) continue; // imperceptible — a human never sees it
         // Human selects the field with a CLICK (focus follows pointer).
         try {
           await el.click({ timeout: 3000 });

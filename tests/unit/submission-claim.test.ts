@@ -58,15 +58,29 @@ function baseDeps(): MiddlewareDeps {
 /** One browser session: GET once, then POST n times with the SAME cookie. */
 async function session(
   deps: MiddlewareDeps,
-  overrides: { enforcement?: unknown } = {}
+  overrides: { enforcement?: unknown; /** Require a route-armed session (the GET page references /c/). */ routeArmed?: boolean } = {}
 ): Promise<(n?: number) => Promise<{ kind: string; upstreamCreated?: boolean; forwardFailureReason?: string }>> {
   const validated = createFireRaidMiddleware(
     overrides.enforcement !== undefined
       ? ({ ...deps, enforcement: overrides.enforcement } as MiddlewareDeps)
       : deps
   );
-  const page = await admit(new Request("http://test/signup"), validated, async () => SIGNUP_HTML);
+  let page = await admit(new Request("http://test/signup"), validated, async () => SIGNUP_HTML);
   expect(page.kind).toBe("get");
+  // FR-FLAKE: the production composition draws P02/P03/P04 (1/3 each);
+  // P03 is route-less (requiresRoute: false), and the coordinator only
+  // consults canaryStore.readVerified when profile.decoyRoute exists. A
+  // test that forces a verified canary hit therefore needs a ROUTE-ARMED
+  // session — otherwise the forced hit is invisible and the decision is
+  // ACCEPT (~1/3 of runs, session-id dependent). Re-GET until the page
+  // carries a canary reference; each GET is an independent draw.
+  if (overrides.routeArmed) {
+    for (let i = 0; i < 40 && !page.html!.includes("/c/"); i++) {
+      page = await admit(new Request("http://test/signup"), validated, async () => SIGNUP_HTML);
+      expect(page.kind).toBe("get");
+    }
+    expect(page.html!.includes("/c/"), "no route-armed draw in 40 sessions").toBe(true);
+  }
   const cookie = page.setCookie!.split(";")[0];
   const csrf = page.html!.match(/name="csrf" value="([^"]+)"/)?.[1] ?? "";
   return async (n = 1) => {
@@ -419,7 +433,7 @@ describe("P0-E: early denies never open a claim (corrected retries work)", () =>
     // a verified hit.
     (deps.canaryStore as unknown as { readVerified: () => Promise<boolean> }).readVerified =
       async () => true;
-    const post = await session(deps);
+    const post = await session(deps, { routeArmed: true });
     const denied = await post();
     expect(denied.kind).toBe("deny");
     expect((denied as { decisionDenied?: boolean }).decisionDenied).toBe(true);

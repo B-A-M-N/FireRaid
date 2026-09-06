@@ -12,7 +12,14 @@ export const SECURITY_HEADERS: Record<string, string> = {
     // restrictive (no 'unsafe-inline'). The hash is over the exact string:
     //   position:absolute!important;width:1px!important;height:1px!important;...
     // If the style string changes, this hash must be recomputed.
-    "style-src 'self' 'sha256-bR67piDoV29bfjsHPn9ssw5vXmLWyHHw3fPPMv8edFU='; " +
+    // FR-DEMO-CSP: the decoy style is delivered as a style ATTRIBUTE (on the
+    // decoy/session_response inputs), and per CSP3 a bare hash never matches
+    // style attributes — 'unsafe-hashes' is required to extend the hash to
+    // them. Without it every CSP-serving runtime silently stripped the
+    // hiding style and the trap fields rendered fully visible. 'unsafe-hashes'
+    // here scopes the exemption to exactly this constant string (hashed
+    // below), not to arbitrary inline styles.
+    "style-src 'self' 'unsafe-hashes' 'sha256-bR67piDoV29bfjsHPn9ssw5vXmLWyHHw3fPPMv8edFU='; " +
     "img-src 'self' data:; " +
     "object-src 'none'; base-uri 'none'; form-action 'self'",
   "X-Content-Type-Options": "nosniff",

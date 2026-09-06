@@ -40,6 +40,13 @@ describe("CSP hash ↔ decoy-hiding style parity", () => {
     const hashInCsp = csp.match(/style-src[^;]*'sha256-([A-Za-z0-9+/=]+)'/)?.[1];
     expect(hashInCsp, "CSP must allowlist the hiding style by hash").toBeTruthy();
 
+    // FR-DEMO-CSP: the hiding style ships as a style ATTRIBUTE on the decoy
+    // inputs; CSP3 applies style-src hashes to attributes ONLY with
+    // 'unsafe-hashes'. A bare hash silently strips the attribute in every
+    // browser and the "hidden" traps render fully visible — the exact
+    // failure this suite exists to prevent, found live by the paired demo.
+    expect(csp.match(/style-src[^;]*/)?.[0]).toContain("'unsafe-hashes'");
+
     // BOTH renderers use the same constant name; each must match the hash.
     for (const file of [
       "src/core/renderer.ts",
