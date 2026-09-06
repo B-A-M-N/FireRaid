@@ -140,9 +140,14 @@ if (!prodDbId || prodDbId === PLACEHOLDER) {
 if (publicLabDbId && prodDbId && publicLabDbId === prodDbId) {
   fail("production-db-distinct", `production DB id ${prodDbId} equals the public-lab DB id — production must never point at the public research database`);
 } else if (publicLabDbId === PLACEHOLDER || !publicLabDbId) {
-  // public-lab may be unprovisioned; that is not a production error as long
-  // as they are not identical. Only a true collision is fatal.
-  skip("production-db-distinct", "public-lab database_id is unprovisioned (placeholder); production is distinct by definition");
+  // FR-RR-02: public-lab may be unprovisioned; that is a perfectly
+  // acceptable PRODUCTION state — two databases that do not both exist
+  // cannot collide, which is the entire property this check exists to
+  // assert. This was previously a SKIP, but release-verify treated any
+  // SKIP as deploy-blocking — so an unprovisioned public lab made
+  // deploy_ready permanently unreachable, contradicting the "distinct by
+  // definition" reading in this very branch. PASS with the detail.
+  pass("production-db-distinct", "public-lab database_id is unprovisioned (placeholder) — no database collision is possible");
 } else {
   pass("production-db-distinct", `production DB id ${prodDbId} differs from public-lab DB id ${publicLabDbId}`);
 }

@@ -152,15 +152,56 @@ let preflightParseError = null;
     preflightParseError = `unparseable preflight stdout (${err.message}): ${String(r.stdout).slice(0, 400)}`;
   }
   if (parsed && typeof parsed === "object" && Array.isArray(parsed.checks)) {
-    const presentIds = new Set(parsed.checks.map((c) => c?.name));
+    // FR-RR-11: the release gate computes its truth from the PRIMITIVE
+    // observations (the per-check rows), never from a summary the producer
+    // could miscount. Each check must have a known name, a known status,
+    // and a unique ID. SKIP is legal in LOCAL mode (the one legitimate
+    // case: remote-migrations without a CLOUDFLARE_API_TOKEN) and is
+    // handled explicitly by the deploy predicate below.
+    const KNOWN_STATUSES = new Set(["PASS", "FAIL", "SKIP"]);
+    const seenIds = new Set();
+    let badCheck = null;
+    for (const c of parsed.checks) {
+      if (typeof c?.name !== "string" || c.name.length === 0) { badCheck = "a check lacks a name"; break; }
+      if (seenIds.has(c.name)) { badCheck = `duplicate check id: ${c.name}`; break; }
+      seenIds.add(c.name);
+      if (!KNOWN_STATUSES.has(c.status)) { badCheck = `check ${c.name} has unknown status ${JSON.stringify(c.status)}`; break; }
+    }
+    const presentIds = seenIds;
     const missing = [...EXPECTED_PREFLIGHT_CHECKS].filter((id) => !presentIds.has(id));
-    if (missing.length > 0) {
+    if (badCheck) {
+      preflightParseError = `preflight check invalid: ${badCheck}`;
+    } else if (missing.length > 0) {
       preflightParseError = `preflight check set is missing expected IDs: ${missing.join(", ")}`;
-    } else if (typeof parsed.failed !== "number" || typeof parsed.skipped !== "number") {
-      preflightParseError = "preflight JSON lacks numeric failed/skipped counts";
     } else {
-      preflight = parsed;
-      preflight.exit = r.status;
+      // Derive the counts. The producer's own tallies are still read — and
+      // must AGREE — but the gate's decision uses these.
+      const derivedFailed = parsed.checks.filter((c) => c.status === "FAIL").length;
+      const derivedPassed = parsed.checks.filter((c) => c.status === "PASS").length;
+      const derivedSkipped = parsed.checks.filter((c) => c.status === "SKIP").length;
+      const countsAgree =
+        parsed.failed === derivedFailed &&
+        parsed.passed === derivedPassed &&
+        parsed.skipped === derivedSkipped;
+      // Exit-status consistency: a zero exit with reported FAILs (or a
+        // non-zero exit with none) is a producer bug — fail closed.
+      const exitConsistent = r.status === 0 ? derivedFailed === 0 : true;
+      if (!countsAgree) {
+        preflightParseError =
+          `preflight summary counts disagree with its checks array ` +
+          `(reported ${parsed.passed}p/${parsed.skipped}s/${parsed.failed}f, derived ${derivedPassed}p/${derivedSkipped}s/${derivedFailed}f)`;
+      } else if (!exitConsistent) {
+        preflightParseError = `preflight exited 0 while reporting ${derivedFailed} FAIL check(s)`;
+      } else {
+        preflight = {
+          ...parsed,
+          // The gate's truth, derived from the primitives.
+          passed: derivedPassed,
+          skipped: derivedSkipped,
+          failed: derivedFailed,
+        };
+        preflight.exit = r.status;
+      }
     }
   } else if (!preflightParseError) {
     preflightParseError = "preflight JSON lacks a checks array";
@@ -192,7 +233,18 @@ let preflightParseError = null;
   console.log(`[${preflight.failed === 0 ? "PASS" : "FAIL"}] production-preflight (deploy gate) (${preflight.passed}p/${preflight.skipped}s/${preflight.failed}f)`);
 }
 const preflightLocalClean = preflight.failed === 0; // no FAIL in local determinism
-const preflightNoSkips = preflight.skipped === 0;   // no SKIP (remote verified)
+// FR-RR-02: deploy readiness is computed from the PER-CHECK rows, never an
+// aggregate skip counter. The only check that may legitimately SKIP is
+// remote-migrations in local mode (no CLOUDFLARE_API_TOKEN) — and that skip
+// IS deploy-blocking (FR-P0-D: a deploy cannot be certified against an
+// unverifiable live database). So deploy_ready requires the remote check
+// specifically to have RUN and PASSED — not "zero SKIPs anywhere" (an
+// unrelated, acceptable state must not block deploy) and not just "zero
+// FAILs" (a SKIP must not silently equal verified).
+const preflightRemoteVerified = (() => {
+  const remote = preflight.checks.find((c) => c?.name === "remote-migrations");
+  return remote?.status === "PASS";
+})();
 
 // P2: the claim registry lives in docs/evidence-ledger.json (validated by
 // tests/unit/evidence-ledger.test.ts). Load it HIGH so the release_tiers
@@ -318,7 +370,7 @@ const allPassed = sourceGates.every((g) => g.status === "PASS");
 const localCandidate = MODE === "full" && !dirty && allPassed;
 const deployReady =
   MODE === "full" && !dirty && allPassed &&
-  preflightLocalClean && preflightNoSkips;
+  preflightLocalClean && preflightRemoteVerified;
 const releaseReady = deployReady && smokeReceipt !== null;
 
 const evidence = {
@@ -339,7 +391,7 @@ const evidence = {
     release_ready: releaseReady,
     preflight_checks: preflight.checks,
     preflight_local_clean: preflightLocalClean,
-    preflight_no_skips: preflightNoSkips,
+    preflight_remote_migrations_verified: preflightRemoteVerified,
     smoke_receipt: smokeReceipt
       ? { git_sha: smokeReceipt.git_sha, worker_version_id: smokeReceipt.worker_version_id, recorded_at: smokeReceipt.recorded_at }
       : null,
@@ -373,7 +425,7 @@ console.log(`local_candidate: ${localCandidate}`);
 let deployNote = "full mode required";
 if (MODE === "full") {
   if (!preflightLocalClean) deployNote = "production preflight has FAILs";
-  else if (!preflightNoSkips) deployNote = "preflight passed; remote migration check SKIPPED (no CLOUDFLARE_API_TOKEN)";
+  else if (!preflightRemoteVerified) deployNote = "preflight clean; remote migration check not PASSED (no CLOUDFLARE_API_TOKEN or check skipped) — run predeploy --deploy with a token";
   else deployNote = "preflight passed + remote migrations verified";
 }
 console.log(`deploy_ready: ${deployReady} (${deployNote})`);
