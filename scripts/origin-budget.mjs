@@ -38,7 +38,7 @@ const {
   referenceInject,
 } = await import("../src/host-adapter/index.js");
 const { createFireRaidMiddleware } = await import("../src/host-adapter/middleware.js");
-const { deriveProductionProfile } = await import("../src/core/profile.js");
+const { deriveProductionProfileByVersion } = await import("../src/core/profile-versions.js");
 
 // --- Helpers ---
 
@@ -158,14 +158,17 @@ const SAMPLES = 7;
 
 async function scenario_profile_generation() {
   const s = new ReferenceSessionAdapter(SECRET);
-  // Warm-up draw (module/class init), then sample steady state.
-  await deriveProductionProfile({ secret: SECRET, version: VERSION, sessionId: await s.createSession() });
+  // FR-RR-05: measure the SHIPPED engine — the version-dispatched
+  // production derivation — not the mutable alias in profile.js. A future
+  // version registry change (or a changed alias default) must not silently
+  // swap what this budget benchmarks.
+  await deriveProductionProfileByVersion({ secret: SECRET, version: VERSION, sessionId: await s.createSession() });
   const samples = [];
   let profile;
   for (let i = 0; i < SAMPLES; i++) {
     const sessionId = await s.createSession();
     const t0 = performance.now();
-    profile = await deriveProductionProfile({ secret: SECRET, version: VERSION, sessionId });
+    profile = await deriveProductionProfileByVersion({ secret: SECRET, version: VERSION, sessionId });
     samples.push(performance.now() - t0);
   }
   return { samples, profile };
@@ -341,14 +344,19 @@ async function run() {
   process.stdout.write("  profile-generation        ");
   try {
     const { samples, profile } = await scenario_profile_generation();
-    // The DERIVATION-SUCCESS shape is deterministic and always enforced;
-    // only the TIMING budget is load-sensitive.
+    // FR-RR-05: correctness and timing are SEPARATE verdicts. A loaded host
+    // may suppress the TIMING verdict only — a functional-shape failure is
+    // a FAIL no matter how loaded the machine is (the prior code classified
+    // a broken shape as UNMEASURED and exited 0: a correctness fail-open).
     const shapeOk = profile.families.length > 0;
-    if (ambientLoad) {
+    if (!shapeOk) {
+      console.log(`FAIL — functional contract violated (families=${profile.families.length})`);
+      allPassed = false;
+    } else if (ambientLoad) {
       unmeasured.push("profile-generation");
       console.log(`UNMEASURED — ${fmtStats(samples)} (budget median <20ms not enforced: ambient load)`);
     } else {
-      const passed = shapeOk && median(samples) < 20;
+      const passed = median(samples) < 20;
       console.log(`${passed ? "PASS" : "FAIL"} — ${fmtStats(samples)} (budget: median <20ms)`);
       if (!passed) allPassed = false;
     }
@@ -362,11 +370,14 @@ async function run() {
   try {
     const { samples, kind, hasCsrf } = await scenario_signup_inject();
     const shapeOk = kind === "get" && hasCsrf;
-    if (ambientLoad) {
+    if (!shapeOk) {
+      console.log(`FAIL — functional contract violated (kind=${kind}, csrf=${hasCsrf})`);
+      allPassed = false;
+    } else if (ambientLoad) {
       unmeasured.push("signup-inject");
       console.log(`UNMEASURED — ${fmtStats(samples)} (budget median <50ms not enforced: ambient load; kind=${kind}, csrf=${hasCsrf})`);
     } else {
-      const passed = shapeOk && median(samples) < 50;
+      const passed = median(samples) < 50;
       console.log(`${passed ? "PASS" : "FAIL"} — ${fmtStats(samples)}, kind=${kind}, csrf=${hasCsrf} (budget: median <50ms)`);
       if (!passed) allPassed = false;
     }
@@ -380,11 +391,14 @@ async function run() {
   try {
     const { samples, kind, disposition } = await scenario_submit_assessment();
     const shapeOk = kind === "admit";
-    if (ambientLoad) {
+    if (!shapeOk) {
+      console.log(`FAIL — functional contract violated (kind=${kind}, disposition=${disposition})`);
+      allPassed = false;
+    } else if (ambientLoad) {
       unmeasured.push("submit-assessment");
       console.log(`UNMEASURED — ${fmtStats(samples)} (budget median <50ms not enforced: ambient load; kind=${kind}, disposition=${disposition})`);
     } else {
-      const passed = shapeOk && median(samples) < 50;
+      const passed = median(samples) < 50;
       console.log(`${passed ? "PASS" : "FAIL"} — ${fmtStats(samples)}, kind=${kind}, disposition=${disposition} (budget: median <50ms)`);
       if (!passed) allPassed = false;
     }
