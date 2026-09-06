@@ -31,7 +31,7 @@ import {
   generateToken,
   sampleWithoutReplacement,
   type PrngDomain,
-} from "../prng.js";
+} from "./prng-v1.js";
 import {
   SEMANTIC_TEMPLATES,
   PLACEMENTS,
@@ -123,7 +123,7 @@ async function wordingPlacementIndex(root: ArrayBuffer, n: number): Promise<numb
   return s.nextInt(n);
 }
 
-async function domainOrThrow(root: ArrayBuffer, domain: PrngDomain): Promise<import("../prng.js").SeedStream> {
+async function domainOrThrow(root: ArrayBuffer, domain: PrngDomain): Promise<import("./prng-v1.js").SeedStream> {
   return domainStream(root, domain);
 }
 
