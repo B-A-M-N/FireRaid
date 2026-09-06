@@ -47,7 +47,7 @@ function baseDeps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
     profileKeys: { current: { id: "default", secret: SECRET } },
     secret: SECRET,
     version: VERSION,
-    upstreamRegisterUrl: "http://upstream/api/register",
+    upstreamRegisterUrl: "https://upstream.example.test/api/register",
     session: new ReferenceSessionAdapter(SECRET),
     render: { inject: (h, p, c, l, o) => referenceInject(h, p, c, l, o) },
     verification: { verificationMode: "host-owned" as const, verify: async () => true },

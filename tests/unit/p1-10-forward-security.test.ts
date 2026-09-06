@@ -43,11 +43,31 @@ describe("FR-P1-10: validateUpstreamUrl", () => {
   it("rejects non-http(s) protocols and embedded credentials", () => {
     expect(validateUpstreamUrl("ftp://example.org/x")).toEqual({ ok: false, error: expect.stringMatching(/http\(s\)/) });
     expect(validateUpstreamUrl("file:///tmp/x")).toEqual({ ok: false, error: expect.stringMatching(/http\(s\)/) });
-    expect(validateUpstreamUrl("http://user:pass@example.org/register")).toEqual({ ok: false, error: expect.stringMatching(/must not embed credentials/) });
+    expect(validateUpstreamUrl("https://user:pass@example.org/register")).toEqual({ ok: false, error: expect.stringMatching(/must not embed credentials/) });
   });
 
   it("rejects fragment-bearing submit targets", () => {
-    expect(validateUpstreamUrl("http://example.org/register#admin")).toEqual({ ok: false, error: expect.stringMatching(/must not contain a fragment/) });
+    expect(validateUpstreamUrl("https://example.org/register#admin")).toEqual({ ok: false, error: expect.stringMatching(/must not contain a fragment/) });
+  });
+
+  it("accepts https for any host and http ONLY for loopback", () => {
+    expect(validateUpstreamUrl("https://upstream.example.org/register").ok).toBe(true);
+    for (const loopback of ["http://127.0.0.1:5051/api/register", "http://localhost:5051/api/register", "http://[::1]:5051/api/register"]) {
+      expect(validateUpstreamUrl(loopback).ok).toBe(true);
+    }
+  });
+
+  it("rejects plaintext http to any non-loopback host (the forward carries personal data)", () => {
+    for (const raw of [
+      "http://upstream.example.org/register",
+      "http://10.0.0.5/register",
+      "http://internal.svc.cluster.local/register",
+      "http://localhost.evil.example.org/register", // suffix games are not loopback
+    ]) {
+      const r = validateUpstreamUrl(raw);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toMatch(/must use https/);
+    }
   });
 });
 
@@ -73,9 +93,11 @@ describe("FR-P1-10: buildForwardCookieHeader", () => {
     expect(out).toContain("host_session=abc");
   });
 
-  it("matches case-insensitively and trims whitespace in the raw header", () => {
+  it("matches case-insensitively, trims whitespace, and preserves the ORIGINAL name spelling on forward", () => {
     const raw = " Host_Session=abc ; theme=dark ";
-    expect(buildForwardCookieHeader(raw, spec)).toBe("host_session=abc");
+    // Allowlist matching is case-insensitive; the forwarded name keeps the
+    // client's spelling (an upstream may treat cookie names case-sensitively).
+    expect(buildForwardCookieHeader(raw, spec)).toBe("Host_Session=abc");
   });
 
   it("returns '' for absent/empty headers", () => {

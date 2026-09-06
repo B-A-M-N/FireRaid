@@ -57,7 +57,7 @@ function deps(telemetry: ReferenceTelemetryAdapter, recipe?: { families: string[
   return {
     secret: SECRET,
     version: VERSION,
-    upstreamRegisterUrl: "http://upstream.invalid/api/register",
+    upstreamRegisterUrl: "https://upstream.invalid/api/register",
     session: new ReferenceSessionAdapter(SECRET),
     render: { inject: (h, p, c, l) => referenceInject(h, p, c, l) },
     verification: new ReferenceVerificationAdapter(),

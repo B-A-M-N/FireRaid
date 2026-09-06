@@ -186,7 +186,7 @@ describe("Worker vs host decision parity (Batch 3)", () => {
         const deps = {
           secret: SECRET,
           version: VERSION,
-          upstreamRegisterUrl: "http://upstream.invalid/api/register",
+          upstreamRegisterUrl: "https://upstream.invalid/api/register",
           session: new ReferenceSessionAdapter(SECRET),
           render: { inject: (h: string, pr: never, c: string, l: boolean) => referenceInject(h, pr, c, l) },
           verification: new ReferenceVerificationAdapter(),

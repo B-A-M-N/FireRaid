@@ -46,7 +46,7 @@ function deps(version: number, over: Partial<EvaluationMiddlewareDeps> = {}): Ev
   return {
     secret: SECRET,
     version,
-    upstreamRegisterUrl: "http://upstream.invalid/api/register",
+    upstreamRegisterUrl: "https://upstream.invalid/api/register",
     session: new ReferenceSessionAdapter(SECRET, { version }),
     render: { inject: (h, p, c, l) => referenceInject(h, p, c, l) },
     verification: new ReferenceVerificationAdapter(),

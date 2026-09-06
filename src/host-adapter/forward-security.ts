@@ -42,6 +42,12 @@ export type UpstreamUrlValidation =
  * URL (a string) for an error message (also a string). Fail-closed: an
  * invalid URL yields { ok:false, error }, never a degraded-but-usable value.
  */
+/** Loopback hosts where plaintext http is acceptable (dev / self-forward). */
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return h === "localhost" || h === "127.0.0.1" || h === "::1";
+}
+
 export function validateUpstreamUrl(raw: string | undefined | null): UpstreamUrlValidation {
   if (typeof raw !== "string" || raw.trim().length === 0) {
     return { ok: false, error: "upstreamRegisterUrl must be a non-empty absolute http(s) URL" };
@@ -54,6 +60,19 @@ export function validateUpstreamUrl(raw: string | undefined | null): UpstreamUrl
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return { ok: false, error: `upstreamRegisterUrl must be http(s), got "${parsed.protocol}"` };
+  }
+  // The forward carries the applicant's personal data. Plaintext http is
+  // only acceptable to a loopback address — local development and the
+  // self-forwarding origin (127.0.0.1, ::1, localhost). Any other http
+  // target would put the registration payload on the wire unencrypted.
+  if (
+    parsed.protocol === "http:" &&
+    !isLoopbackHost(parsed.hostname)
+  ) {
+    return {
+      ok: false,
+      error: `upstreamRegisterUrl must use https (http is allowed only for loopback targets, got "${parsed.hostname}")`,
+    };
   }
   if (parsed.username !== "" || parsed.password !== "") {
     return { ok: false, error: "upstreamRegisterUrl must not embed credentials (userinfo) in the URL" };
@@ -84,6 +103,12 @@ export interface ForwardCookieSpec {
  * operator (mistakenly) names one — the envelope is defense-plane state and
  * the upstream origin's view of the applicant must never include it.
  *
+ * Cookie names are compared case-insensitively (RFC 6265 name matching for
+ * the allowlist/namespace decision), but forwarded with their ORIGINAL
+ * spelling — the upstream's application may treat cookie names case-
+ * sensitively, and rewriting `SessionId` to `sessionid` would hand it a
+ * cookie it cannot read.
+ *
  * @param rawHeader the client's raw `cookie` header (may be "" / null).
  * @returns the re-serialized allowlisted cookie string ("" when nothing is
  *          allowed or present).
@@ -98,11 +123,12 @@ export function buildForwardCookieHeader(
   for (const pair of rawHeader.split(";")) {
     const eq = pair.indexOf("=");
     if (eq <= 0) continue; // empty name is not a valid cookie
-    const name = pair.slice(0, eq).trim().toLowerCase();
+    const rawName = pair.slice(0, eq).trim();
+    const name = rawName.toLowerCase();
     // Hard namespace exclusion, before and independent of the allowlist.
     if (name.startsWith(FIRERAID_COOKIE_NAMESPACE.toLowerCase())) continue;
     if (!allow.has(name)) continue;
-    allowed.push(`${name}=${pair.slice(eq + 1).trim()}`);
+    allowed.push(`${rawName}=${pair.slice(eq + 1).trim()}`);
   }
   return allowed.join("; ");
 }

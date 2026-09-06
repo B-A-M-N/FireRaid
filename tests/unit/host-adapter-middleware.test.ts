@@ -61,7 +61,7 @@ function deps(over: Partial<EvaluationMiddlewareDeps> = {}): EvaluationMiddlewar
   return {
     secret: SECRET,
     version: VERSION,
-    upstreamRegisterUrl: "http://upstream/api/register",
+    upstreamRegisterUrl: "https://upstream.example.test/api/register",
     session: new ReferenceSessionAdapter(SECRET),
     render: { inject: (h, p, c, l) => referenceInject(h, p, c, l) },
     verification: new ReferenceVerificationAdapter(),

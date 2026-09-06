@@ -41,7 +41,7 @@ function deps(over: Partial<EvaluationMiddlewareDeps> = {}): EvaluationMiddlewar
   return {
     secret: SECRET,
     version: 1,
-    upstreamRegisterUrl: "http://upstream.invalid/api/register",
+    upstreamRegisterUrl: "https://upstream.invalid/api/register",
     session: new ReferenceSessionAdapter(SECRET),
     render: { inject: (h) => h },
     verification: { verificationMode: "host-owned" as const, verify: async () => true },
