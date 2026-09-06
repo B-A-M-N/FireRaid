@@ -74,8 +74,12 @@ wiring time and throws `MiddlewareConfigError` on any gap:
   claim/replay/complete record that makes "one session → one irreversible
   forward" true across retries and restarts)
 - `session`, `render`, `telemetry`, `enforcement` adapters
-- `verification` — if present, must be a real verifier (the disabled
-  no-op test verifier is rejected)
+- `verification` — REQUIRED. Every submit passes through it on the way to
+  the forward. It must declare `verificationMode: "host-owned"` (you
+  verified the human elsewhere and hand FireRaid the verdict) or
+  `"provider"` (a real external challenge is wired); the disabled no-op
+  test verifier (`"disabled-test"`) is REJECTED at wiring time. An
+  adapter that silently waves submissions through is not a verifier.
 - `riskTiers` — validated as an exact partition of [0, ∞) at startup
 - `csrfSecret` — dedicated CSRF key; issuance and verification resolve
   through ONE resolver, so rotation of profile keys never changes CSRF
@@ -111,7 +115,7 @@ const deps = createFireRaidMiddleware({
   canaryStore: myDurableCanaryStore,// { durability: "durable", record, readVerified, drop }
   submissionStore: myDurableSubmissions, // { durability: "durable", claim, complete, lookupFinal? }
   enforcement: { allow: myUpstreamCreate, deny: myDenyHook },
-  verification: myVerifier, // optional — must be a real verifier
+  verification: myVerifier, // REQUIRED — "host-owned" or "provider"
 });
 
 // GET applicationPage → inject page (sets the signed session cookie)

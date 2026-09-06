@@ -295,13 +295,34 @@ let smokeReceipt = null;
   } else {
     try {
       const parsed = JSON.parse(readFileSync(receiptPath, "utf-8"));
+      // FR-RR-10: the receipt is an OPERATOR ATTESTATION (someone invoked the
+      // recorder and asserted these checks), not machine-generated probe
+      // output — so the verifier's job is to make sure it is unambiguously
+      // OUR attestation format, internally consistent, and bound to THIS
+      // deployment. Schema first: an arbitrary JSON blob with the right key
+      // names must never satisfy this gate.
+      const schemaOk = parsed.schema === "fireraid-release-smoke-receipt/1";
       const requiredChecks = ["signup_page", "submit_failclosed", "human_submit"];
+      const checkEntries = Object.entries(parsed.checks ?? {});
+      const unknownChecks = checkEntries
+        .map(([name]) => name)
+        .filter((name) => !requiredChecks.includes(name));
       const missingChecks = requiredChecks.filter(
         (c) => parsed.checks?.[c]?.ok !== true
       );
       const shaMatch = parsed.git_sha === sha;
       const workerVersion = typeof parsed.worker_version_id === "string" && parsed.worker_version_id.length > 0;
-      if (!shaMatch || !workerVersion || missingChecks.length > 0) {
+      if (!schemaOk) {
+        gate = {
+          name: "release-smoke-receipt",
+          release_tier_gate: true,
+          command: "read release-smoke-receipt.json",
+          status: "FAIL",
+          exit_code: 1,
+          duration_ms: Date.now() - t0,
+          detail: `receipt schema ${JSON.stringify(parsed.schema ?? null)} is not "fireraid-release-smoke-receipt/1" — not a FireRaid smoke receipt`,
+        };
+      } else if (!shaMatch || !workerVersion || missingChecks.length > 0 || unknownChecks.length > 0) {
         gate = {
           name: "release-smoke-receipt",
           release_tier_gate: true,
@@ -313,7 +334,9 @@ let smokeReceipt = null;
             ? `receipt git_sha ${parsed.git_sha} does not match HEAD ${sha}`
             : !workerVersion
               ? "receipt lacks a worker_version_id"
-              : `receipt smoke checks failed/missing: ${missingChecks.join(", ")}`,
+              : unknownChecks.length > 0
+                ? `receipt names unknown smoke checks: ${unknownChecks.join(", ")}`
+                : `receipt smoke checks failed/missing: ${missingChecks.join(", ")}`,
         };
       } else {
         gate = {
