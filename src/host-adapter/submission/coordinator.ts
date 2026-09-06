@@ -188,7 +188,12 @@ export async function coordinateSubmission(
     try {
       profileSecret = resolveKeySecret(ring, ctx.keyId);
     } catch {
-      await deps.enforcement.deny(sessionId, "UNKNOWN_PROFILE_KEY");
+      // FR-RR-07: every adapter call follows the deadline contract — this
+      // deny previously ran un-wrapped, so a broken host deny() could hang
+      // the request indefinitely on exactly this path.
+      await deadline.run(
+        deps.enforcement.deny(sessionId, "UNKNOWN_PROFILE_KEY", undefined, deadline.signal)
+      );
       return { kind: "deny", disposition: "UNKNOWN_PROFILE_KEY" };
     }
     const profile = await deriveForRequest(

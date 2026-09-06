@@ -135,3 +135,58 @@ describe("closure 4: deadline lifecycle", () => {
     expect(d.expired).toBe(true);
   });
 });
+
+describe("FR-RR-07: the UNKNOWN_PROFILE_KEY deny follows the deadline contract", () => {
+  it("a never-resolving enforcement.deny cannot hang the submit path past the budget", async () => {
+    // The session's envelope carries key id "old" while the middleware's
+    // ring holds only "default" — resolveKeySecret throws
+    // UnknownProfileKeyError, which lands on the UNKNOWN_PROFILE_KEY deny.
+    // That deny previously ran WITHOUT the deadline race, so this exact
+    // pathological host adapter would have hung the request forever.
+    const sessionAdapter = new ReferenceSessionAdapter({
+      current: { id: "old", secret: SECRET },
+    });
+    const deps = baseDeps({
+      routes: ROUTES,
+      adapterTimeoutMs: 60,
+      // The ring the middleware resolves with has NO "old" key.
+      profileKeys: { current: { id: "default", secret: SECRET } },
+      // An explicit CSRF secret lets CSRF mint/verify succeed (its own
+      // resolver) so the request reaches the coordinator's
+      // UNKNOWN_PROFILE_KEY deny — the path under test.
+      csrfSecret: "f".repeat(64),
+      session: sessionAdapter,
+      enforcement: {
+        allow: async () => true,
+        deny: () => new Promise<never>(() => {}),
+      },
+    });
+    const mw = createFireRaidMiddleware(deps);
+    const sid = await sessionAdapter.createSession();
+    const cookie = await sessionAdapter.sessionCookie(sid);
+    // A valid CSRF token under the explicit csrfSecret — CSRF must pass so
+    // the request reaches the coordinator's UNKNOWN_PROFILE_KEY deny.
+    const { makeCsrf } = await import("../../src/host-adapter/handlers/csrf.js");
+    const csrf = await makeCsrf("f".repeat(64), sid);
+
+    const start = Date.now();
+    const res = await admit(
+      new Request("http://mw/api/submit", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie,
+        },
+        body: JSON.stringify({ csrf, form: { email: "a@b.c", password: "p".repeat(12) } }),
+      }),
+      mw,
+      async () => SIGNUP_HTML
+    );
+    const elapsed = Date.now() - start;
+    // Fail closed inside the budget: an operational error (the deadline
+    // fired on the un-cooperative deny), never a hang.
+    expect(res.kind).toBe("error");
+    expect(res.operationalReason).toBe("ADAPTER_DEADLINE");
+    expect(elapsed).toBeLessThan(5_000);
+  });
+});
