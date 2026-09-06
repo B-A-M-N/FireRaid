@@ -24,7 +24,7 @@
  * by omitting the envelope, and signup no longer creates them to find.
  */
 import type { Env } from "../env.js";
-import { isLabMode } from "../env.js";
+import { isLabMode, legacySidFallbackActive } from "../env.js";
 import { resolveProfileKey } from "../core/session.js";
 import {
   verifySessionEnvelope,
@@ -121,9 +121,17 @@ export async function ensureSessionRow(
   }
 
   // ── Legacy fallback: bare sid, no row → reject. ────────────────────────
-  // (Pre-envelope sessions persist only through their 30-min TTL, which has
-  // long elapsed by the time this ships; the branch exists so a mixed
-  // fleet during rotation is not a hard cutover.)
+  // FR-RR (P2 sunset rule): this compatibility branch is no longer
+  // indefinite in PRODUCTION. Bare-SID cookies resolve ONLY while the
+  // operator's explicit FIRERAID_LEGACY_SID_UNTIL instant is in the future;
+  // unset, malformed, or elapsed → reject. The window is a declared
+  // rotation accommodation with a hard expiry, not a permanent second
+  // session format.
+  //
+  // LAB MODE is exempt: a bare sid is the lab plane's CANONICAL session
+  // format (stateful by design, FR-P1-19) — not a legacy fallback — so lab
+  // lookups here are the primary path, never gated on the sunset flag.
+  if (!isLabMode(env) && !legacySidFallbackActive(env, Date.now())) return null;
   const existing = await loadSession(env.DB, cookieValue);
   if (existing) return existing;
   return null;

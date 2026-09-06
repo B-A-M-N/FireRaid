@@ -67,7 +67,7 @@ function makeD1(db: DatabaseSync): D1Database {
   } as unknown as D1Database;
 }
 
-function makeEnv(db: DatabaseSync, opts?: { lab?: boolean }): Env {
+function makeEnv(db: DatabaseSync, opts?: { lab?: boolean; legacySidUntil?: string }): Env {
   return {
     DB: makeD1(db),
     ASSETS: {} as Fetcher,
@@ -75,6 +75,7 @@ function makeEnv(db: DatabaseSync, opts?: { lab?: boolean }): Env {
     FIRERAID_PROFILE_KEY_CURRENT_ID: KEY_ID,
     PROFILE_VERSION: "1",
     LAB_MODE: opts?.lab ? "true" : "false",
+    ...(opts?.legacySidUntil ? { FIRERAID_LEGACY_SID_UNTIL: opts.legacySidUntil } : {}),
   } as unknown as Env;
 }
 
@@ -167,19 +168,25 @@ describe("FR-P1-19: ensureSessionRow materialization", () => {
     expect(rows).toHaveLength(1);
   });
 
-  it("legacy bare-sid fallback: an EXISTING row still loads, a missing row rejects", async () => {
-    const env = makeEnv(db);
+  it("legacy bare-sid fallback: an EXISTING row still loads ONLY inside the declared window; no window → sunset rejects", async () => {
+    // FR-RR (P2 sunset rule): the fallback is dead without an explicit
+    // FIRERAID_LEGACY_SID_UNTIL instant in the future.
+    const envNoWindow = makeEnv(db);
+    const envWindowed = makeEnv(db, {
+      legacySidUntil: new Date(Date.now() + 60_000).toISOString(),
+    });
     // Pre-envelope row (the mixed-fleet case).
     db.prepare(
       `INSERT INTO sessions (id, created_at, last_seen_at, profile_version, profile_id, profile_hash, submitted)
        VALUES ('legacy-row-sid-123456', 1, 1, 1, 'p', 'h', 0)`
     ).run();
-    const loaded = await ensureSessionRow(env, "legacy-row-sid-123456");
+    expect(await ensureSessionRow(envNoWindow, "legacy-row-sid-123456")).toBeNull();
+    const loaded = await ensureSessionRow(envWindowed, "legacy-row-sid-123456");
     expect(loaded).not.toBeNull();
     expect(loaded!.id).toBe("legacy-row-sid-123456");
     // Bare sid with NO row → reject (cannot fabricate sessions by omitting
-    // the envelope).
-    const forged = await ensureSessionRow(env, "forged-bare-sid-123456");
+    // the envelope) — even inside the declared window.
+    const forged = await ensureSessionRow(envWindowed, "forged-bare-sid-123456");
     expect(forged).toBeNull();
     expect(sessionCount()).toBe(1);
   });

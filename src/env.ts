@@ -76,10 +76,36 @@ export interface Env {
    * rule/plan); presence is what the gate checks.
    */
   FIRERAID_RATE_LIMIT_LOGIN?: string;
+  /**
+   * FR-RR (P2 sunset rule): explicit expiry for the legacy bare-SID session
+   * fallback — an RFC-3339 date or epoch-ms. Bare-SID cookies resolve ONLY
+   * while now() < this instant; the flag's ABSENCE is itself the sunset
+   * (no flag = the fallback is dead). Production deployments that still
+   * need the rotation window must declare a real expiry date, so the
+   * "temporary" compatibility branch can no longer persist indefinitely
+   * undocumented. See cloudflare/session-envelope.ts ensureSessionRow().
+   */
+  FIRERAID_LEGACY_SID_UNTIL?: string;
 }
 
 export function isLabMode(env: Env): boolean {
   return env.LAB_MODE === "true";
+}
+
+/**
+ * FR-RR (P2 sunset rule): is the legacy bare-SID session fallback still
+ * alive at `nowMs`? Yes ONLY when FIRERAID_LEGACY_SID_UNTIL is set to a
+ * parseable instant in the future. Unset, malformed, or past — the fallback
+ * is SUNSET and bare-SID cookies reject. This makes the compatibility
+ * window an explicit operator declaration with a hard expiry instead of an
+ * indefinite "temporary" branch.
+ */
+export function legacySidFallbackActive(env: Env, nowMs: number): boolean {
+  const raw = env.FIRERAID_LEGACY_SID_UNTIL;
+  if (raw === undefined || raw.trim() === "") return false;
+  const until = Date.parse(raw);
+  if (Number.isNaN(until)) return false;
+  return nowMs < until;
 }
 
 /**

@@ -122,8 +122,16 @@ export interface HostSessionAdapter {
    * Build the Set-Cookie header value(s) for a fresh session.
    * Async so a host may sign the session id (integrity-protected cookie —
    * see the reference adapter).
+   *
+   * FR-RR (P2 sunset rule): `envelope` carries the issued profile hash when
+   * the middleware has one. Adapters that sign a session envelope SHOULD
+   * issue the fr2 format with the signed `ph` claim (Worker parity, the
+   * FR-P0-G drift check) — an adapter that cannot use it may ignore the
+   * parameter. Issuing legacy fr1 (hashless) envelopes from the reference
+   * path is no longer the default: new sessions must not depend on a
+   * format whose drift cannot be verified.
    */
-  sessionCookie(sessionId: string): Promise<string>;
+  sessionCookie(sessionId: string, envelope?: { profileHash?: string }): Promise<string>;
   /**
    * Parse + verify the incoming session id from a Request. Return null for a
    * missing OR TAMPERED session — admission must be denied, never forwarded.

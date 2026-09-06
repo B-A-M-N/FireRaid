@@ -77,9 +77,14 @@ export class ReferenceSessionAdapter implements HostSessionAdapter {
       .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
-  async sessionCookie(sessionId: string): Promise<string> {
-    const envelope = await signSessionEnvelope(this.ring, sessionId, Date.now(), this.version);
-    return `${SESSION_COOKIE}=${envelope}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_S}`;
+  async sessionCookie(sessionId: string, envelope?: { profileHash?: string }): Promise<string> {
+    // FR-RR (P2 sunset rule): when the middleware hands the issued profile
+    // hash, issue the fr2 format carrying the signed `ph` claim (Worker
+    // parity) so the host plane's stateless sessions get the same drift
+    // check at reconstruction. Legacy fr1 issuance here would silently
+    // create sessions whose treatment can never be verified.
+    const signed = await signSessionEnvelope(this.ring, sessionId, Date.now(), this.version, envelope);
+    return `${SESSION_COOKIE}=${signed}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_S}`;
   }
 
   /** Verify a raw cookie value; null when malformed/tampered/expired. */

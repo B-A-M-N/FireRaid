@@ -188,7 +188,7 @@ describe("FR-P0-03: infrastructure failure ≠ applicant rejection", () => {
     const cookie = (page.headers.get("set-cookie") ?? "").split(";")[0];
     // Derive the session's route token the same way the middleware does.
     const { deriveProfilePure } = await import("../../src/core/profile.js");
-    const sid = decodeURIComponent(cookie).match(/fr1\.([A-Za-z0-9_-]+)/)?.[1] ?? "";
+    const sid = decodeURIComponent(cookie).match(/fr[12]\.([A-Za-z0-9_-]+)/)?.[1] ?? "";
     // The session id is INSIDE the envelope payload; derive with the sid the
     // runtime issued by asking the middleware's own path — instead, probe a
     // token derived from the session the GET created (parse via decode).

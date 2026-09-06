@@ -7,6 +7,7 @@ import type { ResolvedFireRaidRoutes, RenderInjectOptions } from "../interface.j
 import type { MiddlewareDeps, MiddlewareResult, EvaluationControls } from "../middleware-types.js";
 import { DeadlineSignal } from "../deadline.js";
 import { resolveKeySecret, resolveCsrfSecret, deriveForRequest } from "../profile/resolve-session-profile.js";
+import { hashProfileByVersion } from "../../core/profile-versions.js";
 import { makeCsrf } from "./csrf.js";
 
 export async function handleInjectGet(
@@ -31,13 +32,22 @@ export async function handleInjectGet(
     // current key. resolveCsrfSecret with no sessionKeyId covers exactly
     // that, and POST verifies with the SAME resolver.
     const csrfToken = await makeCsrf(resolveCsrfSecret(deps, ring), sessionId);
+    // FR-RR (P2 sunset rule): hash the issued profile (frozen v1 semantics)
+    // and hand it to the session adapter so envelope-signing hosts issue
+    // fr2 with the signed `ph` claim — Worker parity for the FR-P0-G drift
+    // check. Adapters that ignore the parameter keep their own format.
+    const issuedHash = await hashProfileByVersion(profile, deps.version);
     const html = await htmlLoader();
     const renderOpts: RenderInjectOptions = {
       canaryPrefix: routes?.canaryPrefix,
       clientScriptSrc: deps.clientScriptSrc,
     };
     const page = deps.render.inject(html, profile, csrfToken, labMode, renderOpts);
-    return { kind: "get", html: page, setCookie: await deadline.run(deps.session.sessionCookie(sessionId)) };
+    return {
+      kind: "get",
+      html: page,
+      setCookie: await deadline.run(deps.session.sessionCookie(sessionId, { profileHash: issuedHash })),
+    };
   } catch (err) {
     // Fail-closed, but never silent: an inject path failure is a host
     // integration bug (bad fixture, render contract violation) and must be

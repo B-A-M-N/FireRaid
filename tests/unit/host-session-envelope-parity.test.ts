@@ -49,6 +49,9 @@ describe("host session envelope parity (audit item 9)", () => {
     const cookie = await adapter.sessionCookie(sid);
     const raw = cookieValue(cookie);
 
+    // FR-RR (P2 sunset rule): the reference adapter issued WITHOUT a hash
+    // keeps legacy fr1 here (this test calls sessionCookie directly, no
+    // hash handed in) — but the GET path now always passes one (next test).
     expect(raw.startsWith("fr1.")).toBe(true);
     const verdict = await verifySessionEnvelope(RING, raw, nowMs());
     expect(verdict.ok).toBe(true);
@@ -58,6 +61,22 @@ describe("host session envelope parity (audit item 9)", () => {
       expect(verdict.payload.kid).toBe("default");
       // iat is approximately the issuance wall clock.
       expect(Math.abs(verdict.payload.iat - nowMs())).toBeLessThan(5_000);
+    }
+  });
+
+  it("FR-RR sunset rule: a hash-carrying issuance produces fr2 with the signed ph claim", async () => {
+    const adapter = new ReferenceSessionAdapter(SECRET);
+    const sid = await adapter.createSession();
+    // What the GET handler now passes: the issued profile's hash.
+    const ph = "a".repeat(64);
+    const raw = cookieValue(await adapter.sessionCookie(sid, { profileHash: ph }));
+    expect(raw.startsWith("fr2.")).toBe(true);
+    const verdict = await verifySessionEnvelope(RING, raw, nowMs());
+    expect(verdict.ok).toBe(true);
+    if (verdict.ok) {
+      expect(verdict.payload.v).toBe(2);
+      expect(verdict.payload.ph).toBe(ph);
+      expect(verdict.payload.sid).toBe(sid);
     }
   });
 
