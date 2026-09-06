@@ -10,7 +10,12 @@ export default defineConfig({
   test: {
     globals: true,
     // FR-R3-057: Exclude integration tests by default (they require a running worker)
-    include: ["tests/unit/**/*.test.ts"],
+    // The paired-demo smoke is a REAL e2e (browsers + spawned upstream), so it
+    // is only included when DEMO_SMOKE=1 — never in the default unit gate.
+    include: [
+      "tests/unit/**/*.test.ts",
+      ...(process.env.DEMO_SMOKE === "1" ? ["tests/demo/**/*.test.ts"] : []),
+    ],
     pool: "forks",
     poolOptions: {
       forks: { singleFork: true },

@@ -16,6 +16,7 @@
     "test:product": "npm run build:product && npm run check:boundary",
     "test:package": "node scripts/release-package-smoke.mjs",
     "dev:origin": "tsx examples/origin-server.mjs",
+    "demo": "tsx demo/server.ts",
     "test:origin-budget": "node --import tsx scripts/origin-budget.mjs",
     "test:integration": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.integration.config.ts",
     "test:llm-smoke": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.llm-smoke.config.ts",
