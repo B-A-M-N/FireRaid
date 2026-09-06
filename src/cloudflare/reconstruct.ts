@@ -50,6 +50,11 @@ export async function reconstructFromSessionId(
       id: sessionId,
       profileVersion: opts?.profileVersion ?? loaded.profileVersion,
       profileKeyId: loaded.profileKeyId ?? null,
+      // FR-RR-03: thread the persisted issued-profile hash through — the
+      // drift check must hold on every path, including this convenience
+      // wrapper (a silently hash-less reconstruction is a silently
+      // disabled drift alarm).
+      profileHash: loaded.profileHash ?? null,
     },
     opts?.recipe,
     { holdoutMode: opts?.holdoutMode, turnstileRequired: opts?.turnstileRequired }

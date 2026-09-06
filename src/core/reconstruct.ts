@@ -19,8 +19,10 @@ import {
   resolveProfileKey,
   type ProfileKeyRing,
 } from "./session.js";
-import { deriveEvaluationProfileByVersion } from "./profile-versions.js";
-import { hashProfile } from "./profile.js";
+import {
+  deriveEvaluationProfileByVersion,
+  hashProfileByVersion,
+} from "./profile-versions.js";
 import type { DefenseRecipe } from "./recipe-schema.js";
 import type { DefenseProfile } from "../types/profile.js";
 
@@ -136,8 +138,14 @@ export async function reconstructIssuedProfile(
     // at issuance, the re-derived profile must match it. A mismatch means
     // the derivation produced something other than the treatment the
     // session was actually shown — hard failure, never "close enough".
+    // FR-RR-04: the comparison hashes with the VERSIONED hash function the
+    // session's own version selects — never the live `hashProfile`. When V2
+    // legitimately changes hashing/canonicalization, a V1 session
+    // reconstructed under the live hash would mismatch its persisted V1
+    // hash and fail every admin/lab read; hashProfileByVersion keeps each
+    // historical version's bytes reproducible by exactly its own function.
     if (session.profileHash) {
-      const recomputed = await hashProfile(profile);
+      const recomputed = await hashProfileByVersion(profile, version);
       if (recomputed !== session.profileHash) {
         return {
           ok: false,
@@ -195,6 +203,10 @@ export async function reconstructFromSessionId(
       id: sessionId,
       profileVersion: opts?.profileVersion ?? loaded?.profileVersion ?? profileVersion(env),
       profileKeyId: loaded?.profileKeyId ?? null,
+      // FR-RR-03: the wrapper MUST thread the persisted issued-profile hash
+      // through — omitting it silently disabled the drift check for every
+      // admin/lab caller, the exact hole the FR-P0-04 check exists to close.
+      profileHash: loaded?.profileHash ?? null,
     },
     opts?.recipe,
     { holdoutMode: opts?.holdoutMode, turnstileRequired: opts?.turnstileRequired }
