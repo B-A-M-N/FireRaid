@@ -402,4 +402,11 @@ describe("FR-P0-B/D: predeploy-production.mjs contract", () => {
     expect(src).toContain("demo mode permits the tracked");
     expect(src).toMatch(/if \(DEMO_MODE\) \{[\s\S]*?skip\("rate-limit-login-attested"/);
   });
+
+  it("demo deploy injects the runtime showcase override", () => {
+    const deploy = readFileSync(join(ROOT, "scripts", "deploy-production.mjs"), "utf-8");
+    expect(deploy).toContain('"FIRERAID_DEMO_MODE:true"');
+    expect(deploy).toContain("`FIRERAID_BUILD_SHA:${sha}`");
+    expect(deploy).toContain("if (DEMO_MODE)");
+  });
 });

@@ -81,7 +81,8 @@ export function validateConfig(env: Env): string | null {
       // Without it the deployment's only login protection is a single
       // isolate's best-effort map — not an acceptable brute-force contract for
       // a real production admin surface.
-      if (!env.FIRERAID_RATE_LIMIT_LOGIN || env.FIRERAID_RATE_LIMIT_LOGIN === "REPLACE_WITH_EDGE_LIMITER_NAME") {
+      const demoShowcase = env.FIRERAID_DEMO_MODE === "true";
+      if (!demoShowcase && (!env.FIRERAID_RATE_LIMIT_LOGIN || env.FIRERAID_RATE_LIMIT_LOGIN === "REPLACE_WITH_EDGE_LIMITER_NAME")) {
         return "Production requires FIRERAID_RATE_LIMIT_LOGIN (declare the authoritative edge rate-limiter for /api/admin/login)";
       }
     }

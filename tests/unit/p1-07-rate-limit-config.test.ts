@@ -44,6 +44,14 @@ describe("FR-P1-07: production requires an authoritative login limiter", () => {
     expect(validateConfig(probe)).toMatch(/FIRERAID_RATE_LIMIT_LOGIN/);
   });
 
+  it("the explicit demo showcase override permits the tracked placeholder", () => {
+    const probe = productionEnv({
+      FIRERAID_RATE_LIMIT_LOGIN: "REPLACE_WITH_EDGE_LIMITER_NAME",
+      FIRERAID_DEMO_MODE: "true",
+    });
+    expect(validateConfig(probe)).toBeNull();
+  });
+
   it("a real production env WITH a declared limiter passes config", () => {
     const probe = productionEnv({ FIRERAID_RATE_LIMIT_LOGIN: "fireraid-admin-login-waf-rule" });
     expect(validateConfig(probe)).toBeNull();

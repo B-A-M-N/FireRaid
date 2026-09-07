@@ -205,7 +205,9 @@ if (graph.status === 0) {
 
 // ── Dry-run deploy of the production env (no upload) ────────────────────
 
-const dry = run("npx", ["wrangler", "deploy", "--env", "production", "--dry-run"]);
+const dryArgs = ["wrangler", "deploy", "--env", "production", "--dry-run"];
+if (DEMO_MODE) dryArgs.push("--var", "FIRERAID_DEMO_MODE:true");
+const dry = run("npx", dryArgs);
 if (dry.status === 0) {
   pass("dry-run", "wrangler deploy --env production --dry-run succeeded (bundle + checks clean)");
 } else {

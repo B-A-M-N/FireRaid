@@ -29,9 +29,11 @@ if (dirtyResult.stdout.trim()) {
 }
 
 console.log(`deploy-production: deploying clean HEAD ${sha}${DEMO_MODE ? " (demo showcase mode)" : ""}`);
+const deployArgs = ["wrangler", "deploy", "--env", "production", "--var", `FIRERAID_BUILD_SHA:${sha}`];
+if (DEMO_MODE) deployArgs.push("--var", "FIRERAID_DEMO_MODE:true");
 const deploy = spawnSync(
   "npx",
-  ["wrangler", "deploy", "--env", "production", "--var", `FIRERAID_BUILD_SHA:${sha}`],
+  deployArgs,
   { cwd: ROOT, stdio: "inherit", shell: false }
 );
 process.exit(deploy.status ?? 1);

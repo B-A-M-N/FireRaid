@@ -79,6 +79,13 @@ export interface Env {
    */
   FIRERAID_RATE_LIMIT_LOGIN?: string;
   /**
+   * Explicit product-showcase override injected only by deploy:demo. It
+   * permits the tracked edge-limiter placeholder for a private/demo release;
+   * real production deployments must leave this unset and declare the edge
+   * limiter above.
+   */
+  FIRERAID_DEMO_MODE?: string;
+  /**
    * FR-RR (P2 sunset rule): explicit expiry for the legacy bare-SID session
    * fallback — an RFC-3339 date or epoch-ms. Bare-SID cookies resolve ONLY
    * while now() < this instant; the flag's ABSENCE is itself the sunset
