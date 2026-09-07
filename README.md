@@ -1,360 +1,234 @@
-# FireRaid
+<p align="center">
+  <img src="docs/assets/fireraid-wordmark.svg" alt="FireRaid" width="520">
+</p>
 
-> FireRaid is a deterministic, per-session, randomized defense-in-depth middleware
-> for autonomous-agent admission control. Research and evaluation are subsystems
-> of the product. FireRaid integrates into existing application review workflows and
-> does not own account approval.
+<p align="center">
+  <strong>Deterministic, server-led admission defense for signup and application workflows.</strong>
+</p>
 
-FireRaid generates unpredictable session-specific defense profiles, records causal
-and behavioral signals, and evaluates those defenses against multiple browser-agent
-architectures.
+<p align="center">
+  <a href="https://fireraid-production.benevolentjoker.workers.dev/signup">Live Showcase</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/INTEGRATION.md">Integration</a> ·
+  <a href="docs/DEPLOYMENT.md">Deployment</a>
+</p>
 
-It is **not** a research lab. Research and evaluation are subsystems of the product.
+<p align="center">
+  <a href="https://github.com/B-A-M-N/FireRaid/actions/workflows/ci.yml"><img src="https://github.com/B-A-M-N/FireRaid/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/Node.js-%3E%3D22.5.0-339933?logo=node.js&logoColor=white" alt="Node.js 22.5.0 or newer">
+</p>
 
-It is **not** a universal bot detector. It is an agent-admission defense.
+<p align="center"><strong>No LLM in the defense path · No invasive fingerprinting · Host-owned admission policy</strong></p>
 
-It is **not** model-driven. The defense path is fully deterministic with zero LLM calls.
+FireRaid adds deterministic, session-bound defenses to automated access
+attempts by issuing per-session challenges, correlating server-verifiable
+evidence, and integrating the resulting assessment into the host's existing
+admission workflow.
 
-## What FireRaid Does
+The [live showcase](https://fireraid-production.benevolentjoker.workers.dev/signup)
+is an owner-hosted product demonstration. Use synthetic data only; it is not a
+public service or a production guarantee.
 
-- Generates unpredictable, session-specific defense profiles from a server secret
-- Injects decoy fields, decoy endpoints (routes), semantic traps, and coarse
-  interaction telemetry into **every** defended signup session
-- Binds semantic instructions to a fill-expressible actuator (`session_response`
-  sink) so an agent that obeys a delivered instruction produces server-verifiable
-  causal evidence (E5 lever)
-- Collects coarse interaction telemetry, including depth signals (zero-dwell
-  fill, uniform input cadence, no-blur-before-submit) — no invasive fingerprinting
-- Correlates observed behavior with the exact profile issued per-session
-- Produces auditable decision records (ACCEPT / REVIEW / QUARANTINE) that feed
-  existing application review workflows — FireRaid does not own account approval
-- Measures defense effectiveness against autonomous browser agents via a
-  built-in adversarial evaluation harness
+## What FireRaid is—and is not
 
-## Architecture
+| FireRaid is | FireRaid is not |
+|---|---|
+| Deterministic admission middleware | An LLM classifier |
+| Server-led and host-neutral | A browser fingerprinting service |
+| Produces auditable admission evidence | A universal bot-detection system |
+| Integrates with existing signup/application flows | An account-approval authority |
 
-```
-Internet
+## See it working
+
+These captures come from the live FireRaid showcase, not mockups. The first
+shows the applicant-facing signup flow. The second shows the reference
+deployment refusing a submission that has not satisfied its configured
+verification requirement.
+
+<table>
+  <tr>
+    <td><strong>Applicant-facing form</strong></td>
+    <td><strong>Fail-closed response</strong></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/fireraid-demo-form.png" alt="Live FireRaid signup form" width="480"></td>
+    <td><img src="docs/assets/fireraid-demo-fail-closed.png" alt="Live FireRaid signup rejected pending configured verification" width="480"></td>
+  </tr>
+</table>
+
+## Why FireRaid exists
+
+Agents are becoming a real access-control problem. In the wrong hands, they
+can automate exploitative access: abuse, fraud, resource exhaustion,
+credential creation, and behavior that defeats the intent of a service.
+People need practical, inspectable ways to thwart autonomous access when that
+access would be harmful.
+
+FireRaid is a narrower, more accountable answer. Its defense path is
+deterministic and server-led, combining session-bound challenges, interaction
+signals, verification, telemetry, correlation, and explicit policy signals
+into evidence that a host can inspect and act on.
+
+## What it provides
+
+- **Per-session defense profiles** with randomized routes, interaction
+  expectations, challenges, and canaries.
+- **Layered admission signals** covering request integrity, CSRF and session
+  checks, route sequencing, interaction depth, verification, timing, and
+  server-side correlation.
+- **Adversarial evaluation** across browser, raw-HTML, simplified-DOM, and
+  model-backed agents.
+- **Host-owned decisions.** FireRaid returns a neutral applicant receipt and a
+  host-facing assessment; the host decides whether to approve, hold, reject,
+  rate-limit, or investigate.
+- **Auditable evidence** through receipts, event chains, profile versions, and
+  enforcement outcomes.
+
+## How it works
+
+~~~text
+Applicant
    │
    ▼
-Cloudflare (optional)
+Host signup/application route
    │
-   │ TLS / CDN / DDoS / WAF / rate limiting / Turnstile
-   │
-   ▼
-FireRaid (origin middleware)
-   │
-   │ deterministic origin-side middleware
-   │ no model calls
-   │ no Worker requirement
-   │ no D1 requirement
-   │ per-session randomized defense composition
+   ├── FireRaid session + deterministic defense profile
+   │       ├── semantic canaries
+   │       ├── interaction signals
+   │       ├── verification
+   │       └── session-bound challenges
    │
    ▼
-FreeInference signup/application handler
+Server-side correlation
    │
    ▼
-existing FreeInference approval workflow
-```
-
-Separately — the **evaluation plane** that attacks FireRaid during testing:
-
-```
-AI / AGENT EVALUATION SYSTEM
-          │
-          ├── Raw-DOM LLM agents
-          ├── Browser Use
-          ├── AX agents (accessibility-snapshot + LLM)
-          ├── vision agents (screenshot-only)
-          ├── FireRaid-aware agents (briefed attackers)
-          ├── scripted automation
-          └── human controls
-          │
-          ▼
-production-equivalent FireRaid test deployment
-```
-
-The harness attacks the **same artifacts that production uses**. Debug
-instrumentation can differ; the treatment itself cannot.
-
-## Measured Efficacy (evidence summary)
-
-Three completed 30-trial experiments against the production-faithful
-origin runtime (the upstream's own account ledger is the endpoint):
-
-| Run | Perception | Result |
-|-----|-----------|--------|
-| E4 | simplified-dom | Null — `<template>` carriers are structurally invisible to that perception (delivery artifact, proven by replay probe) |
-| E5 | raw-html | Primary null, but **compliance-on-delivery measured**: 4/4 agents that received the route instruction echoed the exact token + nonce; 0/4 without delivery |
-| E6 (levers) | raw-html | **Defended account-creation 2/10 vs CONTROL 10/10** (matched raw-dom cells; analyzer matched-cell ARR 53.3% [9.7%, 75.2%] with human cells included); humans 5/5 clean both arms |
-
-E6's honest shape: most blocks are attrition (the agent exhausts its
-budget inside the trap loop before submitting) rather than scored
-QUARANTINE at admission; both reduce account creation. Single model
-(LongCat-2.0), single agent architecture (raw-dom), n=10/arm — an
-existence proof of mechanism effect, not a deploy-grade estimate. Full
-caveats and evidence pointers: [docs/RELEASE-STATUS.md](docs/RELEASE-STATUS.md)
-claim 8, machine-readable in
-[docs/evidence-ledger.json](docs/evidence-ledger.json).
-
-## Product vs evaluation
-
-The **product** is the deterministic middleware (`createFireRaidMiddleware`
-+ origin runtime): zero LLM calls, zero D1, zero Worker requirement.
-`npm run test:product` enforces the product/evaluation boundary at build time.
-
-The **evaluation system** (harness/, experiments, Worker fixture) imports
-the product; the product never imports the harness.  This asymmetry is
-the testable zero-infrastructure thesis — the defense core runs standalone.
-
-`npm run dev:origin` runs the reference origin host on Node (Node 22.5+, the package `engines` floor).
-`npm run test:origin-budget` proves the zero-infrastructure thesis by
-measuring profile generation, GET inject, and POST submit timing budgets
-and asserting zero network egress and zero D1 imports in the product path.
-
-### Invariants
-
-The authoritative invariants are in [docs/INVARIANTS.md](docs/INVARIANTS.md):
-
-- **FR-INV-001**: The defense path MUST NOT depend on an LLM
-- **FR-INV-002**: All defense profiles MUST be reproducible server-side from
-  versioned server-controlled state
-- **FR-INV-003**: The browser MUST NOT be authoritative for classification
-- **FR-INV-004**: Class-A evidence MUST contain session-specific causal correlation
-- **FR-INV-005**: Weak heuristics MUST NOT be silently promoted to causal evidence
-- **FR-INV-006**: Production-eligible canaries MUST NOT degrade ordinary accessibility
-- **FR-INV-007**: Canary actions MUST be harmless, local, and reversible
-- **FR-INV-008**: FireRaid MUST NOT falsely report successful completion of a
-  consequential real-world action that it actually discarded
-- **FR-INV-009**: Experiment configuration MUST be versioned and reproducible
-- **FR-INV-010**: Measured results MUST remain distinguishable from assumptions
-
-## Defense-in-Depth Composition
-
-Every defended session receives a coherent defense stack derived deterministically
-from `(secret, version, session_id)`:
-
-```
-session PRF
+ACCEPT / REVIEW / QUARANTINE
    │
-   ├── composition policy    — which families participate
-   ├── semantic strategy     — trap type and carrier
-   ├── causal channel        — how the trap becomes causal evidence
-   ├── decoy-field strategy  — field name, placement, value
-   ├── carrier strategy      — HTML carrier for opaque delivery
-   ├── placement             — DOM insertion point (field-level)
-   ├── identifiers           — opaque field names, element IDs
-   ├── route                 — session-bound decoy route token
-   ├── nonce                 — session-bound challenge value
-   ├── telemetry mask        — which events are captured
-   └── policy                — scoring policy
-```
+   ├── neutral applicant receipt
+   └── auditable host assessment
+~~~
 
-Every ordinary defended profile MUST contain:
+The browser is not authoritative. Client-side signals matter only when they
+correlate with server-observed state. FireRaid does not collect model prompts
+or transcripts, require invasive fingerprinting, or put an LLM in the defense
+path.
 
-```
-≥1 causal-capable mechanism  (semantic trap + route OR nonce field)
-+
-≥1 independent automation trap  (decoy field OR decoy route OR interaction)
-+
-optional weak behavioral observations  (telemetry, timing)
-```
+## Evidence
 
-Families vary per session to prevent systematic special-casing, but FireRaid
-never creates a weak session consisting entirely of low-confidence heuristics.
+**Bounded experimental evidence.** In the E6 evaluation, autonomous-agent
+cells produced **2/10 defended account creations versus 10/10 in control**.
+Under the experiment's stated matched-cell analysis and scope rules, the
+analyzer reports **53.3% attack-rate reduction** when the human cells are
+included. Human controls completed **5/5 in both arms**.
 
-### Defense Families
+This evaluation used one model, one agent architecture, and a small sample. It
+demonstrates that FireRaid's mechanism can materially affect autonomous signup
+behavior under the tested conditions. It does **not** establish a universal
+bot-detection rate or predict effectiveness against arbitrary agents,
+architectures, or deployments. See [Release Status](docs/RELEASE-STATUS.md)
+for the complete claim surface and evidence pointers.
 
-| Family        | What it does                                      | Causal? |
-|---------------|---------------------------------------------------|---------|
-| semantic      | Machine-safe semantic trap (invisible instruction) | Yes     |
-| decoy-field   | Invisible decoy form field                        | Yes (with nonce) / Strong (without) |
-| decoy-route   | Hidden same-origin endpoint                       | Yes     |
-| interaction   | Coarse interaction telemetry (focus, key, pointer) | Weak   |
+## Quick start
 
-**No environment flag removes or adds families.** The family composition is
-determined purely by the deterministic PRF over the session secret.
+FireRaid is source-distributed at present:
 
-## Quick Start
-
-```bash
-git clone <repo>
+~~~bash
+git clone https://github.com/B-A-M-N/FireRaid.git
 cd FireRaid
-npm install
-
-# Run the reference origin host (pure Node — no Cloudflare account, no
-# .dev.vars setup; it generates dev-only secrets itself)
+npm ci
 npm run dev:origin
-```
+~~~
 
-Then open http://127.0.0.1:3456/signup — a real signup page served by the
-origin host with FireRaid's middleware attached (the same `public/signup.js`
-client a deployment ships).
+Open [http://127.0.0.1:3456/signup](http://127.0.0.1:3456/signup) and use
+synthetic data. The local origin runtime does not require a Cloudflare
+account. The reference origin is for local development and evaluation only;
+it is not a production deployment.
 
-### Cloudflare Worker Deployment (Optional)
+## Production use
 
-The Worker deployment is a reference implementation, not a requirement. Each
-named environment binds its OWN D1 database (`wrangler.jsonc`): `dev`, `test`,
-`public-lab`, and `production` each restate `d1_databases`. **Production binds
-`fireraid-production`** (`database_id: d69ea0ad-...`), which must stay distinct
-from the public research database. Never "paste a database id into all env
-blocks" — each environment is a different database with a different lifecycle.
+Production deployment requires operator-owned durable stores, a real
+host-owned or provider-backed verification adapter, production secrets, an
+authoritative edge rate limiter for the admin login surface, and
+deployment-specific migration and smoke verification.
 
-The production sequence is **environment-scoped** — the migration command names
-the production database and the production env explicitly, so it can never
-migrate a different database than the deploy targets:
+The Cloudflare Worker and D1 setup in this repository is a reference
+deployment for the showcase, not a requirement of the host-neutral product.
+Read the [Deployment Guide](docs/DEPLOYMENT.md) for demo and production
+responsibilities, and the [Integration Guide](docs/INTEGRATION.md) for
+adapter contracts and the submission state machine.
 
-```bash
-# 1. Provision the production database once (prints its id — bind it ONLY in
-#    the production env block of wrangler.jsonc, not anywhere else).
-npx wrangler d1 create fireraid-production
-#    → paste the printed database_id into wrangler.jsonc → env.production.d1_databases
+## Product and evaluation planes
 
-# 2. Verify there are no unapplied migrations against THAT database + env.
-npx wrangler d1 migrations list fireraid-production --env production --remote
+| Product | Evaluation |
+|---|---|
+| Defends a real host flow | Attacks and measures the defense |
+| createFireRaidMiddleware + admit | createEvaluationMiddleware + admitEvaluation |
+| No model calls in the defense path | Optional adversarial model calls |
+| Host-owned durable adapters | Explicitly labeled test/reference stores |
 
-# 3. Apply any outstanding migrations (same explicit database + env).
-npx wrangler d1 migrations apply fireraid-production --env production --remote
+Evaluation code is not imported by the product path. An experiment result is
+not a promise that a deployed service will stop every agent.
 
-# 4. Set FIRERAID_RATE_LIMIT_LOGIN in the production env to name the
-#    authoritative edge rate-limiter (WAF rate-limit rule / Access / the
-#    ratelimit binding) protecting /api/admin/login. The Worker's in-isolate
-#    login map is a secondary per-isolate guard only — a production deploy is
-#    REFUSED until this is declared (FR-P1-07).
-#    → wrangler.jsonc → env.production.vars.FIRERAID_RATE_LIMIT_LOGIN
+## Documentation
 
-# 5. Preflight + deploy. The deploy runs the preflight in --deploy mode FIRST
-#    (FR-P0-D): remote migration verification is REQUIRED there — a missing
-#    CLOUDFLARE_API_TOKEN, an auth failure, or unparseable wrangler output is a
-#    HARD failure, never a skip. It also fails closed on a placeholder/absent
-#    production DB id, a collision with the public-lab DB, LAB_MODE != false, a
-#    missing TURNSTILE_EXPECTED_HOSTNAME, an undeclared AUTHORITATIVE LOGIN
-#    LIMITER, a production Worker that bundles the eval control plane, or a
-#    failed dry-run.
-npm run deploy:production        # == predeploy(--deploy mode) && exact clean HEAD deploy with FIRERAID_BUILD_SHA
-npm run deploy:lab               # named-env deploys only
+| Need | Read |
+|---|---|
+| Understand the system | [Architecture](docs/ARCHITECTURE.md) |
+| Integrate a host application | [Integration guide](docs/INTEGRATION.md) |
+| Deploy the reference Worker | [Deployment guide](docs/DEPLOYMENT.md) |
+| Review threats and limits | [Threat model](docs/THREAT-MODEL.md) |
+| Review security and report vulnerabilities | [Security](docs/SECURITY.md) |
+| Understand product invariants | [Product invariants](docs/INVARIANTS.md) |
+| Reproduce experiments | [Experiments](docs/EXPERIMENTS.md) |
+| Check evidence and claim tiers | [Release status](docs/RELEASE-STATUS.md) |
+| Review accessibility requirements | [Accessibility](docs/ACCESSIBILITY.md) |
+| Review the admin surface | [Admin dashboard](docs/ADMIN.md) |
 
-# Product showcase on this account: verified migrations, but no edge-limiter
-# attestation is required. This is not production-readiness certification.
-npm run deploy:demo
+## Development and verification
 
-# The production Worker (env production / production-test) binds
-# src/worker-production.ts — the PRODUCT-ONLY entrypoint that has no import
-# path into the evaluation control plane (src/eval/, lab routes, review
-# decision writes). The lab Worker (src/index.ts) is used by dev/test/public-lab.
-# See docs/INVARIANTS.md / the check:production-graph gate (FR-P1-05).
-```
+~~~bash
+npm run typecheck
+npm run lint
+npm run test:unit
+npm run test:product
+npm run release:verify:fast
+~~~
 
-After the deploy, run the smoke RUNNER (FR-RR-49 — it performs the probes
-itself and records OBSERVED statuses, not assertions): `/signup` 200 on the
-clean production plane, a headless submit without a solved Turnstile token
-refused fail-closed (4xx), and your own solved-widget submission's observed
-status. The receipt (FR-P0-A — post-deploy evidence must not be committed
-into the git object it certifies, so it is untracked) separates
-`machine_checks` from `operator_attestations`:
+The full test and release gates are documented in the
+[Deployment Guide](docs/DEPLOYMENT.md). Production E2E checks require an
+explicitly configured target.
 
-    npm run release:smoke:record -- \
-      --git-sha "$(git rev-parse HEAD)" \
-      --worker-version <Wrangler version id from the deploy output> \
-      --human-submit-observed-status <status from your solved-widget submit>
+## Security and responsible use
 
-The URL defaults to the production `TURNSTILE_EXPECTED_HOSTNAME` from
-`wrangler.jsonc` and must be HTTPS on that host. The next
-`npm run release:verify` run reads the receipt and claims `release_ready`
-for that SHA — the runner always verifies the id with
-`wrangler versions list --env production --json`, and the verifier independently
-checks the exact production Worker name, build SHA from `/health`, genuine
-session/CSRF fail-closed response, and v2 machine-observed schema (the old v1
-attestation format is rejected). (The ledger's
-`remote-deployment-smoke` entry records smoke HISTORY; the current
-release's proof is the receipt.)
-
-## Testing
-
-```bash
-npm test                  # Runs unit tests via vitest (tests/unit/)
-npm run test:unit         # Profile engine, catalog, correlation, decision
-npm run test:integration  # Full signup → canary → submit flow (requires worker)
-npm run test:e2e          # Playwright browser tests (lab plane, LAB_MODE=true)
-npm run test:e2e:production  # Production plane (LAB_MODE=false) across Chromium/Firefox/WebKit
-npm run test:a11y         # Accessibility assertions
-npm run test:ledger-proof    # end-to-end: attacker behavior → evidence → admission → upstream forwarding → origin ledger
-npm run test:envelope        # stateless production envelope issuance + forged-envelope rejection
-npm run test:budget          # Cloudflare/D1 resource budget harness
-npm run test:package         # package contract: build → pack → install tarball → import every subpath → round-trip
-npm run release:verify       # full deterministic release gate; stamps release-evidence.json
-```
-
-## Running Experiments
-
-```bash
-npm run experiment -- harness/experiments/exp-001.json   # run a manifest
-python3 harness/analysis/analyze.py <experiment-id>      # rates + group deltas
-python3 harness/analysis/analyze.py <experiment-id> --endpoints   # ARR/RRR + FP bound
-```
-
-See [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) for the manifest format,
-condition vocabulary (CONTROL / PRODUCTION_DEFAULT / ablations), the
-matched-cell analysis contract, and the experiment-series ledger.
-
-## Repository Layout
-
-```
-src/            Origin middleware + defense plane
-  core/         Profile engine, catalog, correlation, decision (host-neutral)
-  routes/       HTTP handlers (signup, submit, canary, telemetry, health)
-  security/     CSRF, cookies, headers, admin auth
-  analytics/    Canonical run-metric definitions (shared with the analyzer)
-  host-adapter/ Host-neutral admission seam (middleware, reference render)
-  cloudflare/   D1 stores, session envelopes, retention sweep (optional)
-  turnstile/    Turnstile verification
-harness/        Adversarial evaluation plane
-  core/         Runner, adapter interface, recorder
-  adapters/     Human control, raw-DOM, browser-use, ax-snapshot, raw-http,
-                dom-automation, fill-everything, humanized-pw, vision-only,
-                fireraid-aware
-  extractors/   HTML, simplified DOM, accessibility
-  experiments/  Declarative manifests
-  fixtures/     Persona pool (P2-TRAFFIC): 20 synthetic identities, drawn
-                per-cell (condition-independent) in "pool" mode
-  results/      Structured run output + experiment.json declaration sidecar
-  analysis/     Python stats + confidence intervals
-scripts/        Ledger proof, upstream, budget harness, test worker
-public/         Static signup + admin pages
-migrations/     D1 schema (apply the whole chain, never just 0001; optional)
-tests/          Unit, integration, e2e, accessibility
-docs/           Architecture, integration, threat model, invariants;
-                evidence-ledger.json is the machine-readable claim registry
-```
-
-## Acknowledgements
-
-FireRaid was originally developed in response to problems observed around open-access inference services, including [FreeInference.org](https://freeinference.org), but it is an independent, general-purpose project intended to be useful beyond any single platform or organization.
-
-FireRaid is **not affiliated with, sponsored by, endorsed by, commissioned by, or developed under the direction of FreeInference.org**. FreeInference.org did not request this project, has not reviewed or approved its design or implementation, and is not responsible for its claims, behavior, documentation, or technical decisions.
-
-Any references to FreeInference.org are provided for context and acknowledgement only. All responsibility for FireRaid, including any errors, overclaims, or design decisions, rests solely with this project and its maintainers.
-
-## Supporting Public Inference
-
-We believe providing inference to the public is a vital and increasingly necessary resource. Capable models are becoming part of writing, research, education, software, and ordinary problem-solving, but public access is still too easy to overlook or dismiss. Public inference gives more people room to learn, experiment, build, and participate. Its value is often clearest only after access disappears.
-
-If FireRaid is useful to you, or if you share that view, please consider sponsoring [FreeInference.org](https://freeinference.org).
+FireRaid is defense-in-depth, not a universal bot detector. Operators remain
+responsible for approval policy, identity, rate limiting, data retention,
+incident response, and the consequences of false positives. Read the
+[Security](docs/SECURITY.md) and [Threat Model](docs/THREAT-MODEL.md) before
+deploying. Follow the [vulnerability reporting instructions](docs/SECURITY.md#vulnerability-reporting)
+for security concerns.
 
 ## License
 
-**Source available under the [FireRaid Community Source License 1.0](LICENSE).**
+Source is available under the [FireRaid Community Source License 1.0](LICENSE).
 Free production use is permitted for qualifying inference providers,
-educational and research institutions, public-sector organizations, and
-other permitted service operators. Other uses may require separate
-authorization.
+educational and research institutions, public-sector organizations, and other
+permitted service operators; other uses may require separate authorization.
+Deceptive or unauthorized inference resale is excluded. Read the complete
+terms in [LICENSE](LICENSE).
 
-In plain terms: FireRaid is intended to be freely usable by organizations
-operating legitimate inference and online services, including academic and
-public-interest providers. The license is structured to prevent use by
-deceptive or unauthorized inference-resale operations — misrepresenting
-infrastructure or service, reselling without upstream authorization,
-brokering credentials, circumventing access controls, or deceptively
-hiding that a service is a proxy — while keeping the source available for
-inspection, research, modification, and contribution. Aggregation and
-routing are not prohibited as such; deception and unauthorized resale are.
+## Acknowledgements
+
+FireRaid was independently developed in part from thinking about abuse
+resistance for public inference services, including FreeInference.org. It is
+an independent, general-purpose project and is not affiliated with, sponsored
+by, commissioned by, endorsed by, or developed under the direction of
+FreeInference.org. FreeInference.org did not request or approve FireRaid and
+is not responsible for its design, implementation, documentation, or claims.
+
+## Supporting Public Inference
+
+Public inference gives more people room to learn, experiment, build, and
+participate. If FireRaid is useful to you, please consider supporting or
+sponsoring [FreeInference.org](https://freeinference.org) through its official
+support options; FireRaid does not collect or redirect contributions on its
+behalf.

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 180" role="img" aria-labelledby="title desc">
+  <title id="title">FireRaid</title>
+  <desc id="desc">FireRaid deterministic admission defense</desc>
+  <rect width="840" height="180" rx="28" fill="#111827"/>
+  <path d="M76 48h48l-14 22h32l-46 64 8-38H72z" fill="#fb7185"/>
+  <text x="178" y="103" fill="#f9fafb" font-family="Arial, Helvetica, sans-serif" font-size="76" font-weight="700" letter-spacing="-3">FireRaid</text>
+  <text x="183" y="137" fill="#cbd5e1" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="600" letter-spacing="4">ADMISSION DEFENSE</text>
+</svg>
