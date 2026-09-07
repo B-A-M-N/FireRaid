@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "FireRaid — deterministic per-session admission defense middleware. Embeds per-session causal traps (decoy fields, decoy routes, semantic instructions) that distinguish human applicants from autonomous agents server-side; runs on any origin, no Cloudflare required.",
+  "description": "Deterministic, server-led admission defense middleware for automated signup/application abuse.",
   "scripts": {
     "dev": "wrangler dev --env dev",
     "typecheck": "tsc --noEmit",

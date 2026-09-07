@@ -46,8 +46,9 @@ npm run deploy:production
 ~~~
 
 The demo path is intended for product inspection with synthetic data. It
-should not be used as a template for a public signup service without replacing
-its demo-specific configuration and completing the production checks.
+intentionally permits the tracked edge-limiter placeholder so the owner-hosted
+showcase can run. Replace that value with the operator's authoritative limiter
+before using the strict production path for a customer-facing service.
 
 ## Database and environment safety
 

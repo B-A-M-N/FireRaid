@@ -146,13 +146,15 @@ it is not a production deployment.
 
 ## Production use
 
-Production deployment requires operator-owned durable stores, a real
+Customer-facing production use requires operator-owned durable stores, a real
 host-owned or provider-backed verification adapter, production secrets, an
 authoritative edge rate limiter for the admin login surface, and
 deployment-specific migration and smoke verification.
 
 The Cloudflare Worker and D1 setup in this repository is a reference
 deployment for the showcase, not a requirement of the host-neutral product.
+The owner-hosted showcase intentionally permits the tracked limiter placeholder;
+each operator must replace it before running a customer-facing deployment.
 Read the [Deployment Guide](docs/DEPLOYMENT.md) for demo and production
 responsibilities, and the [Integration Guide](docs/INTEGRATION.md) for
 adapter contracts and the submission state machine.
