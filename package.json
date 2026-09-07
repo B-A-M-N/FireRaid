@@ -30,7 +30,7 @@
     "test:e2e:production": "playwright install chromium firefox webkit && playwright test --config=playwright.production.config.ts",
     "test:a11y": "playwright test --config=playwright.a11y.config.ts",
     "lint": "eslint \"src/**/*.ts\" \"harness/**/*.ts\" \"tests/**/*.ts\" \"demo/**/*.ts\" \"scripts/**/*.mjs\" --max-warnings 0",
-    "test:e2e:ci": "playwright install chromium firefox webkit && playwright test",
+    "test:e2e:ci": "playwright install --with-deps chromium firefox webkit && playwright test",
     "deploy": "npm run deploy:production",
     "deploy:lab": "wrangler deploy --env public-lab",
     "predeploy:production": "node scripts/predeploy-production.mjs --local",
