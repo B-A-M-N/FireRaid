@@ -17,11 +17,7 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": false,
-    "noEmit": true,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    }
+    "noEmit": true
   },
   "include": ["src/**/*.ts", "harness/**/*.ts", "tests/**/*.ts", "examples/**/*.ts"],
   "exclude": ["node_modules", "dist"]
