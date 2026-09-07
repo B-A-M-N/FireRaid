@@ -31,6 +31,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The unit directory includes two Chromium-backed parity/vision suites.
+      # Install only the browser they require; the full browser matrix below
+      # installs Chromium, Firefox, and WebKit for the wider E2E tier.
+      - name: Install Chromium for browser-backed unit checks
+        run: npx playwright install chromium
+
       - name: Typecheck
         run: npm run typecheck
 
