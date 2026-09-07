@@ -9,6 +9,7 @@ import { MAX_HOST_JSON_BYTES } from "../../types/telemetry.js";
 import type { ProfileKeyRing } from "../../core/session.js";
 import type { ResolvedFireRaidRoutes } from "../interface.js";
 import type { MiddlewareDeps, MiddlewareResult, EvaluationControls } from "../middleware-types.js";
+import { denialIdempotencyKey } from "../interface.js";
 import { DeadlineSignal } from "../deadline.js";
 import { resolveCsrfSecret } from "../profile/resolve-session-profile.js";
 import { verifyCsrf } from "./csrf.js";
@@ -66,7 +67,9 @@ export async function handleSubmitPost(
   }
   const formCheck = validateSignupForm(body.form ?? {});
   if (!formCheck.ok) {
-    await deadline.run(deps.enforcement.deny(sessionId, "INVALID_FORM", undefined, deadline.signal));
+    await deadline.run(deps.enforcement.deny(sessionId, "INVALID_FORM", undefined, deadline.signal, {
+      idempotencyKey: denialIdempotencyKey(sessionId),
+    }));
     return { kind: "deny", disposition: "INVALID_FORM" };
   }
   const form = formCheck.form;

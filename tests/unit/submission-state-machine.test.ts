@@ -35,10 +35,11 @@ import {
 } from "../../src/host-adapter/index.js";
 import { submissionIdempotencyKey } from "../../src/host-adapter/interface.js";
 import type {
+  AssessmentSnapshot,
   FinalSubmissionRecord,
   HostSubmissionStore,
 } from "../../src/host-adapter/interface.js";
-import type { EnforcementResult } from "../../src/host-adapter/interface.js";
+import { denialIdempotencyKey, type EnforcementResult } from "../../src/host-adapter/interface.js";
 import { DurableSubmissionStore, DurableCanaryStore } from "./helpers/durable-stores.js";
 import { deriveProductionProfileByVersion } from "../../src/core/profile-versions.js";
 
@@ -180,6 +181,40 @@ function gate(): { promise: Promise<void>; release: () => void } {
   return { promise, release };
 }
 
+function decisionRecord(sessionId: string, core: "REVIEW" | "QUARANTINE", runtime = core): FinalSubmissionRecord {
+  return {
+    version: 2,
+    outcome: { kind: "decision-denied", disposition: runtime === "QUARANTINE" ? "QUARANTINE" : "REVIEW" },
+    assessment: {
+      sessionId,
+      coreDisposition: core,
+      runtimeDisposition: runtime as "REVIEW" | "QUARANTINE",
+      score: 200,
+      risk: { score: 200, tier: "CAUSAL", confidence: "HIGH", recommendedAction: "custom-review", evidence: [] },
+    },
+  };
+}
+
+function replayBarrierStore(record: FinalSubmissionRecord, source: "claim" | "finalize"): HostSubmissionStore {
+  let projection: "pending" | "complete" = "pending";
+  return {
+    durability: "durable",
+    lookupFinal: async () => null,
+    claim: async () => source === "claim"
+      ? { kind: "replay", record }
+      : { kind: "conflict" },
+    finalizeDecision: async () => source === "finalize"
+      ? { kind: "replay", record }
+      : { kind: "conflict", state: "forward-claimed" },
+    complete: async () => {},
+    denyProjectionState: async () => projection,
+    markDenyProjectionComplete: async () => {
+      projection = "complete";
+    },
+    reconcileUncertain: async () => ({ kind: "conflict", state: "not-uncertain" }),
+  };
+}
+
 describe("FR-RR-40: finalizeDecision vs an in-flight forward claim", () => {
   it("INTERLEAVING 1: A claims and stalls mid-forward → B's finalizeDecision conflicts; A's claim survives and completes created", async () => {
     // A: claim succeeds, then allow() blocks on a gate we hold.
@@ -218,6 +253,8 @@ describe("FR-RR-40: finalizeDecision vs an in-flight forward claim", () => {
       outcome: { kind: "decision-denied", disposition: "QUARANTINE" },
       assessment: {
         sessionId: sid,
+        coreDisposition: "QUARANTINE",
+        runtimeDisposition: "QUARANTINE",
         disposition: "QUARANTINE",
         score: 200,
         risk: { score: 200, tier: "CAUSAL", confidence: "HIGH", recommendedAction: "REJECT", evidence: [] },
@@ -290,6 +327,8 @@ describe("FR-RR-40: finalizeDecision vs an in-flight forward claim", () => {
       outcome: { kind: "decision-denied", disposition: "QUARANTINE" },
       assessment: {
         sessionId: sid,
+        coreDisposition: "QUARANTINE",
+        runtimeDisposition: "QUARANTINE",
         disposition: "QUARANTINE",
         score: 200,
         risk: { score: 200, tier: "CAUSAL", confidence: "HIGH", recommendedAction: "REJECT", evidence: [] },
@@ -307,6 +346,8 @@ describe("FR-RR-40: finalizeDecision vs an in-flight forward claim", () => {
       outcome: { kind: "decision-denied", disposition: "REVIEW" },
       assessment: {
         sessionId: "s",
+        coreDisposition: "REVIEW",
+        runtimeDisposition: "REVIEW",
         disposition: "REVIEW",
         score: 65,
         risk: { score: 65, tier: "ELEVATED", confidence: "HIGH", recommendedAction: "REVIEW", evidence: [] },
@@ -320,6 +361,8 @@ describe("FR-RR-40: finalizeDecision vs an in-flight forward claim", () => {
       outcome: { kind: "decision-denied", disposition: "QUARANTINE" },
       assessment: {
         sessionId: "s",
+        coreDisposition: "QUARANTINE",
+        runtimeDisposition: "QUARANTINE",
         disposition: "QUARANTINE",
         score: 120,
         risk: { score: 120, tier: "HIGH", confidence: "HIGH", recommendedAction: "REJECT", evidence: [] },
@@ -363,6 +406,7 @@ describe("FR-RR-40: finalizeDecision vs an in-flight forward claim", () => {
         projectionMarks++;
       },
       denyProjectionState: async () => "pending" as const,
+      reconcileUncertain: async () => ({ kind: "conflict", state: "not-uncertain" } as const),
     };
     const { post } = await sessionDriver(deps, true);
     const r = await post(malformed);
@@ -458,6 +502,39 @@ describe("FR-RR-42: the deny is a repairable PROJECTION of the durable record", 
   });
 });
 
+describe("FR-RR-42 barrier coverage: every replay surface repairs pending deny projection", () => {
+  for (const source of ["finalize", "claim"] as const) {
+    it(`${source} replay: idempotent deny completes before the receipt`, async () => {
+      const deps = baseDeps();
+      deps.onOperationalError = () => {};
+      let denyCalls = 0;
+      let observedKey = "";
+      deps.enforcement = {
+        allow: async (): Promise<EnforcementResult> => {
+          throw new Error("replay must never forward");
+        },
+        deny: (
+          _sessionId: string,
+          _reason: string,
+          _annotation: object | undefined,
+          _signal: AbortSignal | undefined,
+          opts: { idempotencyKey: string }
+        ) => {
+          denyCalls++;
+          observedKey = opts.idempotencyKey;
+        },
+      };
+      const { post, sid } = await sessionDriver(deps, source === "finalize");
+      const record = decisionRecord(sid, "QUARANTINE");
+      const result = await post(replayBarrierStore(record, source));
+      expect(result.kind).toBe("deny");
+      expect(result.replayed).toBe(true);
+      expect(denyCalls).toBe(1);
+      expect(observedKey).toBe(denialIdempotencyKey(sid));
+    });
+  }
+});
+
 describe("FR-RR-41: FORWARD_UNCERTAIN is absorbing", () => {
   it("finalizeDecision on an uncertain session → conflict(forward-uncertain); claim → conflict; nothing resolves it automatically", async () => {
     const reference = new DurableSubmissionStore();
@@ -476,6 +553,8 @@ describe("FR-RR-41: FORWARD_UNCERTAIN is absorbing", () => {
       outcome: { kind: "decision-denied", disposition: "QUARANTINE" },
       assessment: {
         sessionId: "s1",
+        coreDisposition: "QUARANTINE",
+        runtimeDisposition: "QUARANTINE",
         disposition: "QUARANTINE",
         score: 200,
         risk: { score: 200, tier: "CAUSAL", confidence: "HIGH", recommendedAction: "REJECT", evidence: [] },
@@ -488,8 +567,51 @@ describe("FR-RR-41: FORWARD_UNCERTAIN is absorbing", () => {
     const c = await reference.claim("s1", submissionIdempotencyKey("s1"));
     expect(c.kind).toBe("conflict");
 
-    // Only an explicit operator reconciliation may resolve it (out of
-    // scope here — the point is that NO automatic path does).
+    const assessment: AssessmentSnapshot = {
+      sessionId: "s1",
+      coreDisposition: "QUARANTINE",
+      runtimeDisposition: "QUARANTINE",
+      score: 200,
+      risk: { score: 200, tier: "CAUSAL", confidence: "HIGH", recommendedAction: "operator-confirmed", evidence: [] },
+    };
+    const reconciled = await reference.reconcileUncertain(
+      "s1",
+      { kind: "created", assessment },
+      "operator@example.invalid"
+    );
+    expect(reconciled.kind).toBe("created");
+    if (reconciled.kind === "created") {
+      expect(reconciled.record.outcome).toEqual({ kind: "created" });
+      expect(reconciled.audit).toMatchObject({
+        actor: "operator@example.invalid",
+        oldState: "forward-uncertain",
+        newState: "terminal",
+      });
+    }
+    expect(await reference.lookupFinal("s1")).toEqual({ version: 2, outcome: { kind: "created" }, assessment });
+    expect(reference.reconciliationFor("s1")?.actor).toBe("operator@example.invalid");
+  });
+
+  it("operator reconciliation can release only with explicit not-created evidence and leaves an audit", async () => {
+    const reference = new DurableSubmissionStore();
+    const claim = await reference.claim("s2", submissionIdempotencyKey("s2"));
+    expect(claim.kind).toBe("claimed");
+    if (claim.kind !== "claimed") return;
+    await reference.complete(claim.claimId, { kind: "transport-failure", reason: "timeout", uncertain: true });
+    const released = await reference.reconcileUncertain(
+      "s2",
+      { kind: "not-created-release", reason: "upstream ledger lookup: no matching idempotency key" },
+      "operator@example.invalid"
+    );
+    expect(released.kind).toBe("released");
+    expect(await reference.lookupFinal("s2")).toBeNull();
+    expect((await reference.claim("s2", submissionIdempotencyKey("s2"))).kind).toBe("claimed");
+    expect(reference.reconciliationFor("s2")).toMatchObject({
+      actor: "operator@example.invalid",
+      oldState: "forward-uncertain",
+      newState: "none",
+      reason: "upstream ledger lookup: no matching idempotency key",
+    });
   });
 });
 
@@ -522,7 +644,7 @@ describe("FR-RR-55: the snapshot models BOTH the core and runtime dispositions",
 
   it("review mode: core QUARANTINE → runtime REVIEW; the record carries BOTH", async () => {
     const { record } = await captureSnapshot("review");
-    expect(record.assessment.disposition).toBe("QUARANTINE"); // core call
+    expect(record.assessment.coreDisposition).toBe("QUARANTINE"); // core call
     expect(record.assessment.runtimeDisposition).toBe("REVIEW"); // enforced form
     expect(record.outcome.kind).toBe("decision-denied");
     if (record.outcome.kind === "decision-denied") {
@@ -543,7 +665,7 @@ describe("FR-RR-55: the snapshot models BOTH the core and runtime dispositions",
     } else {
       expect(record.assessment.runtimeDisposition).toBe("REVIEW");
     }
-    expect(record.assessment.disposition).toBe("QUARANTINE"); // the core call
+    expect(record.assessment.coreDisposition).toBe("QUARANTINE"); // the core call
   });
 
   it("a CUSTOM tier map with autoSuppress at a low band → runtime QUARANTINE on a core REVIEW", async () => {
@@ -553,7 +675,7 @@ describe("FR-RR-55: the snapshot models BOTH the core and runtime dispositions",
       { minScore: 0, maxScore: 50, tier: "LOW", recommendedAction: "CONTINUE", autoSuppress: false },
       { minScore: 50, maxScore: null, tier: "CAUSAL", recommendedAction: "QUARANTINE", autoSuppress: true },
     ]);
-    expect(record.assessment.disposition).toBe("QUARANTINE"); // core call
+    expect(record.assessment.coreDisposition).toBe("QUARANTINE"); // core call
     expect(record.assessment.runtimeDisposition).toBe("QUARANTINE"); // custom map suppressed
     if (record.outcome.kind === "decision-denied") {
       expect(record.outcome.disposition).toBe("QUARANTINE"); // the ACTUAL action
@@ -568,6 +690,6 @@ describe("FR-RR-55: the snapshot models BOTH the core and runtime dispositions",
     const again = await store.lookupFinal(sid);
     expect(again).toEqual(record); // first writer wins, verbatim
     expect(again?.assessment.runtimeDisposition).toBe("REVIEW");
-    expect(again?.assessment.disposition).toBe("QUARANTINE");
+    expect(again?.assessment.coreDisposition).toBe("QUARANTINE");
   });
 });

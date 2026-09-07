@@ -37,6 +37,11 @@ import type { MiddlewareRouteConfig } from "../host-adapter/interface.js";
 /** The host-internal assessment FireRaid hands the host (never serialized). */
 export interface OriginAssessment {
   sessionId: string;
+  /** Core evidence/policy disposition before deployment remapping. */
+  coreDisposition: string;
+  /** Disposition actually enforced at the host boundary. */
+  runtimeDisposition: string;
+  /** @deprecated Use coreDisposition/runtimeDisposition. */
   disposition: string;
   decisionDenied: boolean;
   upstreamCreated?: boolean;
@@ -46,10 +51,10 @@ export interface OriginAssessment {
   /**
    * FR-RR-14: TRUE when this assessment is a REPLAY of the durably-stored
    * snapshot (a retried request after this session's forward already
-   * finalized) rather than a fresh evaluation. The disposition/score/risk
-   * are then the ORIGINAL ones — a host persisting assessments should
-   * upsert keyed on sessionId, so the replayed hook is an idempotent
-   * re-write of the same review row, never a duplicate.
+   * finalized) rather than a fresh evaluation. The core/runtime disposition
+   * pair, score, and risk are then the ORIGINAL ones — a host persisting
+   * assessments should upsert keyed on sessionId, so the replayed hook is an
+   * idempotent re-write of the same review row, never a duplicate.
    */
   replayed?: boolean;
   /**
@@ -301,6 +306,8 @@ async function writeResult(
     try {
       await onAssessment({
         sessionId: result.sessionId ?? "",
+        coreDisposition: result.coreDisposition ?? result.disposition ?? "UNKNOWN",
+        runtimeDisposition: result.runtimeDisposition ?? result.disposition ?? "UNKNOWN",
         disposition: result.disposition ?? "UNKNOWN",
         decisionDenied: result.decisionDenied === true,
         upstreamCreated: result.upstreamCreated,

@@ -1041,6 +1041,12 @@ describe("FR-RR-16: enforcementMode is explicit in production", () => {
         claim: async () => ({ kind: "claimed", claimId: "c", idempotencyKey: "k" }),
         complete: async () => {},
         finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+        denyProjectionState: async () => "complete" as const,
+        markDenyProjectionComplete: async () => {},
+        reconcileUncertain: async () => ({
+          kind: "conflict" as const,
+          state: "not-uncertain" as const,
+        }),
       },
     } as unknown as MiddlewareDeps;
   }

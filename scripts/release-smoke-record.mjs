@@ -17,16 +17,19 @@
  * What the runner actually does:
  *   1. Verifies the candidate SHA is exactly HEAD (a receipt for any other
  *      SHA certifies nothing about this tree).
- *   2. Verifies the worker-version id SHAPE (32 lowercase hex — Cloudflare
- *      version ids) — "banana" is rejected without a network call.
+ *   2. Verifies the worker-version id SHAPE (Wrangler UUID, with the
+ *      historical 32-hex form readable) — "banana" is rejected without a
+ *      network call.
  *   3. Requires an HTTPS URL whose hostname matches the production
  *      TURNSTILE_EXPECTED_HOSTNAME from wrangler.jsonc (the origin the
  *      Worker itself enforces — smoking a different host proves nothing).
  *   4. Probes, for real, over the network:
- *        signup_page       GET <url>/signup           → expect 200 HTML
+ *        signup_page       GET <url>/signup           → expect 200 HTML +
+ *                          issued session/CSRF material
+ *        health_build      GET <url>/health           → exact candidate SHA
  *        submit_failclosed POST /api/submit WITHOUT a
- *                          solved verification token → expect the
- *                          fail-closed 4xx (403), NOT a success receipt
+ *                          solved verification token → exact
+ *                          verification_required response (403)
  *        human_submit      POST /api/submit with a well-formed body —
  *                          OBSERVED status recorded; a full "human
  *                          submitted" assertion needs a solved Turnstile
@@ -34,10 +37,9 @@
  *                          status and REQUIRES the operator to supply
  *                          --human-submit-observed-status (from their
  *                          solved-widget run) for the ok verdict.
- *   5. Optionally (--verify-version): asks the Cloudflare API whether the
- *      version id belongs to the production Worker (proof the id is not
- *      from some other service). Needs CLOUDFLARE_API_TOKEN; failure here
- *      FAILS the receipt when requested.
+ *   5. Always asks Wrangler for the authoritative production version list and
+ *      proves the supplied id belongs to the explicitly named production
+ *      Worker. Failure here FAILS the receipt.
  *
  * The receipt distinguishes `machine_checks` (what THIS script observed
  * over the network) from `operator_attestations` (what only a human with a
@@ -50,7 +52,6 @@
  *     --worker-version <wrangler version id> \
  *     [--url https://fireraid-production.<subdomain>.workers.dev] \
  *     --human-submit-observed-status <status from your solved-widget submit> \
- *     [--verify-version] \
  *     [--notes <text>]
  *
  * --url defaults to https://<TURNSTILE_EXPECTED_HOSTNAME> from the
@@ -61,6 +62,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { parse as parseJsonc } from "jsonc-parser";
+import { isGitSha, isWorkerVersionId, productionConfig, VERSION_LOOKUP } from "./lib/release-proof.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "release-smoke-receipt.json");
@@ -70,10 +72,6 @@ function arg(name) {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
-function hasFlag(name) {
-  return process.argv.includes(`--${name}`);
-}
-
 function die(msg) {
   console.error(`release-smoke-record: ${msg}`);
   process.exit(1);
@@ -83,7 +81,6 @@ const gitSha = arg("git-sha");
 const workerVersion = arg("worker-version");
 const urlArg = arg("url");
 const humanStatus = arg("human-submit-observed-status");
-const verifyVersion = hasFlag("verify-version");
 const notes = arg("notes") ?? "";
 
 // ── 1. SHA binding ────────────────────────────────────────────────────────
@@ -91,6 +88,7 @@ if (!gitSha || !workerVersion) die("--git-sha and --worker-version are required"
 const r = spawnSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" });
 const head = r.status === 0 ? r.stdout.trim() : null;
 if (!head) die("cannot resolve git HEAD");
+if (!isGitSha(gitSha)) die(`--git-sha must be a 40-character lowercase SHA (got ${gitSha})`);
 if (gitSha !== head) {
   die(
     `--git-sha ${gitSha} does not equal current HEAD ${head}. A receipt certifies ` +
@@ -99,11 +97,10 @@ if (gitSha !== head) {
 }
 
 // ── 2. Worker-version SHAPE (FR-RR-49: "banana" must die here) ───────────
-const WORKER_VERSION_RE = /^[0-9a-f]{32}$/;
-if (!WORKER_VERSION_RE.test(workerVersion)) {
+if (!isWorkerVersionId(workerVersion)) {
   die(
     `--worker-version "${workerVersion}" is not a Cloudflare version id ` +
-    "(32 lowercase hex characters). Get the id from the `wrangler deploy` " +
+    "(a Wrangler UUID or historical 32 lowercase hex id). Get the id from `wrangler deploy` " +
     "output (or `wrangler versions list`) — the receipt must name the real " +
     "deployed version, not a label."
   );
@@ -116,7 +113,9 @@ try {
 } catch (err) {
   die(`cannot read ${CONFIG}: ${err.message}`);
 }
-const expectedHostname = config?.env?.production?.vars?.TURNSTILE_EXPECTED_HOSTNAME;
+const { workerName: expectedWorkerName, hostname: expectedHostname } = productionConfig(config);
+if (!expectedWorkerName) die("wrangler.jsonc production env must declare an explicit Worker name");
+if (!expectedHostname) die("wrangler.jsonc production env must declare TURNSTILE_EXPECTED_HOSTNAME");
 let url = urlArg;
 if (!url && expectedHostname) url = `https://${expectedHostname}`;
 if (!url) die("--url is required (or set TURNSTILE_EXPECTED_HOSTNAME in wrangler.jsonc production env)");
@@ -129,7 +128,7 @@ try {
 if (parsedUrl.protocol !== "https:") {
   die(`--url must be HTTPS (got ${parsedUrl.protocol}) — a plaintext smoke proves nothing about the deployed Worker`);
 }
-if (expectedHostname && parsedUrl.hostname !== expectedHostname) {
+if (parsedUrl.hostname !== expectedHostname) {
   die(
     `--url hostname ${parsedUrl.hostname} does not match the production ` +
     `TURNSTILE_EXPECTED_HOSTNAME ${expectedHostname} — smoking a different ` +
@@ -137,71 +136,116 @@ if (expectedHostname && parsedUrl.hostname !== expectedHostname) {
     "fail-closes on a foreign Host header)."
   );
 }
+if (parsedUrl.port !== "" || parsedUrl.username !== "" || parsedUrl.password !== "" ||
+    parsedUrl.pathname !== "/" || parsedUrl.search !== "" || parsedUrl.hash !== "") {
+  die("--url must be the exact HTTPS production origin with no port, path, query, fragment, or userinfo");
+}
 const BASE = parsedUrl.origin;
 
 // ── 4. The REAL probes ────────────────────────────────────────────────────
-/** curl with a hard timeout; returns { status, ok, body } — a transport
- * failure is status 0, never silently "ok". */
-function probe(method, path, body) {
-  const args = [
-    "-sS", "--max-time", "20",
-    "-o", "/dev/null", "-w", "%{http_code}",
-    "-X", method,
-    `${BASE}${path}`,
-    "-H", "content-type: application/json",
-  ];
-  if (body !== undefined) args.push("-d", JSON.stringify(body));
-  const p = spawnSync("curl", args, { encoding: "utf-8", timeout: 30_000 });
-  const status = parseInt((p.stdout ?? "").trim(), 10);
-  return { status: Number.isFinite(status) ? status : 0, transportError: p.status !== 0 };
+/** Native fetch with a hard timeout; transport failure is status 0. */
+async function probe(method, path, { body, headers = {}, captureBody = false } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const response = await fetch(`${BASE}${path}`, {
+      method,
+      headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+    return {
+      status: response.status,
+      body: captureBody ? await response.text() : "",
+      headers: response.headers,
+      transportError: false,
+    };
+  } catch {
+    return { status: 0, body: "", headers: new globalThis.Headers(), transportError: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function parseJsonBody(body) {
+  try { return JSON.parse(body); } catch { return null; }
+}
+
+function signupSessionMaterial(response) {
+  const setCookies = typeof response.headers.getSetCookie === "function"
+    ? response.headers.getSetCookie()
+    : [response.headers.get("set-cookie") ?? ""];
+  const cookies = setCookies
+    .flatMap((line) => line.match(/(?:^|,\s*)(__Host-fr_[^=]+=[^;]+)/g) ?? [])
+    .map((line) => line.replace(/^,\s*/, ""));
+  const csrf = response.body.match(/<input[^>]+name="csrf"[^>]+value="([^"]+)"/i)?.[1] ?? "";
+  return { cookie: cookies.join("; "), csrf };
+}
+
+// Validate operator input before making any remote request. This keeps a
+// typo in the attestation command from causing an unnecessary smoke probe.
+if (!humanStatus) {
+  die(
+    "--human-submit-observed-status is required: perform the solved-widget " +
+    "human submit yourself (README → Cloudflare Worker Deployment) and pass " +
+    "the HTTP status you observed."
+  );
+}
+const humanStatusNum = /^\d{3}$/.test(humanStatus) ? Number(humanStatus) : NaN;
+if (!Number.isInteger(humanStatusNum) || humanStatusNum < 100 || humanStatusNum > 599) {
+  die(`--human-submit-observed-status "${humanStatus}" is not an HTTP status code`);
 }
 
 console.log(`smoking ${BASE} …`);
-const signup = probe("GET", "/signup");
+const signup = await probe("GET", "/signup", { captureBody: true });
+const signupMaterial = signupSessionMaterial(signup);
 const machineChecks = {
   signup_page: {
-    ok: signup.status === 200,
+    ok: signup.status === 200 && signupMaterial.cookie.includes("__Host-fr_sid=") && signupMaterial.csrf.length > 0,
     observed_status: signup.status,
-    expect: "200 (signup page renders)",
+    expect: "200 HTML with issued session cookie and CSRF field",
     ...(signup.transportError ? { transport_error: true } : {}),
   },
+  health_build: null,
   submit_failclosed: null, // filled below
   human_submit: null, // filled below
 };
 
-// Fail-closed probe: a submit WITHOUT any verification token MUST be
-// refused. The middleware's decision-blind receipt means the exact status
-// lives in the reference runtime (403 for verification_required); the
-// property under test is "not 2xx" — a success receipt here would mean the
-// deployed Worker forwards unverified submissions.
-const failclosed = probe("POST", "/api/submit", {
-  csrf: "smoke-probe-no-token",
-  form: { name: "smoke", email: `smoke-${Date.now()}@example.invalid` },
-  eventBatch: [],
+const health = await probe("GET", "/health", { captureBody: true });
+const healthBody = parseJsonBody(health.body);
+const observedBuildSha = health.headers.get("x-fireraid-build") ?? healthBody?.build ?? null;
+machineChecks.health_build = {
+  ok: health.status === 200 && observedBuildSha === gitSha,
+  observed_status: health.status,
+  observed_build_sha: observedBuildSha,
+  expect: `200 with X-FireRaid-Build exactly ${gitSha}`,
+  ...(health.transportError ? { transport_error: true } : {}),
+};
+
+// Fail-closed probe: a submit WITHOUT any verification token must use the
+// genuine GET-issued session and CSRF, otherwise an earlier
+// generic rejection could masquerade as proof that Turnstile is enforced.
+const failclosed = await probe("POST", "/api/submit", {
+  headers: { cookie: signupMaterial.cookie },
+  captureBody: true,
+  body: {
+    csrf: signupMaterial.csrf,
+    form: { name: "smoke", email: `smoke-${Date.now()}@example.invalid` },
+    eventBatch: [],
+  },
 });
+const failclosedBody = parseJsonBody(failclosed.body);
 machineChecks.submit_failclosed = {
-  ok: failclosed.status >= 400 && failclosed.status < 500 && failclosed.status !== 0,
+  ok: failclosed.status === 403 && failclosedBody?.status === "verification_required",
   observed_status: failclosed.status,
-  expect: "4xx fail-closed (a submit without a solved verification token must be refused)",
+  verification_status: failclosedBody?.status ?? null,
+  expect: "403 JSON {status: verification_required} with a genuine session/CSRF",
   ...(failclosed.transportError ? { transport_error: true } : {}),
 };
 
 // Human submit: the operator's solved-widget run is the only real human
 // path. The runner requires its OBSERVED status and applies the honest
 // verdict (2xx = the applicant path works end-to-end).
-if (!humanStatus) {
-  die(
-    "--human-submit-observed-status is required: perform the solved-widget " +
-    "human submit yourself (README → Cloudflare Worker Deployment) and pass " +
-    "the HTTP status you observed. The runner records it as an operator " +
-    "attestation backed by a machine check (the other probes are fully " +
-    "machine-observed)."
-  );
-}
-const humanStatusNum = parseInt(humanStatus, 10);
-if (!Number.isFinite(humanStatusNum) || humanStatusNum < 100 || humanStatusNum > 599) {
-  die(`--human-submit-observed-status "${humanStatus}" is not an HTTP status code`);
-}
 machineChecks.human_submit = {
   ok: humanStatusNum >= 200 && humanStatusNum < 300,
   observed_status: humanStatusNum,
@@ -209,49 +253,28 @@ machineChecks.human_submit = {
   source: "operator-observed", // honest provenance — the runner did NOT perform it
 };
 
-// ── 5. Optional: confirm the version id belongs to THIS Worker ───────────
-let versionVerified = null;
-if (verifyVersion) {
-  const token = process.env.CLOUDFLARE_API_TOKEN;
-  if (!token) {
-    die("--verify-version requires CLOUDFLARE_API_TOKEN");
-  }
-  const account = spawnSync(
-    "npx", ["wrangler", "whoami"],
-    { cwd: ROOT, encoding: "utf-8", timeout: 60_000 }
+// ── 5. Mandatory authoritative version proof ────────────────────────────
+const versions = spawnSync(
+  "npx", ["wrangler", "versions", "list", "--env", "production", "--json"],
+  { cwd: ROOT, encoding: "utf-8", timeout: 60_000, shell: false }
+);
+let versionsJson = null;
+try { versionsJson = JSON.parse(versions.stdout ?? ""); } catch { /* unparseable */ }
+const versionRows = Array.isArray(versionsJson) ? versionsJson : versionsJson?.versions;
+const versionFound = Array.isArray(versionRows) && versionRows.some((row) => row?.id === workerVersion);
+if (versions.status !== 0 || !versionFound) {
+  die(
+    `version ${workerVersion} was not returned by ${VERSION_LOOKUP} ` +
+    `for Worker ${expectedWorkerName}; inspect Wrangler authentication/output before recording evidence.`
   );
-  const accountMatch = (account.stdout ?? "").match(/([0-9a-f]{32})/);
-  if (!accountMatch) {
-    die("could not resolve the Cloudflare account id via `wrangler whoami`");
-  }
-  const workerName = config?.name ? `${config.name}` : null;
-  const envName = config?.env?.production?.name ?? workerName;
-  if (!envName) die("cannot determine the production Worker name from wrangler.jsonc");
-  const api = spawnSync(
-    "curl",
-    [
-      "-sS", "--max-time", "20",
-      "-H", `Authorization: Bearer ${token}`,
-      `https://api.cloudflare.com/client/v4/accounts/${accountMatch[1]}/workers/scripts/${envName}/versions/${workerVersion}`,
-    ],
-    { encoding: "utf-8", timeout: 30_000 }
-  );
-  let apiJson = null;
-  try { apiJson = JSON.parse(api.stdout ?? ""); } catch { /* unparseable */ }
-  versionVerified = {
-    ok: apiJson?.success === true,
-    worker_name: envName,
-    checked_at: new Date().toISOString(),
-  };
-  if (!versionVerified.ok) {
-    die(
-      `version ${workerVersion} could NOT be confirmed on Worker "${envName}" ` +
-      `(api success=${apiJson?.success}). The receipt must bind a version id ` +
-      "that really belongs to the production Worker."
-    );
-  }
-  console.log(`version ${workerVersion} confirmed on Worker ${envName}`);
 }
+const versionVerified = {
+  ok: true,
+  worker_name: expectedWorkerName,
+  lookup: VERSION_LOOKUP,
+  checked_at: new Date().toISOString(),
+};
+console.log(`version ${workerVersion} confirmed by ${VERSION_LOOKUP} (${expectedWorkerName})`);
 
 const failedChecks = Object.entries(machineChecks)
   .filter(([, c]) => !c.ok)
@@ -276,6 +299,7 @@ const receipt = {
   git_sha: gitSha,
   worker_version_id: workerVersion,
   deployed_url: BASE,
+  deployed_build_sha: gitSha,
   recorded_at: new Date().toISOString(),
   machine_checks: machineChecks,
   operator_attestations: {

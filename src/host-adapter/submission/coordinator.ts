@@ -24,16 +24,17 @@ import type { DefenseProfile } from "../../types/profile.js";
 import { buildForwardCookieHeader } from "../forward-security.js";
 import { DeadlineSignal, DeadlineError, DEFAULT_DURABILITY_TIMEOUT_MS } from "../deadline.js";
 import { ProfileHashMismatchError } from "../middleware-errors.js";
-import { submissionIdempotencyKey } from "../interface.js";
+import { denialIdempotencyKey, submissionIdempotencyKey } from "../interface.js";
 import type {
   VerificationInput,
   HostSubmissionClaim,
   FinalSubmissionOutcome,
-  FinalizeDecisionResult,
+  FinalSubmissionRecord,
   AssessmentSnapshot,
   EnforcementResult,
+  DecisionDisposition,
 } from "../interface.js";
-import { parseClaimResult, parseStoredRecord } from "./store-parsers.js";
+import { parseClaimResult, parseFinalizeDecisionResult, parseStoredRecord } from "./store-parsers.js";
 import type {
   MiddlewareDeps,
   MiddlewareResult,
@@ -82,44 +83,6 @@ export function isValidEnforcementResult(v: unknown): v is EnforcementResult {
   }
 }
 
-/**
- * FR-RR-40: SEMANTIC runtime validation of the finalizeDecision answer.
- * The static type says `FinalizeDecisionResult`, but the seam is a host
- * callback — a JS host can hand back `42`, `{kind:"nonsense"}`, or a
- * "stored" missing its record. Validating ONLY by exception (try/catch)
- * would let a malformed NON-throwing answer fall through the conflict and
- * replay branches and be treated as a SUCCESSFUL first-write terminal
- * denial — FireRaid would project a deny on a session whose durable state
- * it never actually wrote. Only the three documented kinds, each with its
- * required fields in documented shape, pass.
- */
-export function isValidFinalizeDecisionResult(v: unknown): v is FinalizeDecisionResult {
-  if (typeof v !== "object" || v === null) return false;
-  const kind = (v as { kind?: unknown }).kind;
-  if (kind === "stored" || kind === "replay") {
-    const record = (v as { record?: unknown }).record;
-    if (typeof record !== "object" || record === null) return false;
-    // The echoed record must at least carry a KNOWN terminal outcome kind —
-    // the coordinator reads outcome.kind (stored path asserts decision-denied
-    // semantics; replay path surfaces the record verbatim) and passes the
-    // assessment through. An unknown-kind record is a malformed answer.
-    const outcomeKind = (record as { outcome?: { kind?: unknown } }).outcome?.kind;
-    return (
-      outcomeKind === "created" ||
-      outcomeKind === "business-rejected" ||
-      outcomeKind === "queued-for-retry" ||
-      outcomeKind === "transport-failure" ||
-      outcomeKind === "decision-denied"
-    );
-  }
-  if (kind === "conflict") {
-    const state = (v as { state?: unknown }).state;
-    return state === "forward-claimed" || state === "forward-uncertain";
-  }
-  return false;
-}
-
-
 // Strip FireRaid-injected fields before forwarding to the upstream so the
 // ordinary app's ledger never carries our decoy/telemetry artifacts.
 // E5 lever 1: SESSION_RESPONSE_FIELD (the actuator sink the route ask binds
@@ -144,13 +107,14 @@ export function stripFireRaidFields(
  * receipt. The stored record IS the receipt: the applicant gets the same
  * neutral result as the request that actually did the work, the upstream
  * is never called again, and the ORIGINAL assessment rides along
- * (`replayed` orthogonal to the semantic disposition). A validated
- * `decision-denied` record replays as the original decision deny; a legacy
- * assessment-less record (pre-FR-RR-14 store) degrades explicitly.
+ * (`replayed` orthogonal to the semantic disposition). A validated V2
+ * `decision-denied` record replays as the original decision deny; records
+ * without the mandatory assessment are rejected at the parser boundary.
  */
 function replayReceipt(
   sessionId: string,
-  stored: { outcome: FinalSubmissionOutcome; assessment: AssessmentSnapshot | null }
+  stored: FinalSubmissionRecord,
+  replayed = true
 ): MiddlewareResult {
   if (stored.outcome.kind === "decision-denied") {
     // A decision denial replays as the SAME denial — never re-evaluated,
@@ -158,32 +122,30 @@ function replayReceipt(
     // projection (the applicant plane sees what the original saw).
     return {
       kind: "deny",
+      // Deprecated compatibility alias: retain the historical public value
+      // (the runtime action) while callers migrate to the explicit pair.
       disposition: stored.outcome.disposition,
+      coreDisposition: stored.assessment.coreDisposition,
+      runtimeDisposition: stored.assessment.runtimeDisposition,
       decisionDenied: true,
       sessionId,
-      replayed: true,
-      ...(stored.assessment
-        ? {
-            score: stored.assessment.score,
-            submittedEmail: stored.assessment.submittedEmail,
-            risk: stored.assessment.risk,
-          }
-        : {}),
+      ...(replayed ? { replayed: true } : {}),
+      score: stored.assessment.score,
+      submittedEmail: stored.assessment.submittedEmail,
+      risk: stored.assessment.risk,
     };
   }
   return {
     kind: "admit",
     upstreamCreated: stored.outcome.kind === "created",
     sessionId,
-    disposition: stored.assessment?.disposition ?? "REPLAY",
-    replayed: true,
-    ...(stored.assessment
-      ? {
-          score: stored.assessment.score,
-          submittedEmail: stored.assessment.submittedEmail,
-          risk: stored.assessment.risk,
-        }
-      : {}),
+    disposition: stored.assessment.coreDisposition,
+    coreDisposition: stored.assessment.coreDisposition,
+    runtimeDisposition: stored.assessment.runtimeDisposition,
+    ...(replayed ? { replayed: true } : {}),
+    score: stored.assessment.score,
+    submittedEmail: stored.assessment.submittedEmail,
+    risk: stored.assessment.risk,
     ...(stored.outcome.kind !== "created" ? { enforcementDetail: stored.outcome } : {}),
   };
 }
@@ -261,6 +223,50 @@ export async function coordinateSubmission(
     }
   }
 
+  /**
+   * The single terminal-record service path. Every replay source — the
+   * non-claiming lookup, claim replay, and finalizeDecision replay — comes
+   * through this barrier so a pending decision denial can never be
+   * acknowledged before its host projection is repaired.
+   */
+  async function serveTerminalRecord(
+    record: FinalSubmissionRecord,
+    replayed = true
+  ): Promise<MiddlewareResult> {
+    if (record.outcome.kind === "decision-denied") {
+      try {
+        const projection = await deadline.run(
+          deps.submissionStore.denyProjectionState(sessionId, deadline.signal)
+        );
+        if (projection === "pending") {
+          await deadline.run(
+            deps.enforcement.deny(
+              sessionId,
+              record.assessment.runtimeDisposition,
+              record.assessment.risk,
+              deadline.signal,
+              { idempotencyKey: denialIdempotencyKey(sessionId) }
+            )
+          );
+          await withDurabilityDeadline((signal) =>
+            deps.submissionStore.markDenyProjectionComplete(sessionId, signal)
+          );
+        }
+      } catch (err) {
+        reportOperationalError(deps, "enforcement.deny(replay-repair)", err);
+        return {
+          kind: "forward-failed",
+          forwardFailureReason: "submission_deny_projection_failed",
+          sessionId,
+          score: record.assessment.score,
+          coreDisposition: record.assessment.coreDisposition,
+          runtimeDisposition: record.assessment.runtimeDisposition,
+        };
+      }
+    }
+    return replayReceipt(sessionId, record, replayed);
+  }
+
   // Replay check WITHOUT claiming (P0-E fix): the old flow claimed the
   // forward slot merely to discover a finalized outcome, so any early
   // failure AFTER the claim (unknown profile key, verification failure,
@@ -274,7 +280,7 @@ export async function coordinateSubmission(
   // never re-evaluates a session whose admission story is already
   // terminal.
   const idempotencyKey = submissionIdempotencyKey(sessionId);
-  let stored: { outcome: FinalSubmissionOutcome; assessment: AssessmentSnapshot | null } | null = null;
+  let stored: { outcome: FinalSubmissionOutcome; assessment: AssessmentSnapshot } | null = null;
   let lookupInvalid = false;
   try {
     const raw = await deadline.run(
@@ -303,48 +309,7 @@ export async function coordinateSubmission(
     return { kind: "forward-failed", forwardFailureReason: "submission_claim_invalid" };
   }
   if (stored) {
-    // FR-RR-42: a stored DECISION-denied record whose deny PROJECTION is
-    // still "pending" (the previous request failed between the durable
-    // record and enforcement.deny) must be REPAIRED before the receipt
-    // leaves — the host queue annotation is part of the denial's story.
-    // The re-deny is idempotent by contract; only after it lands (and the
-    // completion marker is durable) does the replay acknowledge.
-    if (
-      stored.outcome.kind === "decision-denied" &&
-      deps.submissionStore.denyProjectionState
-    ) {
-      try {
-        const projection = await deadline.run(
-          deps.submissionStore.denyProjectionState(sessionId, deadline.signal)
-        );
-        if (projection === "pending") {
-          await deadline.run(
-            deps.enforcement.deny(
-              sessionId,
-              stored.outcome.disposition,
-              stored.assessment?.risk as never,
-              deadline.signal
-            )
-          );
-          await withDurabilityDeadline(
-            (signal) =>
-              deps.submissionStore.markDenyProjectionComplete?.(sessionId, signal) ??
-              Promise.resolve()
-          );
-        }
-      } catch (err) {
-        // Repair failed: the receipt must NOT acknowledge — the host's
-        // denial record still may not exist. Fail closed (retryable).
-        reportOperationalError(deps, "enforcement.deny(replay-repair)", err);
-        return {
-          kind: "forward-failed",
-          forwardFailureReason: "submission_deny_projection_failed",
-          sessionId,
-          ...(stored.assessment ? { score: stored.assessment.score } : {}),
-        };
-      }
-    }
-    return replayReceipt(sessionId, stored);
+    return serveTerminalRecord({ version: 2, outcome: stored.outcome, assessment: stored.assessment });
   }
 
   try {
@@ -356,7 +321,9 @@ export async function coordinateSubmission(
       // deny previously ran un-wrapped, so a broken host deny() could hang
       // the request indefinitely on exactly this path.
       await deadline.run(
-        deps.enforcement.deny(sessionId, "UNKNOWN_PROFILE_KEY", undefined, deadline.signal)
+        deps.enforcement.deny(sessionId, "UNKNOWN_PROFILE_KEY", undefined, deadline.signal, {
+          idempotencyKey: denialIdempotencyKey(sessionId),
+        })
       );
       return { kind: "deny", disposition: "UNKNOWN_PROFILE_KEY" };
     }
@@ -444,7 +411,9 @@ export async function coordinateSubmission(
     // silent repair (FR-R6-035 semantics on the host plane).
     const ingest = await deadline.run(deps.telemetry.accept(sessionId, ctx.body.eventBatch ?? [], deadline.signal));
     if (ingest.kind === "invalid") {
-      await deadline.run(deps.enforcement.deny(sessionId, "INVALID_TELEMETRY", undefined, deadline.signal));
+      await deadline.run(deps.enforcement.deny(sessionId, "INVALID_TELEMETRY", undefined, deadline.signal, {
+        idempotencyKey: denialIdempotencyKey(sessionId),
+      }));
       return { kind: "deny", disposition: "INVALID_TELEMETRY" };
     }
     // kind "conflict" on the submit carrier is NOT a denial either — the
@@ -516,7 +485,8 @@ export async function coordinateSubmission(
     const risk = projectRisk(decision.score, evidence, riskTiers);
     const tierConfig = getRiskTier(decision.score, riskTiers);
     const mode = deps.enforcementMode ?? "advisory";
-    const runtimeDisposition = resolveRuntimeDisposition(decision.disposition, mode, tierConfig);
+    const coreDisposition = decision.disposition as DecisionDisposition;
+    const runtimeDisposition = resolveRuntimeDisposition(decision.disposition, mode, tierConfig) as DecisionDisposition;
 
     // P1-AUDIT-2 (P0-4): the email the stripped registration carries —
     // the join key to the host's own ledger truth.
@@ -541,7 +511,7 @@ export async function coordinateSubmission(
       // on. A replay can now reproduce the honest pair: core QUARANTINE
       // under a review-mode deployment shows QUARANTINE/REVIEW, not a
       // fabricated REVIEW-only story.
-      disposition: decision.disposition,
+      coreDisposition,
       runtimeDisposition,
       score: decision.score,
       risk: riskProjection,
@@ -582,14 +552,17 @@ export async function coordinateSubmission(
         // deployment that actually issued REVIEW.
         disposition: runtimeDisposition === "QUARANTINE" ? "QUARANTINE" : "REVIEW",
       };
+      const expectedRecord: FinalSubmissionRecord = {
+        version: 2,
+        outcome: decisionOutcome,
+        assessment: assessmentSnapshot,
+      };
       let finalizeResult;
       try {
         finalizeResult = await withDurabilityDeadline((signal) =>
           deps.submissionStore.finalizeDecision(
             sessionId,
-            // FR-RR-26: every NEW terminal record is v2 — the assessment
-            // snapshot is mandatory, so the replay is never degraded.
-            { version: 2, outcome: decisionOutcome, assessment: assessmentSnapshot },
+            expectedRecord,
             signal
           )
         );
@@ -607,10 +580,17 @@ export async function coordinateSubmission(
           score: decision.score,
           submittedEmail,
           disposition: decision.disposition,
+          coreDisposition,
+          runtimeDisposition,
           risk: riskProjection,
         };
       }
-      if (!isValidFinalizeDecisionResult(finalizeResult)) {
+      const parsedFinalizeResult = parseFinalizeDecisionResult(
+        finalizeResult,
+        sessionId,
+        expectedRecord
+      );
+      if (!parsedFinalizeResult) {
         // FR-RR-40: a malformed NON-throwing answer is a host-contract
         // violation, not "stored" — treating it as a successful first write
         // would project a deny against durable state nobody wrote. Fail
@@ -627,11 +607,13 @@ export async function coordinateSubmission(
           score: decision.score,
           submittedEmail,
           disposition: decision.disposition,
+          coreDisposition,
+          runtimeDisposition,
           risk: riskProjection,
         };
       }
       // FR-RR-40: every result kind is handled — never ignored.
-      if (finalizeResult.kind === "conflict") {
+      if (parsedFinalizeResult.kind === "conflict") {
         // Another request owns — or may own — the irreversible forward
         // (FORWARD_CLAIMED: mid-flight; FORWARD_UNCERTAIN: unknown upstream
         // outcome). This request must NOT deny, NOT overwrite the durable
@@ -641,7 +623,7 @@ export async function coordinateSubmission(
         // outcome will replay on the retry. FORWARD_UNCERTAIN additionally
         // means no retry can ever resolve the session — log it so the
         // operator-reconciliation need is visible.
-        if (finalizeResult.state === "forward-uncertain") {
+        if (parsedFinalizeResult.state === "forward-uncertain") {
           reportOperationalError(
             deps,
             "submissionStore.finalizeDecision",
@@ -661,59 +643,23 @@ export async function coordinateSubmission(
           score: decision.score,
           submittedEmail,
           disposition: decision.disposition,
+          coreDisposition,
+          runtimeDisposition,
           risk: riskProjection,
         };
       }
-      if (finalizeResult.kind === "replay") {
-        // FR-RR-40: a concurrent request finalized this session FIRST (its
-        // record outranks our fresh evaluation). Surface ITS outcome —
-        // never run deny-side effects against a finalized session whose
-        // record may say CREATED. The replay receipt reproduces the
-        // original record exactly.
-        return replayReceipt(sessionId, {
-          outcome: finalizeResult.record.outcome,
-          assessment: finalizeResult.record.assessment,
-        });
+      if (parsedFinalizeResult.kind === "replay") {
+        // FR-RR-40/42: a concurrent request finalized this session FIRST.
+        // Its record outranks our fresh evaluation, and it must pass through
+        // the same pending-projection repair barrier as every other replay.
+        return serveTerminalRecord(parsedFinalizeResult.record);
       }
-      // kind "stored" — this request owns the terminal denial. P1-10:
-      // await durability of the deny annotation (e.g. for a host that
-      // persists review-queue data asynchronously). FR-RR-42: the deny is
-      // a PROJECTION of the durable record (born "pending"); a failure
-      // here fails the request 5xx with the record durable, and the retry
-      // repairs the projection (below) before acknowledging.
-      try {
-        await deadline.run(deps.enforcement.deny(sessionId, decision.disposition, riskProjection, deadline.signal));
-      } catch (err) {
-        reportOperationalError(deps, "enforcement.deny(decision-deny)", err);
-        return {
-          kind: "forward-failed",
-          forwardFailureReason: "submission_deny_projection_failed",
-          sessionId,
-          score: decision.score,
-          submittedEmail,
-          disposition: decision.disposition,
-          risk: riskProjection,
-        };
-      }
-      try {
-        await withDurabilityDeadline((signal) =>
-          deps.submissionStore.markDenyProjectionComplete?.(sessionId, signal) ?? Promise.resolve()
-        );
-      } catch (err) {
-        // The projection landed but its completion marker did not — the
-        // retry's repair path (denyProjectionState → pending) re-runs the
-        // IDEMPOTENT deny and re-marks. Fail the request closed.
-        reportOperationalError(deps, "submissionStore.markDenyProjectionComplete", err);
-        return {
-          kind: "forward-failed",
-          forwardFailureReason: "submission_deny_projection_failed",
-          sessionId,
-          score: decision.score,
-          submittedEmail,
-          disposition: decision.disposition,
-          risk: riskProjection,
-        };
-      }
+      // kind "stored" — this request owns the terminal denial. Serving it
+      // through the same helper makes the projection barrier authoritative
+      // for all three terminal paths, including a host that returns an
+      // asynchronous store acknowledgement.
+      const served = await serveTerminalRecord(parsedFinalizeResult.record, false);
+      if (served.kind === "forward-failed") return served;
       try {
         await withDurabilityDeadline((signal) => finalizeStores(deps, sessionId, signal));
       } catch (err) {
@@ -723,7 +669,11 @@ export async function coordinateSubmission(
       }
       return {
         kind: "deny",
-        disposition: decision.disposition,
+        // Deprecated compatibility alias: preserve the historical fresh
+        // decision value while callers migrate to the explicit pair.
+        disposition: coreDisposition,
+        coreDisposition,
+        runtimeDisposition,
         decisionDenied: true,
         sessionId,
         score: decision.score,
@@ -784,11 +734,11 @@ export async function coordinateSubmission(
       if (parsed.kind === "replay") {
         // Another request did the work between lookupFinal and the claim:
         // its stored record is the receipt; the upstream is never called.
-        // FR-RR-14: the original assessment (disposition/score/email/risk)
+        // FR-RR-14: the original assessment (core/runtime disposition,
+        // score/email/risk)
         // replays with it, `replayed` orthogonal to the semantic
-        // disposition. A store still speaking the pre-FR-RR-14 replay shape
-        // degrades to an assessment-less record instead of crashing.
-        return replayReceipt(sessionId, { outcome: parsed.outcome, assessment: parsed.assessment });
+        // disposition.
+        return serveTerminalRecord(parsed.record);
       }
       if (parsed.kind !== "claimed") {
         return { kind: "forward-failed", forwardFailureReason: "submission_claim_conflict" };
@@ -894,6 +844,8 @@ export async function coordinateSubmission(
         score: decision.score,
         submittedEmail,
         disposition: decision.disposition,
+        coreDisposition,
+        runtimeDisposition,
         risk: riskProjection,
       };
     }
@@ -942,6 +894,8 @@ export async function coordinateSubmission(
         score: decision.score,
         submittedEmail,
         disposition: decision.disposition,
+        coreDisposition,
+        runtimeDisposition,
       };
     }
     const upstreamCreated = detail.kind === "created";
@@ -963,6 +917,8 @@ export async function coordinateSubmission(
     return {
       kind: "admit",
       disposition: decision.disposition,
+      coreDisposition,
+      runtimeDisposition,
       upstreamCreated,
       enforcementDetail: detail,
       sessionId,

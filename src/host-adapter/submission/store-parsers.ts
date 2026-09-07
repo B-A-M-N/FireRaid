@@ -19,6 +19,8 @@ import type {
   HostSubmissionClaim,
   FinalSubmissionOutcome,
   AssessmentSnapshot,
+  DecisionDisposition,
+  FinalSubmissionRecord,
 } from "../interface.js";
 
 /** Non-empty string with no whitespace-only degenerates (FR-RR-54: trim —
@@ -36,9 +38,13 @@ function isBusinessStatus(v: unknown): v is number {
  * FR-RR-23: validate an assessment snapshot independently — the parser that
  * owns the outcome kind must not be the one that vouches for the snapshot's
  * fields. `submittedEmail` stays optional (not every evaluation saw a
- * parseable email field); disposition, score, and risk are REQUIRED in the
- * v2 record contract (FR-RR-26).
+ * parseable email field); both dispositions, score, and risk are REQUIRED
+ * in the V2 record contract (FR-RR-26).
  */
+function isDecisionDisposition(value: unknown): value is DecisionDisposition {
+  return value === "ACCEPT" || value === "REVIEW" || value === "QUARANTINE";
+}
+
 function parseAssessment(value: unknown, expectedSessionId: string): AssessmentSnapshot | null {
   if (typeof value !== "object" || value === null) return null;
   const v = value as Record<string, unknown>;
@@ -46,26 +52,19 @@ function parseAssessment(value: unknown, expectedSessionId: string): AssessmentS
   // FR-RR-54: the semantic enums are validated against their documented
   // ranges, not merely "non-empty string" — a store echoing
   // tier:"nonsense" cannot vouch for a risk snapshot.
-  if (
-    v.disposition !== "ACCEPT" &&
-    v.disposition !== "REVIEW" &&
-    v.disposition !== "QUARANTINE" &&
-    v.disposition !== "REPLAY"
-  ) {
-    return null;
-  }
+  if (!isDecisionDisposition(v.coreDisposition) || !isDecisionDisposition(v.runtimeDisposition)) return null;
+  if (v.submittedEmail !== undefined && typeof v.submittedEmail !== "string") return null;
   if (typeof v.score !== "number" || !Number.isFinite(v.score)) return null;
   if (typeof v.risk !== "object" || v.risk === null) return null;
   const risk = v.risk as Record<string, unknown>;
   const RISK_TIERS = ["LOW", "ELEVATED", "HIGH", "CAUSAL"]; // core/risk.ts RiskTier
   const CONFIDENCES = ["LOW", "MEDIUM", "HIGH"]; // core/risk.ts Confidence
-  const ACTIONS = ["CONTINUE", "MANUAL_REVIEW", "SUPPRESS_AUTO_APPROVAL", "QUARANTINE"]; // DEFAULT_RISK_TIERS actions
   if (
     typeof risk.score !== "number" ||
     !Number.isFinite(risk.score) ||
     !RISK_TIERS.includes(risk.tier as string) ||
     !CONFIDENCES.includes(risk.confidence as string) ||
-    !ACTIONS.includes(risk.recommendedAction as string) ||
+    !nonEmptyString(risk.recommendedAction) ||
     !Array.isArray(risk.evidence)
   ) {
     return null;
@@ -87,7 +86,8 @@ function parseAssessment(value: unknown, expectedSessionId: string): AssessmentS
   return {
     sessionId: v.sessionId,
     ...(typeof v.submittedEmail === "string" ? { submittedEmail: v.submittedEmail } : {}),
-    disposition: v.disposition,
+    coreDisposition: v.coreDisposition,
+    runtimeDisposition: v.runtimeDisposition,
     score: v.score,
     risk: risk as AssessmentSnapshot["risk"],
   };
@@ -129,14 +129,9 @@ export function parseFinalSubmissionOutcome(value: unknown): FinalSubmissionOutc
  *   v2: { version: 2, outcome, assessment } — the only shape this
  *   codebase writes (FR-RR-26), mandatory snapshot included.
  *
- * Anything else is malformed: a version-DECLARING record without its
- * assessment is malformed (not degradable), and so is a version-LESS
- * record — the old legacy acceptance reproduced degraded replay (no
- * original score, no risk snapshot, no submitted identity) and has been
- * removed. v0.1.0 has not shipped, so there is no production data carrying
- * assessment-less records; a host with genuine pre-release data migrates it
- * with an explicit reconciliation tool, not by keeping the runtime's
- * acceptance window open forever. Returns null for anything else.
+ * Anything else is malformed: the assessment is mandatory, the record must
+ * explicitly declare version 2, and all outcome/assessment fields must pass
+ * their validators. Returns null for anything else.
  */
 export function parseStoredRecord(
   value: unknown,
@@ -149,7 +144,57 @@ export function parseStoredRecord(
   if (!outcome) return null;
   const assessment = parseAssessment(v.assessment, sessionId ?? "");
   if (!assessment) return null;
+  if (outcome.kind === "decision-denied" && assessment.runtimeDisposition !== outcome.disposition) return null;
   return { outcome, assessment };
+}
+
+function sameValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((value, index) => sameValue(value, b[index]));
+  }
+  const ak = Object.keys(a as Record<string, unknown>);
+  const bk = Object.keys(b as Record<string, unknown>);
+  if (ak.length !== bk.length || ak.some((key) => !Object.prototype.hasOwnProperty.call(b, key))) return false;
+  return ak.every((key) => sameValue((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
+}
+
+export type ParsedFinalizeDecisionResult =
+  | { kind: "stored"; record: FinalSubmissionRecord }
+  | { kind: "replay"; record: FinalSubmissionRecord }
+  | { kind: "conflict"; state: "forward-claimed" | "forward-uncertain" };
+
+/**
+ * Strictly validate the result of finalizeDecision at the untrusted host
+ * boundary. `stored` is an atomic persistence acknowledgement: it must echo
+ * the exact decision-denied v2 record FireRaid submitted. `replay` may carry
+ * any valid terminal outcome because a forward can win the race between the
+ * initial lookup and this finalizer.
+ */
+export function parseFinalizeDecisionResult(
+  value: unknown,
+  sessionId: string,
+  expectedRecord: FinalSubmissionRecord
+): ParsedFinalizeDecisionResult | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  if (v.kind === "conflict") {
+    return v.state === "forward-claimed" || v.state === "forward-uncertain"
+      ? { kind: "conflict", state: v.state }
+      : null;
+  }
+  if (v.kind !== "stored" && v.kind !== "replay") return null;
+  const rawRecord = v.record;
+  const parsed = parseStoredRecord(rawRecord, sessionId);
+  if (!parsed) return null;
+  const record: FinalSubmissionRecord = { version: 2, outcome: parsed.outcome, assessment: parsed.assessment };
+  if (v.kind === "stored") {
+    if (parsed.outcome.kind !== "decision-denied" || !sameValue(rawRecord, expectedRecord)) return null;
+    return { kind: "stored", record };
+  }
+  return { kind: "replay", record };
 }
 
 /**
@@ -159,8 +204,7 @@ export function parseStoredRecord(
  * EXACTLY the key FireRaid requested — a store echoing a different (or
  * absent) key cannot vouch for the upstream deduplication contract, and
  * the forward must not proceed on it. `replay` is validated through
- * parseStoredRecord against the record field (the FR-RR-14 shape) — the
- * only replay shape accepted. `conflict` must be empty of
+ * parseStoredRecord against its V2 record field. `conflict` must be empty of
  * meaningful payload (any object with kind "conflict" and nothing else
  * to read). Everything else — including null, true, or an unknown kind —
  * is null, and the caller fails closed.
@@ -171,7 +215,7 @@ export function parseClaimResult(
   sessionId: string
 ):
   | { kind: "claimed"; claim: HostSubmissionClaim }
-  | { kind: "replay"; outcome: FinalSubmissionOutcome; assessment: AssessmentSnapshot }
+  | { kind: "replay"; record: FinalSubmissionRecord }
   | { kind: "conflict" }
   | null {
   if (typeof value !== "object" || value === null) return null;
@@ -184,14 +228,12 @@ export function parseClaimResult(
       return { kind: "claimed", claim: { kind: "claimed", claimId: v.claimId, idempotencyKey: v.idempotencyKey } };
     }
     case "replay": {
-      // FR-RR-14 shape: { kind: "replay", record } — the ONLY replay shape
-      // the claim seam accepts. A store still speaking the pre-FR-RR-14
-      // `{ kind: "replay", outcome }` shape carries no parseable terminal
-      // RECORD and cannot vouch for what it replays: malformed, fail closed.
+      // The claim seam accepts only { kind: "replay", record } with a
+      // complete V2 terminal record; an outcome-only answer is malformed.
       if (v.record === undefined) return null;
       const parsed = parseStoredRecord(v.record, sessionId);
       if (!parsed) return null;
-      return { kind: "replay", outcome: parsed.outcome, assessment: parsed.assessment };
+      return { kind: "replay", record: { version: 2, outcome: parsed.outcome, assessment: parsed.assessment } };
     }
     case "conflict":
       return { kind: "conflict" };

@@ -62,8 +62,10 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseJsonc } from "jsonc-parser";
 
 import { validatePreflightResult } from "./lib/preflight-schema.mjs";
+import { isGitSha, isWorkerVersionId, productionConfig, VERSION_LOOKUP } from "./lib/release-proof.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MODE = process.argv[2] === "full" ? "full" : "fast";
@@ -76,6 +78,14 @@ const MODE = process.argv[2] === "full" ? "full" : "fast";
 const requireTierArg = process.argv.indexOf("--require-tier");
 const REQUIRE_TIER = requireTierArg !== -1 ? process.argv[requireTierArg + 1] : null;
 const VALID_TIERS = ["local_candidate", "deploy_ready", "release_ready"];
+let releaseWranglerConfig = null;
+try {
+  releaseWranglerConfig = parseJsonc(readFileSync(join(ROOT, "wrangler.jsonc"), "utf8"), []);
+} catch {
+  // Receipt validation below fails closed if the authoritative production
+  // config cannot be read.
+}
+const releaseProduction = productionConfig(releaseWranglerConfig);
 
 // --- git provenance ---
 function git(args) {
@@ -276,27 +286,47 @@ let smokeReceipt = null;
       // exact-SHA match against HEAD. The v1 attestation-only schema is
       // explicitly NOT accepted — it certified checks nobody performed.
       const schemaOk = parsed.schema === "fireraid-release-smoke-receipt/2";
-      const requiredChecks = ["signup_page", "submit_failclosed", "human_submit"];
+      const requiredChecks = ["signup_page", "health_build", "submit_failclosed", "human_submit"];
       const mc = parsed.machine_checks ?? {};
       const mcEntries = Object.entries(mc);
       const unknownChecks = mcEntries.map(([n]) => n).filter((n) => !requiredChecks.includes(n));
       const missingOrFailing = requiredChecks.filter((c) => mc[c]?.ok !== true);
       const implausibleStatus = mcEntries
-        .filter(([, c]) => !Number.isInteger(c.observed_status) || c.observed_status < 100 || c.observed_status > 599)
+        .filter(([, c]) => !c || !Number.isInteger(c.observed_status) || c.observed_status < 100 || c.observed_status > 599)
         .map(([n]) => n);
-      const attested = parsed.operator_attestations?.human_submit?.attested === true;
-      const httpsUrl = typeof parsed.deployed_url === "string" && parsed.deployed_url.startsWith("https://");
-      const shaMatch = parsed.git_sha === sha;
-      const workerVersionShape = typeof parsed.worker_version_id === "string" && /^[0-9a-f]{32}$/.test(parsed.worker_version_id);
+      const attestation = parsed.operator_attestations?.human_submit;
+      const attested = attestation?.attested === true && attestation?.observed_status === mc.human_submit?.observed_status;
+      const operatorStatusOk = Number.isInteger(attestation?.observed_status) && attestation.observed_status >= 200 && attestation.observed_status < 300;
+      let deployedUrl = null;
+      try { deployedUrl = new URL(parsed.deployed_url); } catch { /* malformed */ }
+      const httpsUrl = deployedUrl?.protocol === "https:" &&
+        deployedUrl.hostname === releaseProduction.hostname &&
+        deployedUrl.port === "" && deployedUrl.username === "" && deployedUrl.password === "" &&
+        deployedUrl.pathname === "/" && deployedUrl.search === "" && deployedUrl.hash === "";
+      const shaMatch = isGitSha(parsed.git_sha) && parsed.git_sha === sha;
+      const workerVersionShape = isWorkerVersionId(parsed.worker_version_id);
+      const versionVerified = parsed.version_verified;
+      const versionProofOk = versionVerified?.ok === true &&
+        versionVerified.worker_name === releaseProduction.workerName &&
+        versionVerified.lookup === VERSION_LOOKUP;
+      const buildShaOk = parsed.deployed_build_sha === sha &&
+        mc.health_build?.observed_build_sha === sha;
+      const failClosedProofOk = mc.submit_failclosed?.verification_status === "verification_required" &&
+        mc.submit_failclosed.observed_status === 403;
       const fail =
         !schemaOk ? `receipt schema ${JSON.stringify(parsed.schema ?? null)} is not "fireraid-release-smoke-receipt/2" — re-run the smoke runner (the v1 attestation format is no longer accepted)`
           : !shaMatch ? `receipt git_sha ${parsed.git_sha} does not match HEAD ${sha}`
-          : !workerVersionShape ? `receipt worker_version_id ${JSON.stringify(parsed.worker_version_id)} is not a Cloudflare version id (32 lowercase hex)`
-          : !httpsUrl ? "receipt deployed_url is not HTTPS"
+          : !workerVersionShape ? `receipt worker_version_id ${JSON.stringify(parsed.worker_version_id)} is not a Wrangler version id`
+          : !releaseProduction.workerName ? "wrangler.jsonc production env lacks an explicit Worker name"
+          : !versionProofOk ? `receipt version_verified does not prove ${parsed.worker_version_id} belongs to Worker ${releaseProduction.workerName} via ${VERSION_LOOKUP}`
+          : !httpsUrl ? `receipt deployed_url is not the exact HTTPS production origin ${releaseProduction.hostname}`
+          : !buildShaOk ? `receipt build SHA proof does not match HEAD ${sha}`
           : unknownChecks.length > 0 ? `receipt names unknown machine checks: ${unknownChecks.join(", ")}`
           : missingOrFailing.length > 0 ? `receipt machine checks failed/missing: ${missingOrFailing.join(", ")}`
           : implausibleStatus.length > 0 ? `receipt machine checks lack a plausible observed_status: ${implausibleStatus.join(", ")}`
+          : !failClosedProofOk ? "receipt fail-closed check lacks the exact verification_required response"
           : !attested ? "receipt lacks the operator_attestations.human_submit attestation"
+          : !operatorStatusOk ? "operator human-submit attestation is not a successful 2xx observation"
             : null;
       if (fail) {
         gate = {

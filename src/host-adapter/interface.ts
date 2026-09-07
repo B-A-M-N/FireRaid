@@ -25,6 +25,8 @@
 import type { DefenseProfile } from "../types/profile.js";
 import type { ValidatedEvent } from "../security/request-validation.js";
 
+export type DecisionDisposition = "ACCEPT" | "REVIEW" | "QUARANTINE";
+
 /** Re-exported so adapters need not reach into core directly. */
 export type { DefenseProfile };
 
@@ -406,8 +408,16 @@ export interface HostEnforcementAdapter {
    * middleware awaits the result.
    *
    * FR-P1-11: optional trailing signal is the request deadline.
+   * FR-RR-56: every deny is an idempotent projection and receives the same
+   * explicit key on retries. The host MUST upsert/deduplicate by this key.
    */
-  deny(sessionId: string, reason: string, annotation?: RiskAnnotation, signal?: AbortSignal): void | Promise<void>;
+  deny(
+    sessionId: string,
+    reason: string,
+    annotation: RiskAnnotation | undefined,
+    signal: AbortSignal | undefined,
+    opts: { idempotencyKey: string }
+  ): void | Promise<void>;
 }
 
 /**
@@ -543,14 +553,15 @@ export interface AssessmentSnapshot {
    * either "we decided REVIEW" when the core call was QUARANTINE, or the
    * reverse.
    */
-  disposition: string;
+  coreDisposition: DecisionDisposition;
   /**
    * FR-RR-55: the disposition the RUNTIME actually acted on at the
    * boundary (the post-`resolveRuntimeDisposition` form). Present on every
-   * snapshot this codebase writes; optional in the type so an evaluation
-   * store may still construct a core-only snapshot in tests.
+   * snapshot this codebase writes and mandatory in the V2 runtime contract.
    */
-  runtimeDisposition?: string;
+  runtimeDisposition: DecisionDisposition;
+  /** @deprecated Use coreDisposition. New records never write this alias. */
+  disposition?: string;
   /** FR-RR-26: MANDATORY in every terminal record (schema v2). */
   score: number;
   /** FR-RR-26: MANDATORY in every terminal record (schema v2). */
@@ -567,10 +578,9 @@ export interface AssessmentSnapshot {
  * FR-RR-26 — the terminal record contract, versioned. New records are
  * ALWAYS schema v2: the assessment snapshot is mandatory, so every replay
  * reproduces the original decision material in full — the degraded
- * assessment-less receipt FR-RR-14 closed can never be written again. A v1
- * record (outcome only) is LEGACY: reading one is defined behavior (the
- * degraded replay), writing one is no longer possible through this
- * contract.
+ * assessment-less receipt FR-RR-14 closed can never be written again. V2 is
+ * the only runtime record shape: coreDisposition and runtimeDisposition are
+ * mandatory, and there is no legacy runtime replay window.
  */
 export interface FinalSubmissionRecord {
   /** Discriminant for the record shape. 2 = assessment-bearing. */
@@ -600,6 +610,23 @@ export type FinalizeDecisionResult =
   | { kind: "stored"; record: FinalSubmissionRecord }
   | { kind: "replay"; record: FinalSubmissionRecord }
   | { kind: "conflict"; state: "forward-claimed" | "forward-uncertain" };
+
+export type UncertainReconciliationResolution =
+  | { kind: "created"; assessment: AssessmentSnapshot }
+  | { kind: "not-created-release"; reason: string };
+
+export interface SubmissionReconciliationAudit {
+  actor: string;
+  at: string;
+  oldState: "forward-uncertain";
+  newState: "terminal" | "none";
+  reason?: string;
+}
+
+export type UncertainReconciliationResult =
+  | { kind: "created"; record: FinalSubmissionRecord; audit: SubmissionReconciliationAudit }
+  | { kind: "released"; audit: SubmissionReconciliationAudit }
+  | { kind: "conflict"; state: "not-uncertain" | "forward-claimed" | "terminal" };
 
 export interface HostSubmissionStore {
   /**
@@ -657,16 +684,27 @@ export interface HostSubmissionStore {
    * decision-denied record durably complete. The coordinator calls this
    * after the deny side effect lands; a retry that finds the projection
    * still "pending" (denyProjectionState) re-runs the IDEMPOTENT deny and
-   * re-marks BEFORE any receipt acknowledges the denial. Optional: a store
-   * without it simply skips projection tracking (the deny is then the
-   * host's sole responsibility, as pre-FR-RR-42).
+   * re-marks BEFORE any receipt acknowledges the denial. The marker update
+   * itself MUST be idempotent for concurrent replay repairs. Production
+   * stores MUST implement this projection barrier.
    */
-  markDenyProjectionComplete?(sessionId: string, signal?: AbortSignal): Promise<void>;
+  markDenyProjectionComplete(sessionId: string, signal?: AbortSignal): Promise<void>;
   /** FR-RR-42: read the deny-projection state of a terminal decision. */
-  denyProjectionState?(
+  denyProjectionState(
     sessionId: string,
     signal?: AbortSignal
-  ): Promise<"pending" | "complete" | undefined>;
+  ): Promise<"pending" | "complete">;
+  /**
+   * Resolve a FORWARD_UNCERTAIN claim ONLY through an explicit operator
+   * action. Automatic retries must never call this operation. A
+   * not-created-release requires positive upstream evidence in `reason`.
+   */
+  reconcileUncertain(
+    sessionId: string,
+    resolution: UncertainReconciliationResolution,
+    actor: string,
+    signal?: AbortSignal
+  ): Promise<UncertainReconciliationResult>;
   /**
    * Record the forward's outcome against the claim durably. Called exactly
    * once per successful claim, before the middleware responds. `outcome`
@@ -674,9 +712,9 @@ export interface HostSubmissionStore {
    * queued-for-retry, AND transport-failure (a recorded transport failure
    * releases the claim so a genuine client retry may re-attempt).
    *
-   * FR-RR-14: `meta.assessment` — the immutable assessment snapshot
-   * (original disposition/score/email/risk) to persist WITH the outcome, so
-   * replays reproduce the original assessment instead of a degraded one.
+   * FR-RR-14: `meta.assessment` — the immutable core/runtime disposition
+   * pair, score, email, and risk snapshot to persist WITH the outcome, so
+   * replays reproduce the original assessment exactly.
    *
    * FR-RR-25: the historical argument order (claimId, outcome, signal) is
    * PRESERVED — the assessment rides in a trailing `meta` object, never in
@@ -707,6 +745,11 @@ export interface HostSubmissionStore {
 /** Deterministic idempotency key material for one session's forward. */
 export function submissionIdempotencyKey(sessionId: string): string {
   return `fr-forward-${sessionId}`;
+}
+
+/** Stable idempotency identity for a terminal deny projection. */
+export function denialIdempotencyKey(sessionId: string): string {
+  return `fr-deny-${sessionId}`;
 }
 
 /**

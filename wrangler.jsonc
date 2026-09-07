@@ -137,6 +137,10 @@
       }
     },
     "production": {
+      // Explicit effective name: release verification and Wrangler's
+      // env-scoped version lookup must address this Worker, not infer a
+      // fallback from the top-level project name.
+      "name": "fireraid-production",
       // FR-P1-05: production binds the PRODUCT-ONLY entrypoint — its import
       // graph excludes src/eval/, the lab routes, and the review-decision
       // write. A production deployment must never bundle the evaluation

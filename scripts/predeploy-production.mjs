@@ -22,6 +22,10 @@
  *             authentication failure, or unparseable output is a HARD
  *             FAILURE. A deploy is never permitted while the production
  *             database's migration state is unverifiable.
+ *   --demo    product-showcase deployment mode. It still requires verified
+ *             remote migrations and all structural production checks, but
+ *             explicitly permits the tracked edge-limiter placeholder. This
+ *             mode is not a production-readiness claim.
  *
  * Fail-closed on any of:
  *   1. PRODUCTION DB ID is the placeholder (REPLACE_AFTER_CREATE) or missing.
@@ -38,6 +42,7 @@
  * Usage:
  *   node scripts/predeploy-production.mjs --local            # release evidence
  *   node scripts/predeploy-production.mjs --deploy           # gate a real deploy
+ *   node scripts/predeploy-production.mjs --demo             # gate a demo deploy
  *   node scripts/predeploy-production.mjs --local --json     # machine-readable
  *   npm run predeploy:production                             # --local
  */
@@ -55,11 +60,16 @@ const PLACEHOLDER = "REPLACE_AFTER_CREATE";
 // ── Mode & output parsing ────────────────────────────────────────────────
 const args = process.argv.slice(2);
 const DEPLOY_MODE = args.includes("--deploy");
+const DEMO_MODE = args.includes("--demo");
 const LOCAL_MODE = args.includes("--local") || !DEPLOY_MODE; // default local (kept for --help text)
 void LOCAL_MODE;
 const JSON_MODE = args.includes("--json");
 // Back-compat: a bare `--json` (no mode flag) is local/evidence mode.
-const MODE = DEPLOY_MODE ? "deploy" : "local";
+if (DEPLOY_MODE && DEMO_MODE) {
+  console.error("predeploy: choose exactly one of --deploy or --demo");
+  process.exit(1);
+}
+const MODE = DEMO_MODE ? "demo" : DEPLOY_MODE ? "deploy" : "local";
 
 // In JSON mode, human prose MUST go to stderr — stdout carries exactly one
 // JSON document (FR-P0-B).
@@ -172,7 +182,11 @@ const rateLimitLogin = productionVars.FIRERAID_RATE_LIMIT_LOGIN;
 if (!rateLimitLogin) {
   fail("rate-limit-login-attested", "production env FIRERAID_RATE_LIMIT_LOGIN is unset — declare the authoritative edge rate-limiter (WAF/Access/ratelimit) for /api/admin/login");
 } else if (rateLimitLogin === "REPLACE_WITH_EDGE_LIMITER_NAME") {
-  fail("rate-limit-login-attested", "FIRERAID_RATE_LIMIT_LOGIN still carries the tracked placeholder — set it to the actual limiter rule/plan name");
+  if (DEMO_MODE) {
+    skip("rate-limit-login-attested", "demo mode permits the tracked FIRERAID_RATE_LIMIT_LOGIN placeholder; configure an authoritative edge limiter before any customer-facing production deployment");
+  } else {
+    fail("rate-limit-login-attested", "FIRERAID_RATE_LIMIT_LOGIN still carries the tracked placeholder — set it to the actual limiter rule/plan name");
+  }
 } else {
   pass("rate-limit-login-attested", `FIRERAID_RATE_LIMIT_LOGIN=${rateLimitLogin} (operator ATTESTATION of the edge limiter — not programmatic verification)`);
 }
@@ -208,10 +222,10 @@ if (dry.status === 0) {
 // can be unit-tested against real Wrangler output fixtures.
 const token = process.env.CLOUDFLARE_API_TOKEN;
 if (!token) {
-  if (DEPLOY_MODE) {
+  if (DEPLOY_MODE || DEMO_MODE) {
     // FR-P0-D: a deploy must never proceed on an unverifiable migration
     // state. Fail hard — do not let `deploy:production` skip its own gate.
-    fail("remote-migrations", "CLOUDFLARE_API_TOKEN unset — deploy mode REQUIRES remote migration verification; export a token with D1 read access and re-run");
+      fail("remote-migrations", `${MODE} mode REQUIRES remote migration verification — export a token with D1 read access and re-run`);
   } else {
     skip("remote-migrations", "CLOUDFLARE_API_TOKEN unset — cannot verify remote migration state; run the migration check with a real token before deploy");
   }

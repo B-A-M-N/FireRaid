@@ -231,8 +231,12 @@ npx wrangler d1 migrations apply fireraid-production --env production --remote
 #    missing TURNSTILE_EXPECTED_HOSTNAME, an undeclared AUTHORITATIVE LOGIN
 #    LIMITER, a production Worker that bundles the eval control plane, or a
 #    failed dry-run.
-npm run deploy:production        # == predeploy(--deploy mode) && wrangler deploy --env production
+npm run deploy:production        # == predeploy(--deploy mode) && exact clean HEAD deploy with FIRERAID_BUILD_SHA
 npm run deploy:lab               # named-env deploys only
+
+# Product showcase on this account: verified migrations, but no edge-limiter
+# attestation is required. This is not production-readiness certification.
+npm run deploy:demo
 
 # The production Worker (env production / production-test) binds
 # src/worker-production.ts — the PRODUCT-ONLY entrypoint that has no import
@@ -251,15 +255,17 @@ into the git object it certifies, so it is untracked) separates
 
     npm run release:smoke:record -- \
       --git-sha "$(git rev-parse HEAD)" \
-      --worker-version <32-hex version id from the deploy output> \
-      --human-submit-observed-status <status from your solved-widget submit> \
-      --verify-version   # optional: confirm the version id on the Worker via the CF API
+      --worker-version <Wrangler version id from the deploy output> \
+      --human-submit-observed-status <status from your solved-widget submit>
 
 The URL defaults to the production `TURNSTILE_EXPECTED_HOSTNAME` from
 `wrangler.jsonc` and must be HTTPS on that host. The next
 `npm run release:verify` run reads the receipt and claims `release_ready`
-for that SHA — the verifier requires the v2 machine-observed schema (the
-old v1 attestation format is rejected). (The ledger's
+for that SHA — the runner always verifies the id with
+`wrangler versions list --env production --json`, and the verifier independently
+checks the exact production Worker name, build SHA from `/health`, genuine
+session/CSRF fail-closed response, and v2 machine-observed schema (the old v1
+attestation format is rejected). (The ledger's
 `remote-deployment-smoke` entry records smoke HISTORY; the current
 release's proof is the receipt.)
 

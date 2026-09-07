@@ -212,6 +212,8 @@ describe("FR-RR-23: malformed replay records never fabricate a receipt", () => {
         outcome: { kind: "created" },
         assessment: {
           sessionId: capturedSid,
+          coreDisposition: "ACCEPT",
+          runtimeDisposition: "ACCEPT",
           disposition: "ACCEPT",
           score: 0,
           risk: { score: 0, tier: "LOW", confidence: "LOW", recommendedAction: "CONTINUE", evidence: [] },
@@ -240,7 +242,8 @@ describe("FR-RR-23: malformed replay records never fabricate a receipt", () => {
 describe("FR-RR-26: record shape at the parser boundary", () => {
   const FULL_ASSESSMENT = {
     sessionId: "s1",
-    disposition: "ACCEPT",
+    coreDisposition: "ACCEPT",
+    runtimeDisposition: "ACCEPT",
     score: 0,
     risk: { score: 0, tier: "LOW", confidence: "LOW", recommendedAction: "CONTINUE", evidence: [] },
   };

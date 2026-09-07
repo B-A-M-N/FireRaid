@@ -15,7 +15,10 @@ import { profileVersion, isLabMode } from "../env.js";
 import { readyzResponse } from "../cloudflare/schema-readiness.js";
 
 export async function health(_req: Request, env: Env): Promise<Response> {
-  return json({ ok: true, version: "0.1.0", profileVersion: profileVersion(env) });
+  const buildSha = env.FIRERAID_BUILD_SHA;
+  const resp = json({ ok: true, version: "0.1.0", profileVersion: profileVersion(env), build: buildSha ?? null });
+  if (buildSha) resp.headers.set("X-FireRaid-Build", buildSha);
+  return resp;
 }
 
 export async function readyz(_req: Request, env: Env): Promise<Response> {

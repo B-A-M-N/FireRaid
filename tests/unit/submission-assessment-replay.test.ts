@@ -130,6 +130,8 @@ describe("FR-RR-14: replayed assessment is the ORIGINAL, not a degraded one", ()
               email: captured[0].submittedEmail,
               score: captured[0].score,
               disposition: captured[0].disposition,
+              coreDisposition: captured[0].coreDisposition,
+              runtimeDisposition: captured[0].runtimeDisposition,
               riskEvidence: captured[0].risk?.evidence,
               upstreamCreated: captured[0].upstreamCreated,
               replayed: captured[0].replayed,
@@ -138,6 +140,8 @@ describe("FR-RR-14: replayed assessment is the ORIGINAL, not a degraded one", ()
               email: captured[1].submittedEmail,
               score: captured[1].score,
               disposition: captured[1].disposition,
+              coreDisposition: captured[1].coreDisposition,
+              runtimeDisposition: captured[1].runtimeDisposition,
               riskEvidence: captured[1].risk?.evidence,
               upstreamCreated: captured[1].upstreamCreated,
               replayed: captured[1].replayed,
@@ -162,6 +166,8 @@ describe("FR-RR-14: replayed assessment is the ORIGINAL, not a degraded one", ()
       expect(second.email).toBe(first.email);
       expect(second.score).toBe(first.score);
       expect(second.disposition).toBe(first.disposition);
+      expect(second.coreDisposition).toBe(first.coreDisposition);
+      expect(second.runtimeDisposition).toBe(first.runtimeDisposition);
       expect(second.disposition).not.toBe("REPLAY");
       expect(second.riskEvidence).toEqual(first.riskEvidence);
       expect(second.upstreamCreated).toBe(first.upstreamCreated);
@@ -179,6 +185,8 @@ describe("FR-RR-14: replayed assessment is the ORIGINAL, not a degraded one", ()
     const snapshot: AssessmentSnapshot = {
       sessionId: "sess-1",
       submittedEmail: "s@example.invalid",
+      coreDisposition: "REVIEW",
+      runtimeDisposition: "REVIEW",
       disposition: "REVIEW",
       score: 65,
       risk: {
@@ -227,6 +235,8 @@ describe("FR-RR-14: replayed assessment is the ORIGINAL, not a degraded one", ()
         assessment: {
           sessionId: "sess-2",
           submittedEmail: undefined,
+          coreDisposition: "ACCEPT",
+          runtimeDisposition: "ACCEPT",
           disposition: "ACCEPT",
           score: 5,
           risk: { score: 5, tier: "LOW", confidence: "high", recommendedAction: "accept", evidence: [] },

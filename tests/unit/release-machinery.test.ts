@@ -365,6 +365,14 @@ describe("FR-P0-A/B/D: release-verify.mjs structural contract", () => {
     expect(pkg.scripts["predeploy:production:deploy"]).toContain("--deploy");
     expect(pkg.scripts["predeploy:production"]).toContain("--local");
   });
+
+  it("demo deployment is explicit and does not weaken the production command", () => {
+    const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf-8"));
+    expect(pkg.scripts["predeploy:demo"]).toContain("--demo");
+    expect(pkg.scripts["deploy:demo"]).toContain("predeploy:demo");
+    expect(pkg.scripts["deploy:demo"]).toContain("deploy-production.mjs --demo");
+    expect(pkg.scripts["deploy:production"]).not.toContain("--demo");
+  });
 });
 
 describe("FR-P0-B/D: predeploy-production.mjs contract", () => {
@@ -387,5 +395,11 @@ describe("FR-P0-B/D: predeploy-production.mjs contract", () => {
 
   it("fails closed on unparseable wrangler output in both modes", () => {
     expect(src).toMatch(/UNPARSEABLE/);
+  });
+
+  it("only demo mode may bypass the tracked edge-limiter placeholder", () => {
+    expect(src).toContain("DEMO_MODE");
+    expect(src).toContain("demo mode permits the tracked");
+    expect(src).toMatch(/if \(DEMO_MODE\) \{[\s\S]*?skip\("rate-limit-login-attested"/);
   });
 });

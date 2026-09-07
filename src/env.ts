@@ -17,6 +17,8 @@ export interface Env {
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
   TURNSTILE_EXPECTED_HOSTNAME?: string;
+  /** Injected by the production deploy wrapper; exposed by /health. */
+  FIRERAID_BUILD_SHA?: string;
   /**
    * P1 (P0-AUDIT-3 follow-up): the ONLY sanctioned way a LAB_MODE=false
    * deployment runs without Turnstile — the local production-shape test

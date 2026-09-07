@@ -176,7 +176,6 @@ export function validateProductionDeps(
   // JS adapter that lacks it would pass startup and fail on the FIRST
   // denied applicant, so it must be required at startup like claim/complete.
   requireMethod(deps.submissionStore, "finalizeDecision", "submissionStore");
-
   // Rereview item 3: per-strategy capability enumeration over the ENTIRE
   // production pool. The random composition can draw every entry of
   // PRODUCTION_AGENT_STRATEGIES = [P02, P03, P04] plus the interaction
@@ -377,6 +376,20 @@ export function validateProductionDeps(
         );
       }
     }
+  }
+
+  // FR-RR-42: terminal decision records and their host-side deny projection
+  // are one durability contract. A conforming PRODUCTION store cannot omit
+  // either half, or automatic replay repair becomes optional. Evaluation
+  // wiring may use its intentionally smaller volatile fixture contract. Keep
+  // this check after the established semantic gates so existing diagnostics
+  // (verification, posture, and durability) remain specific.
+  if (!internalOptions.internalEvaluation) {
+    requireMethod(deps.submissionStore, "denyProjectionState", "submissionStore");
+    requireMethod(deps.submissionStore, "markDenyProjectionComplete", "submissionStore");
+    // FR-RR-41: an uncertain upstream result is intentionally absorbing until
+    // an authenticated operator performs an explicit reconciliation.
+    requireMethod(deps.submissionStore, "reconcileUncertain", "submissionStore");
   }
 
   return deps;

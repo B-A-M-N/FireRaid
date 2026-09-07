@@ -255,6 +255,9 @@ describe("FR-P0-02: fail-closed claim store", () => {
       },
       complete: async () => {},
       finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+      denyProjectionState: async () => "complete" as const,
+      markDenyProjectionComplete: async () => {},
+      reconcileUncertain: async () => ({ kind: "conflict", state: "not-uncertain" } as const),
     };
     const r = await submit(deps, { enforcement });
     expect(r.kind).toBe("forward-failed");
@@ -276,6 +279,9 @@ describe("FR-P0-02: fail-closed claim store", () => {
       claim: async () => ({ ok: true }) as unknown as never,
       complete: async () => {},
       finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+      denyProjectionState: async () => "complete" as const,
+      markDenyProjectionComplete: async () => {},
+      reconcileUncertain: async () => ({ kind: "conflict", state: "not-uncertain" } as const),
     };
     const r = await submit(deps, { enforcement });
     expect(r.kind).toBe("forward-failed");
@@ -303,6 +309,9 @@ describe("FR-P0-02: fail-closed claim store", () => {
         throw new Error("durable write failed");
       },
       finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+      denyProjectionState: async () => "complete" as const,
+      markDenyProjectionComplete: async () => {},
+      reconcileUncertain: async () => ({ kind: "conflict", state: "not-uncertain" } as const),
     };
     const r = await submit(deps, { enforcement });
     // The upstream MAY have created the account, but the durable record
@@ -334,6 +343,9 @@ describe("FR-P0-02: fail-closed claim store", () => {
       claim: async () => ({ kind: "replay", outcome: { kind: "created" } }) as unknown as never,
       complete: async () => {},
       finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+      denyProjectionState: async () => "complete" as const,
+      markDenyProjectionComplete: async () => {},
+      reconcileUncertain: async () => ({ kind: "conflict", state: "not-uncertain" } as const),
     };
     const r = await submit(deps, { enforcement });
     expect(r.kind).toBe("forward-failed");
@@ -355,6 +367,9 @@ describe("FR-P0-02: fail-closed claim store", () => {
       }),
       complete: async () => {},
       finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+      denyProjectionState: async () => "complete" as const,
+      markDenyProjectionComplete: async () => {},
+      reconcileUncertain: async () => ({ kind: "conflict", state: "not-uncertain" } as const),
     };
     const r2 = await submit(deps2, { enforcement });
     expect(r2.kind).toBe("forward-failed");
@@ -373,6 +388,9 @@ describe("FR-P0-02: fail-closed claim store", () => {
         ({ kind: "replay", record: { nonsense: true } }) as unknown as never,
       complete: async () => {},
       finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+      denyProjectionState: async () => "complete" as const,
+      markDenyProjectionComplete: async () => {},
+      reconcileUncertain: async () => ({ kind: "conflict", state: "not-uncertain" } as const),
     };
     const r = await submit(deps);
     // Guessing "created" for a record nobody can read is the FR-INV-008
@@ -681,6 +699,8 @@ describe("P0-E: ReferenceSubmissionStore.lookupFinal", () => {
     if (c.kind !== "claimed") throw new Error("expected claim");
     const snapshot: AssessmentSnapshot = {
       sessionId: "s2",
+      coreDisposition: "ACCEPT",
+      runtimeDisposition: "ACCEPT",
       disposition: "ACCEPT",
       score: 0.1,
       risk: {

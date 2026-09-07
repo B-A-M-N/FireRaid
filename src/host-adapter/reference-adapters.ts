@@ -15,6 +15,10 @@ import type {
   FinalizeDecisionResult,
   AssessmentSnapshot,
   EnforcementResult,
+  UncertainReconciliationResult,
+  UncertainReconciliationResolution,
+  SubmissionReconciliationAudit,
+  RiskAnnotation,
 } from "./interface.js";
 import { submissionIdempotencyKey } from "./interface.js";
 import {
@@ -529,8 +533,10 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
     };
   }
 
-  deny(_sessionId: string, _reason: string): void {
-    // Reference upstream keeps no denial log; production persists one.
+  deny(_sessionId: string, _reason: string, _annotation?: RiskAnnotation, _signal?: AbortSignal, opts?: { idempotencyKey: string }): void {
+    // Reference upstream keeps no denial log; production persists one. The
+    // explicit key is accepted to keep the implementation shape honest.
+    void opts;
   }
 }
 
@@ -631,6 +637,7 @@ export class ReferenceSubmissionStore implements HostSubmissionStore {
       denyProjection?: "pending" | "complete";
     }
   >();
+  private readonly reconciliationAudits = new Map<string, SubmissionReconciliationAudit>();
 
   async claim(sessionId: string, idempotencyKey: string): Promise<HostSubmissionClaimResult> {
     const existing = this.claims.get(sessionId);
@@ -714,29 +721,108 @@ export class ReferenceSubmissionStore implements HostSubmissionStore {
 
   /**
    * FR-RR-42 — mark the enforcement.deny projection durably complete for a
-   * terminal decision-denied record. Only a "pending" decision-denied
-   * record transitions; anything else is a no-op throw (call-shape bug).
+   * terminal decision-denied record. The completion marker is itself
+   * idempotent so concurrent replay repairs cannot turn a successful deny
+   * into a false operational failure after another request marks it first.
    */
   async markDenyProjectionComplete(sessionId: string): Promise<void> {
     const existing = this.claims.get(sessionId);
     if (
       !existing ||
       existing.state !== "terminal" ||
-      existing.outcome?.kind !== "decision-denied" ||
-      existing.denyProjection !== "pending"
+      existing.outcome?.kind !== "decision-denied"
     ) {
       throw new Error(
         `ReferenceSubmissionStore.markDenyProjectionComplete: no pending deny projection for ${sessionId}`
+      );
+    }
+    if (existing.denyProjection === "complete") return;
+    if (existing.denyProjection !== "pending") {
+      throw new Error(
+        `ReferenceSubmissionStore.markDenyProjectionComplete: invalid projection state for ${sessionId}`
       );
     }
     existing.denyProjection = "complete";
   }
 
   /** FR-RR-42: the pending-projection state, for retry repair. */
-  async denyProjectionState(
-    sessionId: string
-  ): Promise<"pending" | "complete" | undefined> {
-    return this.claims.get(sessionId)?.denyProjection;
+  async denyProjectionState(sessionId: string): Promise<"pending" | "complete"> {
+    const existing = this.claims.get(sessionId);
+    if (!existing || existing.state !== "terminal" || existing.outcome?.kind !== "decision-denied") {
+      throw new Error(
+        `ReferenceSubmissionStore.denyProjectionState: no terminal decision denial for ${sessionId}`
+      );
+    }
+    return existing.denyProjection ?? "complete";
+  }
+
+  /**
+   * Explicit operator-only exit from FORWARD_UNCERTAIN. This method is
+   * intentionally absent from every automatic coordinator path.
+   */
+  async reconcileUncertain(
+    sessionId: string,
+    resolution: UncertainReconciliationResolution,
+    actor: string
+  ): Promise<UncertainReconciliationResult> {
+    if (typeof actor !== "string" || actor.trim() === "") {
+      throw new Error("ReferenceSubmissionStore.reconcileUncertain: actor is required");
+    }
+    const existing = this.claims.get(sessionId);
+    if (!existing || existing.state !== "forward-uncertain") {
+      return {
+        kind: "conflict",
+        state: !existing
+          ? "not-uncertain"
+          : existing.state === "forward-claimed"
+            ? "forward-claimed"
+            : "terminal",
+      };
+    }
+    const auditBase = {
+      actor,
+      at: new Date().toISOString(),
+      oldState: "forward-uncertain" as const,
+    };
+    if (resolution.kind === "created") {
+      if (resolution.assessment.sessionId !== sessionId) {
+        throw new Error(
+          "ReferenceSubmissionStore.reconcileUncertain: created assessment sessionId mismatch"
+        );
+      }
+      const record: FinalSubmissionRecord = {
+        version: 2,
+        outcome: { kind: "created" },
+        assessment: resolution.assessment,
+      };
+      const audit: SubmissionReconciliationAudit = {
+        ...auditBase,
+        newState: "terminal",
+        reason: "operator established that the upstream created the submission",
+      };
+      existing.state = "terminal";
+      existing.outcome = record.outcome;
+      existing.assessment = record.assessment;
+      existing.denyProjection = undefined;
+      this.reconciliationAudits.set(sessionId, audit);
+      return { kind: "created", record, audit };
+    }
+    if (resolution.kind === "not-created-release") {
+      if (typeof resolution.reason !== "string" || resolution.reason.trim() === "") {
+        throw new Error(
+          "ReferenceSubmissionStore.reconcileUncertain: positive not-created evidence is required"
+        );
+      }
+      const audit: SubmissionReconciliationAudit = {
+        ...auditBase,
+        newState: "none",
+        reason: resolution.reason,
+      };
+      this.claims.delete(sessionId);
+      this.reconciliationAudits.set(sessionId, audit);
+      return { kind: "released", audit };
+    }
+    throw new Error("ReferenceSubmissionStore.reconcileUncertain: unsupported resolution");
   }
 
   /**
@@ -794,8 +880,12 @@ export class ReferenceSubmissionStore implements HostSubmissionStore {
   }
 
   /** Test/diagnostics accessor. */
-  stateFor(sessionId: string): { state: string; outcome?: unknown } | undefined {
+  stateFor(sessionId: string): { state: string; outcome?: unknown; reconciliation?: SubmissionReconciliationAudit } | undefined {
     const c = this.claims.get(sessionId);
-    return c ? { state: c.state, outcome: c.outcome } : undefined;
+    return c ? { state: c.state, outcome: c.outcome, reconciliation: this.reconciliationAudits.get(sessionId) } : undefined;
+  }
+
+  reconciliationFor(sessionId: string): SubmissionReconciliationAudit | undefined {
+    return this.reconciliationAudits.get(sessionId);
   }
 }

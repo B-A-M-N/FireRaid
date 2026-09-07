@@ -153,8 +153,13 @@ export interface MiddlewareResult {
   html?: string;
   /** Set-Cookie header(s) to return. */
   setCookie?: string;
-  /** Disposition recorded (admit/deny paths). */
+  /** @deprecated Generic compatibility alias for runtimeDisposition; use the
+   * explicit coreDisposition/runtimeDisposition pair. */
   disposition?: string;
+  /** Core evidence/policy disposition before deployment remapping. */
+  coreDisposition?: "ACCEPT" | "REVIEW" | "QUARANTINE";
+  /** Disposition actually enforced at the host boundary. */
+  runtimeDisposition?: "ACCEPT" | "REVIEW" | "QUARANTINE";
   /**
    * FR-RR-09: the HTTP STATUS this deny carries, when the middleware knows
    * better than a blanket 403. A request whose BODY is a protocol problem
@@ -172,12 +177,11 @@ export interface MiddlewareResult {
   /**
    * FR-RR-14: TRUE when this receipt is a REPLAY of a durably-recorded
    * terminal outcome rather than the request that performed the work.
-   * Orthogonal to `disposition` — a replay carries the ORIGINAL semantic
-   * disposition (ACCEPT/REVIEW/QUARANTINE), the original score, and the
-   * original risk evidence captured at complete() time; it never overwrites
-   * the disposition with "REPLAY". A host's onAssessment receives the same
-   * assessment the original request produced (idempotent on the
-   * snapshot's sessionId identity).
+   * Orthogonal to the explicit core/runtime disposition pair — a replay
+   * carries both original values, the original score, and the original risk
+   * evidence captured at complete() time; it never invents a "REPLAY"
+   * disposition. A host's onAssessment receives the same assessment the
+   * original request produced (idempotent on the snapshot's sessionId).
    */
   replayed?: boolean;
   /** Ingest ACK (kind === "ingest"): events accepted, stream watermark. */

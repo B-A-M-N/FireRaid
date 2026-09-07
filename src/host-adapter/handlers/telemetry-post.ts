@@ -4,6 +4,7 @@
 import { readJsonBody } from "../../security/body-limits.js";
 import { MAX_HOST_JSON_BYTES } from "../../types/telemetry.js";
 import type { MiddlewareDeps, MiddlewareResult } from "../middleware-types.js";
+import { denialIdempotencyKey } from "../interface.js";
 import { DeadlineSignal, DeadlineError } from "../deadline.js";
 import { reportOperationalError } from "../lifecycle/store-finalization.js";
 
@@ -45,7 +46,9 @@ export async function handleIngestPost(
   }
   if (ingest.kind === "invalid") {
     try {
-      await deadline.run(deps.enforcement.deny(sessionId, "INVALID_TELEMETRY", undefined, deadline.signal));
+      await deadline.run(deps.enforcement.deny(sessionId, "INVALID_TELEMETRY", undefined, deadline.signal, {
+        idempotencyKey: denialIdempotencyKey(sessionId),
+      }));
     } catch (err) {
       reportOperationalError(deps, "enforcement.deny(invalid-telemetry)", err);
       return { kind: "error", operationalReason: "INGEST_DENY_FAILED" };
