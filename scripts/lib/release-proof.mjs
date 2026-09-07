@@ -28,4 +28,22 @@ export function productionConfig(config) {
   return { workerName, hostname };
 }
 
+/**
+ * Separate gates that were actually locally verified from gates that passed
+ * while explicitly declaring part of their evidence unmeasured.
+ */
+export function summarizeGateEvidence(gates) {
+  const rows = Array.isArray(gates) ? gates : [];
+  const unmeasured = rows.filter((gate) => gate?.unmeasured_ambient_load);
+  return {
+    locally_verified_by_this_run: rows
+      .filter((gate) => gate?.status === "PASS" && !gate?.unmeasured_ambient_load)
+      .map((gate) => gate.name),
+    unmeasured_by_this_run: unmeasured.map((gate) => ({
+      gate: gate.name,
+      scenarios: gate.unmeasured_ambient_load,
+    })),
+  };
+}
+
 export const VERSION_LOOKUP = "wrangler versions list --env production --json";

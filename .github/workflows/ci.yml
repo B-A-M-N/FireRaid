@@ -46,9 +46,10 @@ jobs:
       - name: Unit tests
         run: npm run test:unit
 
-      - name: Product boundary + origin budget + ledger proof
+      - name: Product boundaries + production graph + origin proof
         run: |
           npm run test:product
+          npm run check:production-graph
           npm run test:origin-budget
           npm run test:ledger-proof
 

@@ -28,6 +28,9 @@ const { classifyMigrationList } = await import(
 const { EXPECTED_PREFLIGHT_CHECKS, validatePreflightResult } = await import(
   join(ROOT, "scripts", "lib", "preflight-schema.mjs")
 );
+const { summarizeGateEvidence } = await import(
+  join(ROOT, "scripts", "lib", "release-proof.mjs")
+);
 
 // ── FR-RR-18: the preflight gate's schema + exit-status validation ──────
 // These tests execute the REAL validator (extracted into
@@ -352,6 +355,29 @@ describe("FR-P0-A/B/D: release-verify.mjs structural contract", () => {
     // The receipt gate excludes itself from source gates.
     expect(src).toContain("release_tier_gate");
     expect(src).toMatch(/!g\.release_tier_gate/);
+  });
+
+  it("records ambient-load caveats without calling those gates locally verified", () => {
+    const summary = summarizeGateEvidence([
+      { name: "typecheck", status: "PASS" },
+      {
+        name: "origin-budget",
+        status: "PASS",
+        unmeasured_ambient_load: "profile-generation, signup-inject",
+      },
+    ]);
+    expect(summary.locally_verified_by_this_run).toEqual(["typecheck"]);
+    expect(summary.unmeasured_by_this_run).toEqual([
+      {
+        gate: "origin-budget",
+        scenarios: "profile-generation, signup-inject",
+      },
+    ]);
+  });
+
+  it("keeps the production graph gate in normal CI", () => {
+    const workflow = readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf-8");
+    expect(workflow).toContain("npm run check:production-graph");
   });
 
   it("the receipt file is gitignored (external evidence by design)", () => {

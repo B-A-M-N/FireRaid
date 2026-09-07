@@ -276,11 +276,16 @@ Invariants:
 3. **First writer wins, verbatim.** A second finalizer (or a replaying
    claim) receives the EXACT original terminal record — never a fresh
    evaluation's answer.
-4. **The coordinator handles every `FinalizeDecisionResult` kind** —
-   stored (owns the denial: deny → projection mark → evidence cleanup),
-   replay (surface the durable record; NEVER run deny-side effects), and
-   conflict (fail closed: no deny, no overwrite, no evidence cleanup). A
-   malformed host answer (including a non-throwing one) fails closed.
+4. **The durable decision is replayed verbatim; only its incomplete
+   projection may be repaired.** The coordinator handles every
+   `FinalizeDecisionResult` kind through the same terminal-record path. For
+   decision-denied records:
+   - a complete projection serves the receipt without another deny;
+   - a pending projection idempotently repairs `enforcement.deny`, durably
+     marks the projection complete, and only then serves the receipt.
+   Non-denial terminal records are served directly. A conflict fails closed:
+   no deny, no overwrite, and no evidence cleanup. A malformed host answer
+   (including a non-throwing one) fails closed.
 5. **The durable record is the authority; enforcement.deny is a
    projection.** A decision-denied record is born with
    `denyProjection: "pending"`; the retry repairs a pending projection

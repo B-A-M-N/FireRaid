@@ -65,7 +65,13 @@ import { fileURLToPath } from "node:url";
 import { parse as parseJsonc } from "jsonc-parser";
 
 import { validatePreflightResult } from "./lib/preflight-schema.mjs";
-import { isGitSha, isWorkerVersionId, productionConfig, VERSION_LOOKUP } from "./lib/release-proof.mjs";
+import {
+  isGitSha,
+  isWorkerVersionId,
+  productionConfig,
+  summarizeGateEvidence,
+  VERSION_LOOKUP,
+} from "./lib/release-proof.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MODE = process.argv[2] === "full" ? "full" : "fast";
@@ -414,6 +420,7 @@ const deployReady =
   MODE === "full" && !dirty && allPassed &&
   preflightLocalClean && preflightRemoteVerified;
 const releaseReady = deployReady && smokeReceipt !== null;
+const gateEvidence = summarizeGateEvidence(gates);
 
 const evidence = {
   schema: "fireraid-release-evidence/4",
@@ -465,9 +472,8 @@ const evidence = {
     // only attests which LOCALLY_VERIFIED gates passed for THIS tree.
     registry: "docs/evidence-ledger.json",
     claims: ledgerSummary,
-    locally_verified_by_this_run: gates
-      .filter((g) => g.status === "PASS")
-      .map((g) => g.name),
+    locally_verified_by_this_run: gateEvidence.locally_verified_by_this_run,
+    unmeasured_by_this_run: gateEvidence.unmeasured_by_this_run,
   },
 };
 

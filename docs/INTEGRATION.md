@@ -120,7 +120,7 @@ const deps = createFireRaidMiddleware({
   // "volatile" and are REJECTED here.
   telemetry: myDurableTelemetry,    // { durability: "durable", accept, collect }
   canaryStore: myDurableCanaryStore,// { durability: "durable", record, readVerified, drop }
-  submissionStore: myDurableSubmissions, // { durability: "durable", claim, complete, finalizeDecision, lookupFinal? }
+  submissionStore: myDurableSubmissions, // required methods documented below
   enforcement: { allow: myUpstreamCreate, deny: myDenyHook },
   verification: myVerifier, // REQUIRED — "host-owned" or "provider"
 });
@@ -161,7 +161,8 @@ There is NO automatic transition out of `FORWARD_CLAIMED` or
   claiming retry) receives `{ kind: "replay", record }` carrying the
   EXACT original record.
 
-Methods (all REQUIRED in production — the factory checks at startup):
+Required state-machine authority (all required in production — the factory
+checks these methods at startup):
 
 ```ts
 const submissionStore = {
@@ -184,17 +185,47 @@ const submissionStore = {
   //   { kind: "conflict", state: "forward-claimed" | "forward-uncertain" }
   async finalizeDecision(sessionId, record, signal) { ... },
 
-  // Return the stored terminal record ({ version: 2, outcome,
-  // assessment }) or null. FORWARD_UNCERTAIN has NO final record.
-  async lookupFinal(sessionId) { ... },
-
-  // OPTIONAL (recommended): the deny PROJECTION ledger (FR-RR-42).
+  // REQUIRED IN PRODUCTION: the deny PROJECTION ledger (FR-RR-42).
   // enforcement.deny is a replayable projection of the durable record;
   // these track whether the host-side denial annotation actually landed.
+  async denyProjectionState(sessionId) { ... }, // "pending"|"complete"
   async markDenyProjectionComplete(sessionId) { ... },
-  async denyProjectionState(sessionId) { ... }, // "pending"|"complete"|undefined
+
+  // REQUIRED IN PRODUCTION: explicit operator resolution for
+  // FORWARD_UNCERTAIN. Ordinary retries never call this method.
+  async reconcileUncertain(sessionId, resolution, actor) { ... },
+
+  // OPTIONAL replay optimization: return the stored terminal record
+  // ({ version: 2, outcome, assessment }) or null. FORWARD_UNCERTAIN has
+  // no final record. claim() replay remains the backstop when omitted.
+  async lookupFinal(sessionId) { ... },
 };
 ```
+
+The production `HostSubmissionStore` contract is therefore `durability`,
+`claim`, `complete`, `finalizeDecision`, `denyProjectionState`,
+`markDenyProjectionComplete`, and `reconcileUncertain`. Every required method
+must be backed by durable, atomic state transitions; `lookupFinal` is the only
+optional method and only removes an extra replay lookup.
+
+`reconcileUncertain` is an operator-only resolution seam with this contract:
+
+```ts
+type UncertainReconciliationResolution =
+  | { kind: "created"; assessment: AssessmentSnapshot }
+  | { kind: "not-created-release"; reason: string };
+
+type UncertainReconciliationResult =
+  | { kind: "created"; record: FinalSubmissionRecord; audit: SubmissionReconciliationAudit }
+  | { kind: "released"; audit: SubmissionReconciliationAudit }
+  | { kind: "conflict"; state: "not-uncertain" | "forward-claimed" | "terminal" };
+```
+
+`created` is permitted only when the operator has established that the
+upstream committed and supplies the assessment snapshot to record. The
+`not-created-release` form requires positive evidence that the upstream did
+not commit; its `reason` is retained in the reconciliation audit. Automatic
+retries and ordinary admission requests never invoke this method.
 
 Every transition MUST be an atomic conditional write in SQL (a single
 `UPDATE … WHERE state = …` or an equivalent unique-index insert) — never a

@@ -670,9 +670,11 @@ export interface HostSubmissionStore {
    *     for a state that may be "created". Absorbing for automatic
    *     processing; only operator reconciliation may resolve it.
    * "replay" means a TERMINAL record already exists (a concurrent request
-   * won the race, or a previous denial finalized): the caller MUST surface
-   * the returned record's outcome instead of its own evaluation and MUST
-   * NOT re-run deny-side effects against the already-finalized session.
+   * won the race, or a previous denial finalized): the caller MUST serve the
+   * returned record instead of its own evaluation. A replayed
+   * decision-denied record must pass through the deny-projection barrier: a
+   * complete projection is not repeated, while a pending projection is
+   * repaired idempotently before the receipt is returned.
    */
   finalizeDecision(
     sessionId: string,
