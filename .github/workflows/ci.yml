@@ -74,6 +74,12 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: npm ci
+
+      # The integration harness includes Chromium-backed attacker adapters.
+      # The broader E2E step installs all three browsers later in this job.
+      - name: Install Chromium for integration harness
+        run: npx playwright install chromium
+
       - name: Worker integration suite (workerd)
         run: npm run test:integration
       # P0-AUDIT-3 (P0-5): release-critical gates — stateless production
