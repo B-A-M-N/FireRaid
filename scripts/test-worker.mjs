@@ -206,7 +206,7 @@ log("applying migrations (single `d1 migrations apply`)…");
 //    10/15 integration failures before — this is the hard gate against that.
 // --------------------------------------------------------------------------------
 function readTablesFromSqlite(file) {
-  // node:sqlite (Node >=22.5, stable-ish in 22 LTS) avoids spawning wrangler.
+  // node:sqlite (Node >=22.13) avoids spawning wrangler.
   const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite");
   const db = new DatabaseSync(file, { readOnly: true });

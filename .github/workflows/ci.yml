@@ -12,12 +12,12 @@ jobs:
     timeout-minutes: 15
 
     # FR-P1-12: test the EXACT supported minimum, not just "some modern Node".
-    # engines.node is >=22.5.0 (node:sqlite in the test harness); the floor
+    # engines.node is >=22.13.0 (node:sqlite in the test harness); the floor
     # MUST pass, alongside the latest 22.x — so a claim of support can never
     # drift from what CI actually verifies again.
     strategy:
       matrix:
-        node-version: ["22.5.0", "22"]
+        node-version: ["22.13.0", "22"]
 
     steps:
       - name: Checkout

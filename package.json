@@ -71,7 +71,7 @@
   },
   "homepage": "https://github.com/B-A-M-N/FireRaid#readme",
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.13.0"
   },
   "files": [
     "dist/",

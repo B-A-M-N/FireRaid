@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="https://github.com/B-A-M-N/FireRaid/actions/workflows/ci.yml"><img src="https://github.com/B-A-M-N/FireRaid/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/Node.js-%3E%3D22.5.0-339933?logo=node.js&logoColor=white" alt="Node.js 22.5.0 or newer">
+  <img src="https://img.shields.io/badge/Node.js-%3E%3D22.13.0-339933?logo=node.js&logoColor=white" alt="Node.js 22.13.0 or newer">
 </p>
 
 <p align="center"><strong>No LLM in the defense path · No invasive fingerprinting · Host-owned admission policy</strong></p>
