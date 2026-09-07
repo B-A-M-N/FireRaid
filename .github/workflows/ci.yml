@@ -35,7 +35,7 @@ jobs:
         run: npm run typecheck
 
       - name: Lint
-        run: npm run lint
+        run: ./node_modules/.bin/eslint "src/**/*.ts" "harness/**/*.ts" "tests/**/*.ts" "demo/**/*.ts" "scripts/**/*.mjs" --max-warnings 0
 
       - name: Unit tests
         run: npm run test:unit
