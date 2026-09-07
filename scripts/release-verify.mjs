@@ -44,32 +44,38 @@
  *   MEASURED              — a completed, matched experiment supports the claim
  *   NOT_YET_ESTABLISHED   — no evidence at the required tier
  *
- * Exit: 0 iff every source/package gate passed. Evidence is written either way.
+ * Exit: 0 iff every source/package gate passed (or, with --require-tier
+ * <t>, iff that release tier is satisfied AND the gates passed). Evidence
+ * is written either way.
  *
  * Usage:
  *   npm run release:verify:fast
  *   npm run release:verify:full
+ *   npm run release:verify            — full + --require-tier release_ready
+ *   node scripts/release-verify.mjs full --require-tier deploy_ready
+ *
+ * FR-RR-50: the default `release:verify` (what a release job should run)
+ * requires the release_ready tier — "gates passed but no tier satisfied"
+ * can no longer exit 0.
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { validatePreflightResult } from "./lib/preflight-schema.mjs";
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MODE = process.argv[2] === "full" ? "full" : "fast";
-
-// Expected production-preflight check IDs (FR-P0-B: fail closed when one
-// disappears — a silently renamed check must never read as "absent = fine").
-const EXPECTED_PREFLIGHT_CHECKS = new Set([
-  "lab-mode",
-  "production-db-id",
-  "production-db-distinct",
-  "production-hostname",
-  "rate-limit-login",
-  "production-graph",
-  "dry-run",
-  "remote-migrations",
-]);
+// FR-RR-50: an optional third argument REQUIRES a specific release tier —
+// `node scripts/release-verify.mjs full --require-tier release_ready` exits
+// 0 ONLY when that tier is actually satisfied. Without it the historical
+// contract holds (exit 0 iff the source/package gates passed, regardless
+// of tier). A release job MUST invoke it with --require-tier release_ready
+// so "no tier satisfied" can never exit 0.
+const requireTierArg = process.argv.indexOf("--require-tier");
+const REQUIRE_TIER = requireTierArg !== -1 ? process.argv[requireTierArg + 1] : null;
+const VALID_TIERS = ["local_candidate", "deploy_ready", "release_ready"];
 
 // --- git provenance ---
 function git(args) {
@@ -79,10 +85,11 @@ function git(args) {
 const sha = git(["rev-parse", "HEAD"]);
 const dirty = (git(["status", "--porcelain"]) ?? "").length > 0;
 
+
 const gates = [];
-function runGate(name, command, args, { slow = false } = {}) {
+function runGate(name, command, args, { slow = false, demo = false } = {}) {
   if (slow && MODE === "fast") {
-    gates.push({ name, command: [command, ...args].join(" "), status: "SKIPPED", skipped: true });
+    gates.push({ name, command: [command, ...args].join(" "), status: "SKIPPED", skipped: true, ...(demo ? { demo_gate: true } : {}) });
     return;
   }
   const t0 = Date.now();
@@ -103,6 +110,8 @@ function runGate(name, command, args, { slow = false } = {}) {
     status: passed ? "PASS" : "FAIL",
     exit_code: r.status,
     duration_ms: Date.now() - t0,
+    // FR-RR-36: demo-surface gates are tier-annotated on the record.
+    ...(demo ? { demo_gate: true } : {}),
     ...(unmeasuredScenarios ? { unmeasured_ambient_load: unmeasuredScenarios } : {}),
     // Keep tails bounded — a failure's diagnosis belongs in CI logs, but a
     // short excerpt travels with the evidence file.
@@ -154,54 +163,17 @@ let preflightParseError = null;
   if (parsed && typeof parsed === "object" && Array.isArray(parsed.checks)) {
     // FR-RR-11: the release gate computes its truth from the PRIMITIVE
     // observations (the per-check rows), never from a summary the producer
-    // could miscount. Each check must have a known name, a known status,
-    // and a unique ID. SKIP is legal in LOCAL mode (the one legitimate
+    // could miscount. SKIP is legal in LOCAL mode (the one legitimate
     // case: remote-migrations without a CLOUDFLARE_API_TOKEN) and is
-    // handled explicitly by the deploy predicate below.
-    const KNOWN_STATUSES = new Set(["PASS", "FAIL", "SKIP"]);
-    const seenIds = new Set();
-    let badCheck = null;
-    for (const c of parsed.checks) {
-      if (typeof c?.name !== "string" || c.name.length === 0) { badCheck = "a check lacks a name"; break; }
-      if (seenIds.has(c.name)) { badCheck = `duplicate check id: ${c.name}`; break; }
-      seenIds.add(c.name);
-      if (!KNOWN_STATUSES.has(c.status)) { badCheck = `check ${c.name} has unknown status ${JSON.stringify(c.status)}`; break; }
-    }
-    const presentIds = seenIds;
-    const missing = [...EXPECTED_PREFLIGHT_CHECKS].filter((id) => !presentIds.has(id));
-    if (badCheck) {
-      preflightParseError = `preflight check invalid: ${badCheck}`;
-    } else if (missing.length > 0) {
-      preflightParseError = `preflight check set is missing expected IDs: ${missing.join(", ")}`;
+    // handled explicitly by the deploy predicate below. FR-RR-18: the
+    // full schema + exit-status validation lives in the EXPORTED
+    // validatePreflightResult so release-machinery.test.ts exercises the
+    // real predicate set behaviorally, not a source-grep of it.
+    const verdict = validatePreflightResult(parsed, r.status);
+    if (!verdict.ok) {
+      preflightParseError = verdict.error;
     } else {
-      // Derive the counts. The producer's own tallies are still read — and
-      // must AGREE — but the gate's decision uses these.
-      const derivedFailed = parsed.checks.filter((c) => c.status === "FAIL").length;
-      const derivedPassed = parsed.checks.filter((c) => c.status === "PASS").length;
-      const derivedSkipped = parsed.checks.filter((c) => c.status === "SKIP").length;
-      const countsAgree =
-        parsed.failed === derivedFailed &&
-        parsed.passed === derivedPassed &&
-        parsed.skipped === derivedSkipped;
-      // Exit-status consistency: a zero exit with reported FAILs (or a
-        // non-zero exit with none) is a producer bug — fail closed.
-      const exitConsistent = r.status === 0 ? derivedFailed === 0 : true;
-      if (!countsAgree) {
-        preflightParseError =
-          `preflight summary counts disagree with its checks array ` +
-          `(reported ${parsed.passed}p/${parsed.skipped}s/${parsed.failed}f, derived ${derivedPassed}p/${derivedSkipped}s/${derivedFailed}f)`;
-      } else if (!exitConsistent) {
-        preflightParseError = `preflight exited 0 while reporting ${derivedFailed} FAIL check(s)`;
-      } else {
-        preflight = {
-          ...parsed,
-          // The gate's truth, derived from the primitives.
-          passed: derivedPassed,
-          skipped: derivedSkipped,
-          failed: derivedFailed,
-        };
-        preflight.exit = r.status;
-      }
+      preflight = verdict.preflight;
     }
   } else if (!preflightParseError) {
     preflightParseError = "preflight JSON lacks a checks array";
@@ -295,24 +267,38 @@ let smokeReceipt = null;
   } else {
     try {
       const parsed = JSON.parse(readFileSync(receiptPath, "utf-8"));
-      // FR-RR-10: the receipt is an OPERATOR ATTESTATION (someone invoked the
-      // recorder and asserted these checks), not machine-generated probe
-      // output — so the verifier's job is to make sure it is unambiguously
-      // OUR attestation format, internally consistent, and bound to THIS
-      // deployment. Schema first: an arbitrary JSON blob with the right key
-      // names must never satisfy this gate.
-      const schemaOk = parsed.schema === "fireraid-release-smoke-receipt/1";
+      // FR-RR-49: the receipt is DEPLOYMENT PROOF, not an attestation. The
+      // runner (release-smoke-record.mjs) performs the probes and records
+      // OBSERVED statuses; this validator demands the machine-observed
+      // half (machine_checks, every check ok with a plausible observed
+      // status), the operator-attested half (human_submit), HTTPS binding
+      // to the deployed URL, a real Cloudflare version-id shape, and the
+      // exact-SHA match against HEAD. The v1 attestation-only schema is
+      // explicitly NOT accepted — it certified checks nobody performed.
+      const schemaOk = parsed.schema === "fireraid-release-smoke-receipt/2";
       const requiredChecks = ["signup_page", "submit_failclosed", "human_submit"];
-      const checkEntries = Object.entries(parsed.checks ?? {});
-      const unknownChecks = checkEntries
-        .map(([name]) => name)
-        .filter((name) => !requiredChecks.includes(name));
-      const missingChecks = requiredChecks.filter(
-        (c) => parsed.checks?.[c]?.ok !== true
-      );
+      const mc = parsed.machine_checks ?? {};
+      const mcEntries = Object.entries(mc);
+      const unknownChecks = mcEntries.map(([n]) => n).filter((n) => !requiredChecks.includes(n));
+      const missingOrFailing = requiredChecks.filter((c) => mc[c]?.ok !== true);
+      const implausibleStatus = mcEntries
+        .filter(([, c]) => !Number.isInteger(c.observed_status) || c.observed_status < 100 || c.observed_status > 599)
+        .map(([n]) => n);
+      const attested = parsed.operator_attestations?.human_submit?.attested === true;
+      const httpsUrl = typeof parsed.deployed_url === "string" && parsed.deployed_url.startsWith("https://");
       const shaMatch = parsed.git_sha === sha;
-      const workerVersion = typeof parsed.worker_version_id === "string" && parsed.worker_version_id.length > 0;
-      if (!schemaOk) {
+      const workerVersionShape = typeof parsed.worker_version_id === "string" && /^[0-9a-f]{32}$/.test(parsed.worker_version_id);
+      const fail =
+        !schemaOk ? `receipt schema ${JSON.stringify(parsed.schema ?? null)} is not "fireraid-release-smoke-receipt/2" — re-run the smoke runner (the v1 attestation format is no longer accepted)`
+          : !shaMatch ? `receipt git_sha ${parsed.git_sha} does not match HEAD ${sha}`
+          : !workerVersionShape ? `receipt worker_version_id ${JSON.stringify(parsed.worker_version_id)} is not a Cloudflare version id (32 lowercase hex)`
+          : !httpsUrl ? "receipt deployed_url is not HTTPS"
+          : unknownChecks.length > 0 ? `receipt names unknown machine checks: ${unknownChecks.join(", ")}`
+          : missingOrFailing.length > 0 ? `receipt machine checks failed/missing: ${missingOrFailing.join(", ")}`
+          : implausibleStatus.length > 0 ? `receipt machine checks lack a plausible observed_status: ${implausibleStatus.join(", ")}`
+          : !attested ? "receipt lacks the operator_attestations.human_submit attestation"
+            : null;
+      if (fail) {
         gate = {
           name: "release-smoke-receipt",
           release_tier_gate: true,
@@ -320,23 +306,7 @@ let smokeReceipt = null;
           status: "FAIL",
           exit_code: 1,
           duration_ms: Date.now() - t0,
-          detail: `receipt schema ${JSON.stringify(parsed.schema ?? null)} is not "fireraid-release-smoke-receipt/1" — not a FireRaid smoke receipt`,
-        };
-      } else if (!shaMatch || !workerVersion || missingChecks.length > 0 || unknownChecks.length > 0) {
-        gate = {
-          name: "release-smoke-receipt",
-          release_tier_gate: true,
-          command: "read release-smoke-receipt.json",
-          status: "FAIL",
-          exit_code: 1,
-          duration_ms: Date.now() - t0,
-          detail: !shaMatch
-            ? `receipt git_sha ${parsed.git_sha} does not match HEAD ${sha}`
-            : !workerVersion
-              ? "receipt lacks a worker_version_id"
-              : unknownChecks.length > 0
-                ? `receipt names unknown smoke checks: ${unknownChecks.join(", ")}`
-                : `receipt smoke checks failed/missing: ${missingChecks.join(", ")}`,
+          detail: fail,
         };
       } else {
         gate = {
@@ -346,7 +316,7 @@ let smokeReceipt = null;
           status: "PASS",
           exit_code: 0,
           duration_ms: Date.now() - t0,
-          detail: `receipt matches HEAD ${sha}; worker_version_id ${parsed.worker_version_id}`,
+          detail: `receipt matches HEAD ${sha}; worker_version_id ${parsed.worker_version_id}; machine-observed statuses ${requiredChecks.map((c) => `${c}=${mc[c].observed_status}`).join(", ")}`,
         };
         smokeReceipt = parsed;
       }
@@ -382,12 +352,31 @@ runGate("e2e", "npm", ["run", "test:e2e"], { slow: true });
 runGate("e2e:production", "npm", ["run", "test:e2e:production"], { slow: true });
 runGate("a11y", "npm", ["run", "test:a11y"], { slow: true });
 runGate("examples", "npx", ["tsc", "--noEmit"], { slow: true });
+// FR-DEMO-04: the demo is gated like any other surface — its types
+// typecheck and its paired smoke (Chromium e2e) runs in full mode. The
+// demo does NOT gate the core-library release tiers below (a Chromium
+// startup failure must not block a library release); it is reported as
+// its own fact for the operator.
+// FR-RR-36: the tier semantics are now EXPLICIT in the evidence. The demo
+// gates carry `demo_gate: true` and are EXCLUDED from `sourceGates` (the
+// local_candidate computation) by name-independent tier flags, so the
+// exclusion is a property of the gate record, not of a string comparison
+// in the tier math. Their result is surfaced as a separate `demo`
+// evidence fact: a demo FAIL is a demo-surface fact for the operator,
+// never a silent demotion of the library's release tier — and never a
+// PASS that can be misread as a library gate.
+runGate("demo-typecheck", "npm", ["run", "typecheck:demo"], { slow: true, demo: true });
+runGate("demo-smoke", "npm", ["run", "test:demo"], { slow: true, demo: true });
 
 // FR-P1-13: the three release tiers. local_candidate reflects the
 // SOURCE/PACKAGE gates only. deploy_ready additionally requires the
 // preflight deploy gate. release_ready additionally requires the external
 // smoke receipt matching THIS HEAD.
-const sourceGates = gates.filter((g) => !g.deploy_gate && !g.release_tier_gate);
+// FR-RR-36: demo gates are excluded by their TIER FLAG (`demo_gate`), not
+// by a name filter — the annotation is the contract.
+const sourceGates = gates.filter((g) => !g.deploy_gate && !g.release_tier_gate && !g.demo_gate);
+const demoGates = gates.filter((g) => g.demo_gate);
+const demoPassed = demoGates.length > 0 && demoGates.every((g) => g.status === "PASS");
 const allPassed = sourceGates.every((g) => g.status === "PASS");
 
 const localCandidate = MODE === "full" && !dirty && allPassed;
@@ -426,6 +415,20 @@ const evidence = {
           ? "locally-verified source/package tier; deploy_ready additionally requires a fully-passing production preflight with the remote migration check run (CLOUDFLARE_API_TOKEN)."
           : "local gates failing or fast mode — not a local candidate",
   },
+  // FR-RR-36: the demo is its OWN machine-readable fact — never folded into
+  // the library release tiers, never silently absent. A demo FAIL here is
+  // a demo-surface finding for the operator while the library tier stands
+  // on the source/package gates alone.
+  demo: {
+    gated: demoGates.length > 0,
+    passed: demoPassed,
+    gates: demoGates.map((g) => ({ name: g.name, status: g.status })),
+    note: demoGates.length === 0
+      ? "demo gates skipped (fast mode) — no demo evidence this run"
+      : demoPassed
+        ? "demo typecheck + smoke passed (demo-surface fact; does not gate the library tiers)"
+        : "demo FAILED — demo surface is broken; the library release tiers are unaffected by design",
+  },
   gates,
   claim_tiers: {
     // The tier per claim is OWNED by docs/evidence-ledger.json; this file
@@ -458,4 +461,28 @@ const releaseNote = !deployReady
     ? "smoke receipt matches this HEAD"
     : "record the post-deploy smoke receipt to claim release_ready";
 console.log(`release_ready: ${releaseReady} (${releaseNote})`);
+
+// FR-RR-50: --require-tier gates the exit on the TIER, not just the source
+// gates. The old exit (`allPassed ? 0 : 1`) could exit 0 with NO tier
+// satisfied — fast mode, a dirty tree, or missing deploy evidence all
+// yielded "green" while local_candidate/deploy_ready/release_ready were
+// all false.
+if (REQUIRE_TIER !== null) {
+  if (!VALID_TIERS.includes(REQUIRE_TIER)) {
+    console.error(`--require-tier: unknown tier "${REQUIRE_TIER}" (valid: ${VALID_TIERS.join(", ")})`);
+    process.exit(2);
+  }
+  const satisfied =
+    REQUIRE_TIER === "local_candidate" ? localCandidate
+      : REQUIRE_TIER === "deploy_ready" ? deployReady
+        : releaseReady;
+  if (!satisfied) {
+    console.error(
+      `--require-tier ${REQUIRE_TIER}: NOT satisfied ` +
+      `(local_candidate=${localCandidate}, deploy_ready=${deployReady}, release_ready=${releaseReady})`
+    );
+    process.exit(1);
+  }
+  console.log(`--require-tier ${REQUIRE_TIER}: satisfied`);
+}
 process.exit(allPassed ? 0 : 1);

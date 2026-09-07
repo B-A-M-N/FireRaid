@@ -116,6 +116,19 @@ export interface RenderInjectOptions {
  * The host owns storage; FireRaid only needs a stable opaque id.
  */
 export interface HostSessionAdapter {
+  /**
+   * FR-RR-27: the issued-profile INTEGRITY capability. When true, the
+   * adapter GUARANTEES both halves of the drift check:
+   *   1. sessionCookie() signs the issuance's `profileHash` into the
+   *      carrier (the fr2 format — never dropping it), and
+   *      resolveSession() returns that signed hash as
+   *      `profileHash` on every verified session.
+   * The PRODUCTION factory REQUIRES this capability: without it a host can
+   * silently discard the signed hash and the middleware can never detect
+   * that the treatment it evaluates differs from the treatment that was
+   * issued. Hashless/legacy carriers are the evaluation plane's domain.
+   */
+  readonly profileIntegrity?: "issued-hash";
   /** Create a new opaque session id (host may persist whatever it needs). */
   createSession(): Promise<string>;
   /**
@@ -123,20 +136,16 @@ export interface HostSessionAdapter {
    * Async so a host may sign the session id (integrity-protected cookie —
    * see the reference adapter).
    *
-   * FR-RR (P2 sunset rule): `envelope` carries the issued profile hash when
-   * the middleware has one. Adapters that sign a session envelope SHOULD
-   * issue the fr2 format with the signed `ph` claim (Worker parity, the
-   * FR-P0-G drift check) — an adapter that cannot use it may ignore the
-   * parameter. Issuing legacy fr1 (hashless) envelopes from the reference
-   * path is no longer the default: new sessions must not depend on a
-   * format whose drift cannot be verified.
+   * FR-RR (P2 sunset rule): `issuance` carries what FireRaid actually
+   * issued — the derived profile version, the signing key id, and the
+   * issued profile hash. FR-RR-17: the ADAPTER no longer owns any of
+   * these values — it signs what FireRaid tells it was issued, so there
+   * is exactly ONE configuration source for the session's treatment.
+   * FR-RR-27: a production adapter (profileIntegrity === "issued-hash")
+   * MUST sign the hash (issue the fr2 format with the signed `ph` claim,
+   * Worker parity with the FR-P0-G drift check).
    */
-  sessionCookie(sessionId: string, envelope?: { profileHash?: string }): Promise<string>;
-  /**
-   * Parse + verify the incoming session id from a Request. Return null for a
-   * missing OR TAMPERED session — admission must be denied, never forwarded.
-   */
-  readSessionId(req: Request): Promise<string | null>;
+  sessionCookie(sessionId: string, issuance?: HostSessionIssuance): Promise<string>;
   /**
    * P1-AUDIT-2 response (P1-1): the VERIFIED session context — the envelope's
    * own claims, not the deployment defaults. The signed cookie carries the
@@ -156,6 +165,19 @@ export interface HostSessionAdapter {
   resolveSession(req: Request, signal?: AbortSignal): Promise<HostSessionContext | null>;
 }
 
+/**
+ * FR-RR-17 — what FireRaid tells the session adapter was ISSUED. The
+ * adapter signs these values into the carrier verbatim; it never supplies
+ * its own version/key-id configuration (the duplicate-source deployment
+ * bug: page rendered under v2 while the envelope says pv=1). profileHash
+ * presence is what selects the fr2 format.
+ */
+export interface HostSessionIssuance {
+  profileVersion: number;
+  profileKeyId: string;
+  profileHash: string;
+}
+
 /** The verified session context a host adapter returns (P1-1). */
 export interface HostSessionContext {
   id: string;
@@ -165,6 +187,17 @@ export interface HostSessionContext {
   keyId: string;
   /** Issued-at (epoch ms) when the carrier carries it. */
   issuedAt?: number;
+  /**
+   * FR-RR-12: the profile hash SIGNED into the session's fr2 envelope at
+   * issuance (`ph`). Present when, and only when, the carrier is an fr2
+   * envelope — i.e. issuance proved what treatment the session was shown
+   * and signed it. When present, the middleware MUST derive the session's
+   * profile and compare it against this hash (fail closed on mismatch,
+   * the Worker path's FR-P0-G drift check); a session without one cannot
+   * be drift-checked and is a legacy fr1 artifact. The reference GET path
+   * always issues fr2, so every session it mints carries this field.
+   */
+  profileHash?: string;
 }
 
 /**
@@ -327,9 +360,14 @@ export interface HostEnforcementAdapter {
   /**
    * Forward the (FireRaid-stripped) registration to the upstream.
    *
-   * P0-8: the discriminated result is the contract; the bare boolean is
-   * LEGACY (accepted for existing hosts, but ambiguous — `false` cannot say
-   * whether the upstream rejected the application or never received it).
+   * FR-RR-24: the discriminated result is THE contract. The legacy bare
+   * boolean was removed before v0.1.0 stable — `false` could never say
+   * whether the upstream rejected the application or never received it,
+   * and a definite failure mapping released the forward slot for an
+   * automatic retry that could create a duplicate. A host with an
+   * adapter still speaking the boolean shape MUST migrate it (return
+   * `{ kind: "created" }` for true; false must become an UNCERTAIN
+   * transport-failure — the send may have crossed the boundary).
    * The discriminated kinds carry exactly that distinction:
    *
    *   - created:            the upstream accepted and durably recorded the
@@ -341,11 +379,11 @@ export interface HostEnforcementAdapter {
    *                         captured the application for retry (retryId
    *                         identifies the pending record). The application
    *                         is not lost; the host's retry worker owns it.
-   *   - transport-failure:  the upstream (or network) failed and the
-   *                         adapter has NOT durably captured anything. The
-   *                         middleware treats this as a failed request —
-   *                         the host runtime MUST NOT emit a success
-   *                         receipt for it.
+   *   - transport-failure:  the upstream (or network) failed. When
+   *                         `uncertain` is true the request MAY have been
+   *                         received (the middleware holds the forward
+   *                         slot); only a definite pre-send failure may
+   *                         release it.
    */
   allow(
     upstreamUrl: string,
@@ -357,7 +395,7 @@ export interface HostEnforcementAdapter {
     // upstream can deduplicate its own side of the irreversible act —
     // exactly-once cannot be guaranteed from the caller alone.
     opts?: { idempotencyKey?: string }
-  ): Promise<boolean | EnforcementResult>;
+  ): Promise<EnforcementResult>;
   /**
    * Record a denied submission (never forwarded).
    * The annotation carries FireRaid's risk projection so a host queue can
@@ -446,7 +484,13 @@ export interface HostSubmissionClaim {
 }
 export type HostSubmissionReplay = {
   kind: "replay";
-  outcome: FinalSubmissionOutcome;
+  /**
+   * FR-RR-14: the COMPLETE durable record — the outcome AND the immutable
+   * assessment snapshot captured when it was recorded. A replay must be
+   * able to reproduce the original assessment exactly, not a degraded
+   * reconstruction of it.
+   */
+  record: FinalSubmissionRecord;
 };
 export type HostSubmissionConflict = { kind: "conflict" };
 export type HostSubmissionClaimResult =
@@ -457,11 +501,105 @@ export type HostSubmissionClaimResult =
 /**
  * The durable record of how a session's single forward ended. Stored by
  * complete() and replayed to later POSTs of the same session.
+ *
+ * FR-RR-21: `decision-denied` is the terminal outcome of a submission the
+ * DECISION path refused (REVIEW/QUARANTINE) — no forward was attempted, but
+ * the denial is exactly as terminal and replayable as a forward outcome. A
+ * session whose terminal decision record is durable must never be
+ * re-evaluated on retry (the causal evidence that produced the denial is
+ * finalized away after the record lands; a re-evaluation could flip to
+ * ACCEPT and forward what the decision had already refused).
  */
 export type FinalSubmissionOutcome =
   | { kind: "created" }
   | { kind: "business-rejected"; status: number }
-  | { kind: "queued-for-retry"; retryId: string };
+  | { kind: "queued-for-retry"; retryId: string }
+  | { kind: "decision-denied"; disposition: "REVIEW" | "QUARANTINE" };
+
+/**
+ * FR-RR-14 — the immutable assessment snapshot persisted ALONGSIDE the
+ * terminal outcome. The prior contract stored only the outcome kind, so a
+ * client retry after a failed onAssessment replayed a DEGRADED receipt:
+ * the upstream account existed, but the original score, disposition, and
+ * risk evidence were lost — the second onAssessment succeeded with less
+ * than the first one carried, and the application got acked on that
+ * degraded pass. With the snapshot stored, replay reproduces the original
+ * assessment byte-for-byte.
+ *
+ * `sessionId` doubles as the idempotency identity: a host persisting
+ * assessments MUST upsert on it, so a replayed onAssessment can never
+ * duplicate a review row.
+ */
+export interface AssessmentSnapshot {
+  sessionId: string;
+  submittedEmail?: string;
+  /**
+   * The ORIGINAL CORE disposition (ACCEPT/REVIEW/QUARANTINE) — what the
+   * evidence model + policy decided, BEFORE any deployment-posture remap.
+   * FR-RR-55: this is deliberately distinct from `runtimeDisposition` —
+   * a review-mode deployment turns a core QUARANTINE into a runtime
+   * REVIEW, and a custom tier map's autoSuppress flag can turn a core
+   * REVIEW into a runtime QUARANTINE. Conflating the two fabricated
+   * either "we decided REVIEW" when the core call was QUARANTINE, or the
+   * reverse.
+   */
+  disposition: string;
+  /**
+   * FR-RR-55: the disposition the RUNTIME actually acted on at the
+   * boundary (the post-`resolveRuntimeDisposition` form). Present on every
+   * snapshot this codebase writes; optional in the type so an evaluation
+   * store may still construct a core-only snapshot in tests.
+   */
+  runtimeDisposition?: string;
+  /** FR-RR-26: MANDATORY in every terminal record (schema v2). */
+  score: number;
+  /** FR-RR-26: MANDATORY in every terminal record (schema v2). */
+  risk: {
+    score: number;
+    tier: string;
+    confidence: string;
+    recommendedAction: string;
+    evidence: RiskAnnotation["evidence"];
+  };
+}
+
+/**
+ * FR-RR-26 — the terminal record contract, versioned. New records are
+ * ALWAYS schema v2: the assessment snapshot is mandatory, so every replay
+ * reproduces the original decision material in full — the degraded
+ * assessment-less receipt FR-RR-14 closed can never be written again. A v1
+ * record (outcome only) is LEGACY: reading one is defined behavior (the
+ * degraded replay), writing one is no longer possible through this
+ * contract.
+ */
+export interface FinalSubmissionRecord {
+  /** Discriminant for the record shape. 2 = assessment-bearing. */
+  version: 2;
+  outcome: FinalSubmissionOutcome;
+  /** FR-RR-26: REQUIRED — the immutable assessment at record time. */
+  assessment: AssessmentSnapshot;
+}
+
+/**
+ * FR-RR-40 — the result of a decision-finalize attempt against the
+ * submission state machine:
+ *
+ *   NONE ─claimForward──────────→ FORWARD_CLAIMED
+ *                                   ├─ complete(terminal)  → TERMINAL
+ *                                   └─ complete(uncertain) → FORWARD_UNCERTAIN
+ *   NONE ─finalizeDecision──────→ TERMINAL (decision-denied)
+ *
+ * There is NO automatic transition out of FORWARD_CLAIMED or
+ * FORWARD_UNCERTAIN into a decision denial: another request may already
+ * have crossed the irreversible boundary, and overwriting its claim would
+ * let FireRaid report "blocked" about an upstream account that may exist.
+ * FORWARD_UNCERTAIN is ABSORBING for automatic admission processing —
+ * only an explicit operator reconciliation may move it.
+ */
+export type FinalizeDecisionResult =
+  | { kind: "stored"; record: FinalSubmissionRecord }
+  | { kind: "replay"; record: FinalSubmissionRecord }
+  | { kind: "conflict"; state: "forward-claimed" | "forward-uncertain" };
 
 export interface HostSubmissionStore {
   /**
@@ -478,25 +616,92 @@ export interface HostSubmissionStore {
    */
   claim(sessionId: string, idempotencyKey: string, signal?: AbortSignal): Promise<HostSubmissionClaimResult>;
   /**
-   * FR-P0-02 (rereview P0-E): read the session's FINALIZED forward outcome,
-   * if one exists, WITHOUT claiming the forward slot. Lets the middleware
-   * serve replays cheaply before evaluation while keeping the claim itself
+   * FR-P0-02 (rereview P0-E): read the session's FINALIZED record, if one
+   * exists, WITHOUT claiming the forward slot. Lets the middleware serve
+   * replays cheaply before evaluation while keeping the claim itself
    * at the irreversible boundary — an early deny (verification failure,
    * invalid telemetry, …) never opens a claim, so a corrected retry never
-   * collides with an orphaned one. Returns null when no terminal outcome is
-   * stored. Implementations SHOULD be optional at the type level (an older
-   * store without it simply skips the fast replay path; claim()'s own replay
-   * remains the backstop).
+   * collides with an orphaned one. Returns null when no terminal outcome
+   * is stored (a FORWARD_UNCERTAIN session has NO final record — its
+   * upstream outcome is genuinely unknown). Implementations SHOULD be
+   * optional at the type level (an older store without it simply skips the
+   * fast replay path; claim()'s own replay remains the backstop).
    */
-  lookupFinal?(sessionId: string, signal?: AbortSignal): Promise<FinalSubmissionOutcome | null>;
+  lookupFinal?(sessionId: string, signal?: AbortSignal): Promise<FinalSubmissionRecord | null>;
+  /**
+   * FR-RR-21 — durably record a DECISION denial (REVIEW/QUARANTINE) as the
+   * session's TERMINAL outcome, WITHOUT opening or touching a forward
+   * claim. Called BEFORE the enforcement deny and evidence finalization.
+   *
+   * FR-RR-40 state machine: the store MUST perform this as an ATOMIC
+   * conditional transition (never check-then-write), and it MUST refuse:
+   *   - FORWARD_CLAIMED  → conflict ("forward-claimed"): another request
+   *     owns the forward slot and may be mid-irreversible-forward. The
+   *     decision must NOT overwrite it.
+   *   - FORWARD_UNCERTAIN → conflict ("forward-uncertain"): the upstream
+   *     outcome is UNKNOWN — a decision denial would fabricate "blocked"
+   *     for a state that may be "created". Absorbing for automatic
+   *     processing; only operator reconciliation may resolve it.
+   * "replay" means a TERMINAL record already exists (a concurrent request
+   * won the race, or a previous denial finalized): the caller MUST surface
+   * the returned record's outcome instead of its own evaluation and MUST
+   * NOT re-run deny-side effects against the already-finalized session.
+   */
+  finalizeDecision(
+    sessionId: string,
+    record: FinalSubmissionRecord,
+    signal?: AbortSignal
+  ): Promise<FinalizeDecisionResult>;
+  /**
+   * FR-RR-42 — mark the enforcement.deny PROJECTION of a terminal
+   * decision-denied record durably complete. The coordinator calls this
+   * after the deny side effect lands; a retry that finds the projection
+   * still "pending" (denyProjectionState) re-runs the IDEMPOTENT deny and
+   * re-marks BEFORE any receipt acknowledges the denial. Optional: a store
+   * without it simply skips projection tracking (the deny is then the
+   * host's sole responsibility, as pre-FR-RR-42).
+   */
+  markDenyProjectionComplete?(sessionId: string, signal?: AbortSignal): Promise<void>;
+  /** FR-RR-42: read the deny-projection state of a terminal decision. */
+  denyProjectionState?(
+    sessionId: string,
+    signal?: AbortSignal
+  ): Promise<"pending" | "complete" | undefined>;
   /**
    * Record the forward's outcome against the claim durably. Called exactly
    * once per successful claim, before the middleware responds. `outcome`
    * covers ALL terminal forward results — created, business-rejected,
    * queued-for-retry, AND transport-failure (a recorded transport failure
    * releases the claim so a genuine client retry may re-attempt).
+   *
+   * FR-RR-14: `meta.assessment` — the immutable assessment snapshot
+   * (original disposition/score/email/risk) to persist WITH the outcome, so
+   * replays reproduce the original assessment instead of a degraded one.
+   *
+   * FR-RR-25: the historical argument order (claimId, outcome, signal) is
+   * PRESERVED — the assessment rides in a trailing `meta` object, never in
+   * a position that reinterprets an existing adapter's `signal`
+   * parameter. A host implementation written against the pre-FR-RR-14
+   * three-argument signature keeps working unchanged.
+   *
+   * FR-RR-45 (type level): a TERMINAL outcome without its assessment is
+   * UNREPRESENTABLE for TypeScript hosts — the terminal overload REQUIRES
+   * meta.assessment; only the transport-failure overload accepts the
+   * assessment-less shape (an uncertain transport failure carries no
+   * assessment by design).
    */
-  complete(claimId: string, outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string; uncertain?: boolean }, signal?: AbortSignal): Promise<void>;
+  complete(
+    claimId: string,
+    outcome: FinalSubmissionOutcome,
+    signal: AbortSignal | undefined,
+    meta: { assessment: AssessmentSnapshot }
+  ): Promise<void>;
+  complete(
+    claimId: string,
+    outcome: { kind: "transport-failure"; reason: string; uncertain?: boolean },
+    signal?: AbortSignal,
+    meta?: { assessment?: AssessmentSnapshot }
+  ): Promise<void>;
 }
 
 /** Deterministic idempotency key material for one session's forward. */

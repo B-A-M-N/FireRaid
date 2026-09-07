@@ -83,6 +83,9 @@ export async function handleSubmitPost(
     sessionId,
     keyId: session!.keyId,
     deriveVersion,
+    // FR-RR-12: the signed issued-profile hash, when the envelope carries
+    // one — the coordinator's derivation verifies against it (fail closed).
+    profileHash: session?.profileHash,
     body,
     form,
     requestUrl: req.url,

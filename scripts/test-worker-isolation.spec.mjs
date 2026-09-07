@@ -172,7 +172,86 @@ async function scenarioKilledSupervisor() {
   }
 }
 
-const scenarios = { occupied: scenarioOccupiedPort, clean: scenarioCleanRun, kill: scenarioKilledSupervisor };
+// ── Scenario 4: a healthy run OUTLIVES the old 60s reaper bomb ───────────────
+// FR-RR-58 regression: the old workerd reaper bounded its supervisor WATCH
+// at 60s and then fell into the kill loop UNCONDITIONALLY — any healthy run
+// past 60s got its own workerd SIGKILLed mid-suite (the deterministic
+// "wrangler died by SIGKILL" flake). The reaper must watch INDEFINITELY
+// while the supervisor lives; only supervisor DEATH arms cleanup.
+async function scenarioLongRunSurvives() {
+  console.log("scenario 4: healthy run past 60s is NOT self-killed");
+  check("port free before run", !portOpen(PORT));
+  const persistDir = mkdtempSync(join(tmpdir(), "fr-isolation-"));
+  const logPath = join(persistDir, "..", `isolation-long-${Date.now()}.log`);
+  const logFd = openSync(logPath, "w");
+  const sup = spawn(
+    "node",
+    [
+      "scripts/test-worker.mjs",
+      "--suite", "isolation-long-" + Date.now(),
+      "--port", String(PORT),
+      "--persist", persistDir,
+      // A suite that idles ~75s — past the old 60s bomb's fuse.
+      "--", "node", "-e", "setTimeout(()=>{}, 75000)",
+    ],
+    { cwd: ROOT, stdio: ["ignore", logFd, logFd] }
+  );
+  try {
+    const handoff = await waitUntil(
+      () => readFileSync(logPath, "utf8").includes("suite pid="),
+      true,
+      120_000
+    );
+    check("supervisor reached suite handoff", handoff);
+    if (!handoff) return;
+
+    const workerdPid = () => {
+      const ss = spawnSync(
+        "bash", ["-c", `ss -ltnp 2>/dev/null | grep ':${PORT} ' || true`], { encoding: "utf8" }
+      );
+      const m = [...(ss.stdout || "").matchAll(/pid=(\d+)/g)].map((x) => Number(x[1]));
+      for (const pid of m) {
+        const comm = spawnSync("bash", ["-c", `cat /proc/${pid}/comm 2>/dev/null || true`], { encoding: "utf8" });
+        if ((comm.stdout || "").trim() === "workerd") return pid;
+      }
+      return null;
+    };
+    const before = workerdPid();
+    check("workerd holds the port", before !== null);
+
+    // Cross the old fuse (60s) with a healthy supervisor, then confirm the
+    // Worker is STILL the same process and STILL answering.
+    await sleep(70_000);
+    check("supervisor still alive past 60s", sup.pid !== undefined && !sup.killed);
+    const after = workerdPid();
+    check("SAME workerd identity past 60s", after !== null && after === before,
+      `before=${before} after=${after}`);
+    const health = spawnSync(
+      "curl", ["-fsS", "--max-time", "5", `http://127.0.0.1:${PORT}/health`],
+      { encoding: "utf8" }
+    );
+    check("/health STILL 200 past 60s", health.status === 0, `curl rc=${health.status}`);
+
+    // Now SIGKILL the supervisor: ONLY THEN does cleanup arm — port frees,
+    // no descendant workerd remains.
+    sup.kill("SIGKILL");
+    check("port freed after supervisor SIGKILL", await waitUntil(() => portOpen(PORT), false, 30_000));
+    check("no descendant workerd remains", await waitUntil(() => workerdPid() === null, true, 15_000));
+  } finally {
+    try { closeSync(logFd); } catch { /* already closed */ }
+    rmSync(persistDir, { recursive: true, force: true });
+    try { rmSync(logPath, { force: true }); } catch { /* best effort */ }
+    try { sup.kill("SIGKILL"); } catch { /* gone */ }
+    await waitUntil(() => portOpen(PORT), false, 10_000);
+  }
+}
+
+const scenarios = {
+  occupied: scenarioOccupiedPort,
+  clean: scenarioCleanRun,
+  kill: scenarioKilledSupervisor,
+  longrun: scenarioLongRunSurvives,
+};
 const only = process.argv[2];
 for (const [name, fn] of Object.entries(scenarios)) {
   if (only && name !== only) continue;

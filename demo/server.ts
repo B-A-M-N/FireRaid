@@ -12,6 +12,10 @@
  * excluded from the product boundary by construction (see
  * scripts/check-product-boundary.mjs PRODUCT_FILES — demo files are absent,
  * and tsconfig.product.json does not include demo/).
+ *
+ * FR-DEMO-05: the busy check is ATOMIC with the 202 — the HTTP handler
+ * answers 409 {accepted:false} BEFORE acknowledging a run it would refuse;
+ * ownership lives in DemoCoordinator.tryRunTrial (no monkey-patching).
  */
 import http from "node:http";
 import { readFileSync } from "node:fs";
@@ -55,7 +59,7 @@ async function main(): Promise<void> {
     }
     if (req.method === "GET" && url.pathname === "/api/events") {
       // SSE: semantic trial events (shared.ts DemoEvent). Replay history as
-      // synthetic "trial.completed" frames so a mid-run join still sees
+      // synthetic "trial-record" frames so a mid-run join still sees
       // the 2×2 matrix.
       res.writeHead(200, {
         "content-type": "text/event-stream",
@@ -72,42 +76,33 @@ async function main(): Promise<void> {
     }
     if (req.method === "POST" && (url.pathname === "/api/run-agent" || url.pathname === "/api/run-human")) {
       const actor = url.pathname === "/api/run-agent" ? "agent" : "human";
+      // FR-DEMO-05: ATOMIC admission — tryRunTrial either takes the slot
+      // (and we ack 202) or refuses (and we answer 409) BEFORE any ack.
+      // A second tab / direct API caller can never see accepted:true for
+      // a run the coordinator then rejects.
+      const trial = coordinator.tryRunTrial(actor);
+      if (!trial.accepted) {
+        res.writeHead(409, { "content-type": "application/json" });
+        res.end(JSON.stringify({ accepted: false, error: "trial_in_progress" }));
+        return;
+      }
       res.writeHead(202, { "content-type": "application/json" });
       res.end(JSON.stringify({ accepted: true, actor }));
-      // One trial at a time — a second request while running is refused by
-      // the busy flag (below), not queued (a demo is watched live).
-      void (async () => {
-        try {
-          const record = await coordinator.runTrial(actor);
-          for (const client of sseClients) {
-            sendSse(client, "trial-record", record);
-          }
-        } catch (err) {
+      void trial.done
+        .then((record) => {
+          for (const client of sseClients) sendSse(client, "trial-record", record);
+        })
+        .catch((err) => {
           console.error("[demo] trial failed:", err);
           for (const client of sseClients) {
             sendSse(client, "coordinator-error", { error: String(err) });
           }
-        }
-      })();
+        });
       return;
     }
     res.writeHead(404);
     res.end("not found");
   });
-
-  // Serialize trials: one paired run at a time (the dashboard disables the
-  // buttons while one is in flight, and the server enforces it too).
-  let busy = false;
-  const originalRun = coordinator.runTrial.bind(coordinator);
-  coordinator.runTrial = async (actor) => {
-    if (busy) throw new Error("a trial is already running");
-    busy = true;
-    try {
-      return await originalRun(actor);
-    } finally {
-      busy = false;
-    }
-  };
 
   await new Promise<void>((resolve) => server.listen(DASHBOARD_PORT, "127.0.0.1", resolve));
   console.log("FireRaid paired demo");

@@ -250,6 +250,45 @@ lab API     → evaluation API
 LAB_MODE    → FIRERAID_ENV (never affects defense capability)
 ```
 
+## 13 — The Submission State Machine (FR-RR-40/41/42)
+
+The submission store is an explicit state machine guarding the ONE
+irreversible forward per session and every terminal decision:
+
+```
+NONE ─claim───────────────────→ FORWARD_CLAIMED
+                                  ├─ complete(terminal) → TERMINAL
+                                  └─ complete(uncertain) → FORWARD_UNCERTAIN
+NONE ─finalizeDecision───────→ TERMINAL (decision-denied)
+```
+
+Invariants:
+
+1. **No automatic conversion of an open or uncertain forward into a
+   denial.** `finalizeDecision` on FORWARD_CLAIMED returns
+   `conflict(forward-claimed)`; on FORWARD_UNCERTAIN it returns
+   `conflict(forward-uncertain)`. A denial may never overwrite a claim
+   that may already have crossed the irreversible boundary, and "the
+   upstream outcome is unknown" may never be rewritten as "blocked".
+2. **FORWARD_UNCERTAIN is absorbing for automatic processing.** Only an
+   explicit operator reconciliation may resolve it (to TERMINAL_CREATED or
+   RELEASED_FOR_RETRY). No retry and no decision evaluation may.
+3. **First writer wins, verbatim.** A second finalizer (or a replaying
+   claim) receives the EXACT original terminal record — never a fresh
+   evaluation's answer.
+4. **The coordinator handles every `FinalizeDecisionResult` kind** —
+   stored (owns the denial: deny → projection mark → evidence cleanup),
+   replay (surface the durable record; NEVER run deny-side effects), and
+   conflict (fail closed: no deny, no overwrite, no evidence cleanup). A
+   malformed host answer (including a non-throwing one) fails closed.
+5. **The durable record is the authority; enforcement.deny is a
+   projection.** A decision-denied record is born with
+   `denyProjection: "pending"`; the retry repairs a pending projection
+   (idempotent re-deny + completion mark) BEFORE the receipt
+   acknowledges. No 200 while the host-side denial record may not exist.
+6. **Every durable transition is an atomic conditional write** in SQL
+   stores — never read-then-write in application logic.
+
 ---
 
 **Status:** Effective immediately. Supersedes all prior architectural claims

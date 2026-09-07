@@ -93,6 +93,40 @@ export function validateProductionDeps(
     );
   }
 
+  // FR-RR-19: the deadline budgets are FAIL-CLOSED machinery — a miswired
+  // value must fail at wiring time, never surface as live behavior:
+  //   0 or negative → every adapter call "exceeds" instantly (all requests
+  //     denied as infrastructure errors), or the durability write never gets
+  //     a window at all (the one-forward claim then hangs unrecorded);
+  //   non-finite (NaN/Infinity) or a wrong type → setTimeout treats them as
+  //     1ms/0ms, silently degenerating to the same instant-expiry;
+  //   unbounded (minutes+) → the fail-closed deadline stops bounding
+  //     anything; a hung adapter holds sockets and claim slots for its full
+  //     length.
+  // Both budgets share one validation: a positive, finite, bounded number
+  // of milliseconds (ceiling 10 minutes — far above any sane adapter call
+  // or durability write, far below "unbounded").
+  for (const [field, value, def] of [
+    ["adapterTimeoutMs", deps.adapterTimeoutMs, "DEFAULT_ADAPTER_CALL_TIMEOUT_MS (10s)"],
+    ["durabilityTimeoutMs", deps.durabilityTimeoutMs, "DEFAULT_DURABILITY_TIMEOUT_MS (5s)"],
+  ] as const) {
+    if (value === undefined) continue;
+    if (
+      typeof value !== "number" ||
+      !Number.isFinite(value) ||
+      value <= 0 ||
+      value > 10 * 60_000
+    ) {
+      throw new MiddlewareConfigError(
+        `MiddlewareDeps.${field} must be a finite number of milliseconds in (0, 600000] ` +
+          `when provided (got ${JSON.stringify(value)}); omit the field for the ` +
+          `default ${def}. 0/negative makes every deadline fire instantly ` +
+          `(fail-closed denial of everything); an unbounded budget stops ` +
+          `bounding.`
+      );
+    }
+  }
+
   // (a) routes: MANDATORY in production — ONE canonical table drives
   // dispatch, artifact URLs, canary parsing, and the client config.
   const routes = resolveRoutes(deps);
@@ -130,11 +164,18 @@ export function validateProductionDeps(
     throw new MiddlewareConfigError(
       "MiddlewareDeps.submissionStore is REQUIRED in production — one session " +
         "must cause one irreversible forward (claim/replay/complete over a " +
-        "durable store); see HostSubmissionStore in host-adapter/interface.ts"
+        "durable store) and every terminal REVIEW/QUARANTINE decision must " +
+        "finalize durably (finalizeDecision → stored|replay|conflict); see " +
+        "HostSubmissionStore + FinalizeDecisionResult in host-adapter/interface.ts"
     );
   }
   requireMethod(deps.submissionStore, "claim", "submissionStore");
   requireMethod(deps.submissionStore, "complete", "submissionStore");
+  // FR-RR-43: the coordinator calls finalizeDecision on EVERY terminal
+  // REVIEW/QUARANTINE — the state machine's decision path. A hand-written
+  // JS adapter that lacks it would pass startup and fail on the FIRST
+  // denied applicant, so it must be required at startup like claim/complete.
+  requireMethod(deps.submissionStore, "finalizeDecision", "submissionStore");
 
   // Rereview item 3: per-strategy capability enumeration over the ENTIRE
   // production pool. The random composition can draw every entry of
@@ -234,8 +275,12 @@ export function validateProductionDeps(
   }
 
   // AUDIT (P1 verification capability): the disabled-test no-op is
-  // IMPOSSIBLE in the production constructor.
-  if (deps.verification.verificationMode === "disabled-test") {
+  // IMPOSSIBLE in the production constructor. FR-RR-56 (contract, chosen):
+  // the evaluation plane (internalEvaluation) MAY wire the explicit no-op —
+  // experiments verify the causal machinery, not Turnstile — and the
+  // validator enforces exactly that split. There is no public path to
+  // internalEvaluation: createFireRaidMiddleware always passes false.
+  if (deps.verification.verificationMode === "disabled-test" && !internalOptions.internalEvaluation) {
     throw new MiddlewareConfigError(
       "verification.verificationMode 'disabled-test' is not allowed in production — wire a host-owned or provider verifier"
     );
@@ -254,7 +299,44 @@ export function validateProductionDeps(
     }
   }
 
-  // (c) advisory mode warning
+  // FR-RR-27: profile integrity is a MANDATORY production capability. The
+  // session adapter must carry `profileIntegrity: "issued-hash"` and honor
+  // it — sign the issued profile hash into the session envelope (fr2.ph)
+  // and return it from resolveSession() — so the middleware can drift-check
+  // the treatment it ENFORCES against the treatment that was ISSUED. A
+  // generic host adapter that silently ignores the issuance object (or
+  // returns a hashless context) reopens the FR-RR-12 hole at the boundary
+  // the reference adapter closed: every decision would rest on an
+  // unverifiable treatment. FR-RR-56 (contract, chosen): the EVALUATION
+  // plane (internalEvaluation) may still use hashless carriers for
+  // experiments; the refusal is production-only, same gate as the
+  // disabled-test verifier above.
+  if (deps.session.profileIntegrity !== "issued-hash" && !internalOptions.internalEvaluation) {
+    throw new MiddlewareConfigError(
+      "MiddlewareDeps.session must declare profileIntegrity: \"issued-hash\" in " +
+        "production — the adapter MUST sign the issued profile hash into the " +
+        "session envelope (fr2 with the ph claim) and surface it through " +
+        "resolveSession(), so every derivation is drift-checked against the " +
+        "treatment that was issued (FR-RR-12). Hashless session carriers are " +
+        "the evaluation plane's domain."
+    );
+  }
+
+  // (c) FR-RR-16: the production posture is EXPLICIT. An omitted
+  // enforcementMode previously defaulted to advisory (never blocking)
+  // while the advisory warning only fired on the literal "advisory" —
+  // so `enforcementMode: undefined` meant "silently evaluate-and-forward
+  // everything". A security product must not have an implicit no-defense
+  // posture: production wiring names its posture, and the weak one is
+  // loudly warned.
+  if (deps.enforcementMode === undefined) {
+    throw new MiddlewareConfigError(
+      "MiddlewareDeps.enforcementMode is REQUIRED in production — name the " +
+        "posture explicitly: \"advisory\" (never blocks, annotates only), " +
+        "\"review\" (auto-approves ACCEPT, flags the rest), or \"enforcement\" " +
+        "(quarantine rejects). An omitted mode silently meant advisory."
+    );
+  }
   if (deps.enforcementMode === "advisory") {
     console.warn(
       "FireRaid middleware: enforcementMode is 'advisory' — submissions are never blocked."

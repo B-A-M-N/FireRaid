@@ -91,7 +91,7 @@ function boot(opts: {
     } as never,
     htmlLoader: async () => SIGNUP_HTML,
     routes: ROUTES,
-    onAssessment: opts.onAssessment,
+    onAssessment: opts.onAssessment ?? (() => {}),
   });
   servers.push(server);
   return new Promise<number>((resolve, reject) => {

@@ -20,6 +20,7 @@ import {
 } from "../../src/host-adapter/index.js";
 import { admit } from "../../src/host-adapter/middleware.js";
 import { DurableCanaryStore, DurableSubmissionStore } from "./helpers/durable-stores.js";
+import { issuedCookie } from "./helpers/test-issuance.js";
 
 const SECRET = "s".repeat(64);
 const VERSION = 1;
@@ -45,7 +46,7 @@ function baseDeps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
       accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
       collect: async () => [],
     },
-    enforcement: { allow: async () => true, deny: () => {} },
+    enforcement: { allow: async () => ({ kind: "created" as const }), deny: () => {} },
     canaryStore: new DurableCanaryStore(),
     submissionStore: new DurableSubmissionStore(),
     enforcementMode: "enforcement",
@@ -95,7 +96,7 @@ describe("FR-P1-11: a hanging telemetry adapter cannot hang the ingest path", ()
     const mw = createFireRaidMiddleware(deps);
     const session = new ReferenceSessionAdapter(SECRET);
     const sid = await session.createSession();
-    const cookie = await session.sessionCookie(sid);
+    const cookie = await issuedCookie(session, SECRET, sid);
 
     const start = Date.now();
     // Because accept never resolves, the deadline must bound the call and
@@ -157,13 +158,13 @@ describe("FR-RR-07: the UNKNOWN_PROFILE_KEY deny follows the deadline contract",
       csrfSecret: "f".repeat(64),
       session: sessionAdapter,
       enforcement: {
-        allow: async () => true,
+        allow: async () => ({ kind: "created" as const }),
         deny: () => new Promise<never>(() => {}),
       },
     });
     const mw = createFireRaidMiddleware(deps);
     const sid = await sessionAdapter.createSession();
-    const cookie = await sessionAdapter.sessionCookie(sid);
+    const cookie = await sessionAdapter.sessionCookie(sid, { profileVersion: 1, profileKeyId: "old", profileHash: "a".repeat(64) });
     // A valid CSRF token under the explicit csrfSecret — CSRF must pass so
     // the request reaches the coordinator's UNKNOWN_PROFILE_KEY deny.
     const { makeCsrf } = await import("../../src/host-adapter/handlers/csrf.js");

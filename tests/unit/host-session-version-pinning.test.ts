@@ -22,7 +22,9 @@ import {
   referenceInject,
   ReferenceVerificationAdapter,
   ReferenceTelemetryAdapter,
+  UnknownProfileKeyError,
   type HostEnforcementAdapter,
+  type EnforcementResult,
   ReferenceCanaryStore,
   ReferenceSubmissionStore,
 } from "../../src/host-adapter/index.js";
@@ -35,9 +37,9 @@ const SECRET = "k".repeat(64);
 
 class NullEnforcement implements HostEnforcementAdapter {
   lastForm: Record<string, string> | null = null;
-  async allow(_u: string, form: Record<string, string>): Promise<boolean> {
+  async allow(_u: string, form: Record<string, string>): Promise<EnforcementResult> {
     this.lastForm = form;
-    return true;
+    return { kind: "created" };
   }
   deny(): void {}
 }
@@ -72,9 +74,17 @@ describe("P1-1: middleware consumes the envelope's pv (version pinning)", () => 
     // the v1 treatment under a mismatched number. If it silently fell back to
     // deps.version (v1) the request would proceed — the exact pre-FR-P0-04
     // version-drift the registry exists to stop.
-    const issuingAdapter = new ReferenceSessionAdapter(SECRET, { version: 7 });
+    const issuingAdapter = new ReferenceSessionAdapter(SECRET);
     const sessionId = await issuingAdapter.createSession();
-    const cookie = await issuingAdapter.sessionCookie(sessionId);
+    // FR-RR-17: the issuance CALL names the version (the adapter no longer
+    // owns one). The hash is a fixture stand-in — pv=7 has no frozen
+    // implementation to derive one from, and the middleware must fail
+    // closed on the unsupported version before any hash comparison.
+    const cookie = await issuingAdapter.sessionCookie(sessionId, {
+      profileVersion: 7,
+      profileKeyId: "default",
+      profileHash: "7".repeat(64),
+    });
     const csrf = await makeCsrf(SECRET, sessionId);
 
     const enforcement = new NullEnforcement();
@@ -101,9 +111,16 @@ describe("P1-1: middleware consumes the envelope's pv (version pinning)", () => 
   });
 
   it("resolveSession returns the envelope's pv/kid (the context middleware consumes)", async () => {
-    const adapter = new ReferenceSessionAdapter(SECRET, { version: 7, keyId: "k7" });
+    const adapter = new ReferenceSessionAdapter(
+      { current: { id: "k7", secret: SECRET } }
+    );
     const sessionId = await adapter.createSession();
-    const cookie = await adapter.sessionCookie(sessionId);
+    // FR-RR-17: issuance names pv + kid; the adapter signs what it is told.
+    const cookie = await adapter.sessionCookie(sessionId, {
+      profileVersion: 7,
+      profileKeyId: "k7",
+      profileHash: "7".repeat(64),
+    });
     const req = new Request("http://mw/signup", { headers: { cookie } });
     const ctx = await adapter.resolveSession(req);
     expect(ctx).not.toBeNull();
@@ -119,9 +136,13 @@ describe("P1-1: middleware consumes the envelope's pv (version pinning)", () => 
     // and fails closed as an operational error (never INVALID_TOKEN, which
     // would claim the treatment WAS verified-then-rejected — version drift
     // must stay an infrastructure failure, not an applicant rejection).
-    const issuingAdapter = new ReferenceSessionAdapter(SECRET, { version: 7 });
+    const issuingAdapter = new ReferenceSessionAdapter(SECRET);
     const sessionId = await issuingAdapter.createSession();
-    const cookie = await issuingAdapter.sessionCookie(sessionId);
+    const cookie = await issuingAdapter.sessionCookie(sessionId, {
+      profileVersion: 7,
+      profileKeyId: "default",
+      profileHash: "7".repeat(64),
+    });
     const d = deps(1, {
       recipe: { families: ["decoy-route"] } as never,
       canaryStore: new (await import("../../src/host-adapter/index.js")).ReferenceCanaryStore(),
@@ -130,5 +151,64 @@ describe("P1-1: middleware consumes the envelope's pv (version pinning)", () => 
     const res = await admitEvaluation(probe, d, async () => HTML);
     expect(res.kind).toBe("error");
     expect((res as { operationalReason?: string }).operationalReason).toBe("CANARY_EVAL_ERROR");
+  });
+});
+
+// ── FR-RR-17: ONE configuration source for the session's treatment ──────
+
+describe("FR-RR-17: the session adapter signs the ISSUANCE, not its own config", () => {
+  it("a middleware at v2 + issuance naming v2 produces a pv=2 envelope even when the adapter was constructed 'as v1'", async () => {
+    // The audit's deployment bug: deps.version = 2 while the session
+    // adapter was constructed with its own private version (1). Under the
+    // old contract the cookie said pv=1 while the page rendered v2 —
+    // with the hash check enforced, EVERY session then failed closed.
+    // Now the issuance call is authoritative: the adapter has no version
+    // of its own to disagree with.
+    const ring = { current: { id: "default", secret: SECRET } };
+    const adapter = new ReferenceSessionAdapter(ring);
+    const sid = await adapter.createSession();
+    const cookie = await adapter.sessionCookie(sid, {
+      profileVersion: 2, // the middleware's deps.version at GET time
+      profileKeyId: ring.current.id,
+      profileHash: "a".repeat(64),
+    });
+    const { verifySessionEnvelope } = await import("../../src/core/session-envelope.js");
+    const v = await verifySessionEnvelope(ring, cookie.split(";")[0].split("=")[1], Date.now());
+    expect(v.ok).toBe(true);
+    if (v.ok) expect(v.payload.pv).toBe(2);
+  });
+
+  it("issuance names the SIGNING key: a rotated-ring adapter signs under the issuing kid, not the ring's current", async () => {
+    const ring = {
+      current: { id: "k2", secret: SECRET },
+      previous: { k1: SECRET },
+    };
+    const adapter = new ReferenceSessionAdapter(ring);
+    const sid = await adapter.createSession();
+    const cookie = await adapter.sessionCookie(sid, {
+      profileVersion: 1,
+      profileKeyId: "k1", // FireRaid tells the adapter k1 issued this session
+      profileHash: "b".repeat(64),
+    });
+    const raw = cookie.split(";")[0].split("=")[1];
+    const { verifySessionEnvelope } = await import("../../src/core/session-envelope.js");
+    const v = await verifySessionEnvelope(ring, raw, Date.now());
+    expect(v.ok).toBe(true);
+    if (v.ok) {
+      expect(v.payload.kid).toBe("k1");
+      expect(v.payload.pv).toBe(1);
+    }
+  });
+
+  it("an issuance naming an UNKNOWN key id fails closed (resolveKeySecret, never a silent current-key fallback)", async () => {
+    const adapter = new ReferenceSessionAdapter({ current: { id: "default", secret: SECRET } });
+    const sid = await adapter.createSession();
+    await expect(
+      adapter.sessionCookie(sid, {
+        profileVersion: 1,
+        profileKeyId: "ghost-key",
+        profileHash: "c".repeat(64),
+      })
+    ).rejects.toBeInstanceOf(UnknownProfileKeyError);
   });
 });

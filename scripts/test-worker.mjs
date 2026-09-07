@@ -373,8 +373,16 @@ log(`wrangler dev pid=${child.pid} group=${child.pid} (${devCmd})`);
 // own readiness sequence (health poll, Turnstile probe, .dev.vars check)
 // had spawned no reapers yet, and its in-progress wrangler/workerd chain
 // orphaned onto the port. From this line on, ANY death of this supervisor
-// — including SIGKILL mid-readiness — triggers both reapers.
-spawnGroupReaper(process.pid, child.pid, "wrangler");
+// — including SIGKILL mid-readiness — triggers the reapers.
+//
+// FR-RR-58: the two reaper RESPONSIBILITIES are split. The group reaper
+// (sh) kills the wrangler group after supervisor death; the workerd reaper
+// (node) reaps the re-grouped workerd holding our port. Only the WRANGLER
+// spawn gets a workerd reaper — the suite spawn below gets ONLY a group
+// reaper. The old combined call started a 60s-bounded workerd reaper for
+// the SUITE too, so two independent bombs watched the same port.
+spawnProcessGroupReaper(process.pid, child.pid, "wrangler");
+spawnWorkerdReaper(process.pid, port, "wrangler");
 
 /**
  * FR-P0-14 (found in practice): every in-process teardown path — signal
@@ -385,11 +393,11 @@ spawnGroupReaper(process.pid, child.pid, "wrangler");
  * the port — the exact orphan-workerd failure FR-R6-002 was meant to close.
  *
  * Fix: an independent watchdog (its own session, stdio discarded) that
- * SIGKILLs the wrangler group the moment this supervisor's pid disappears —
+ * SIGKILLs the target group the moment this supervisor's pid disappears —
  * whatever the cause. It self-terminates right after, so it never outlives
  * the run by more than one poll interval.
  */
-function spawnGroupReaper(supervisorPid, groupPid, label) {
+function spawnProcessGroupReaper(supervisorPid, groupPid, label) {
   // NB: dash (sh) rejects `kill -KILL -- -PGID` ("Illegal number: -") — the
   // `--` makes it treat the negative pid as an option-operand. Without `--`
   // the builtin accepts "-PGID" and signals the whole group. The first live
@@ -403,15 +411,54 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
   const reaper = spawn("sh", ["-c", script], { detached: true, stdio: "ignore" });
   reaper.unref?.();
   log(`group reaper (${label}): pid=${reaper.pid} watches supervisor=${supervisorPid} group=${groupPid}`);
-  // P0-AUDIT-3 (P0-4): the pgid above is the wrangler child's — workerd
-  // re-groups out of it (found live in the SIGKILL drill). A SECOND,
-  // node-based reaper discovers workerd's real group from /proc + the port
-  // and kills it. It self-exits once the port is free (bounded).
+  return reaper;
+}
+
+/**
+ * FR-RR-58: the dedicated workerd reaper — spawned ONLY for the wrangler
+ * chain (workerd re-groups out of the wrangler child's pgid, found live in
+ * the SIGKILL drill, so the group reaper cannot reach it).
+ *
+ * The fatal defect this replaces: the old reaper bounded its SUPERVISOR
+ * WATCH at 60 seconds (`deadline = Date.now() + 60000; while (Date.now() <
+ * deadline) {…supervisor-alive check…}`) and then fell through INTO THE
+ * KILL LOOP unconditionally — so a perfectly healthy run that lived past
+ * 60 seconds got its own workerd SIGKILLed mid-suite. That is the
+ * deterministic ~60s wrangler-death the integration gate saw intermittently
+ * (fast runs finished under the wire; browser-heavy runs crossed it).
+ *
+ * Correct architecture: the watch is INDEFINITE while the supervisor
+ * lives; the bounded timeout belongs to the post-death CLEANUP (kill
+ * until the port is free, max 5 rounds). PID-reuse robustness: liveness
+ * requires the captured /proc/<pid>/stat starttime (field 22) to match —
+ * a recycled pid is NOT our supervisor.
+ */
+function spawnWorkerdReaper(supervisorPid, workerdPort, label) {
   const workerdReaperScript = `
     const { readdirSync, readFileSync } = require("node:fs");
     const { spawnSync } = require("node:child_process");
-    const SUP = ${supervisorPid}, PORT = ${port};
-    const deadline = Date.now() + 60000;
+    const SUP = ${supervisorPid}, PORT = ${workerdPort};
+    // Capture the supervisor's starttime (stat field 22) NOW. A dead pid
+    // the kernel later recycles for an unrelated process must not look
+    // "alive" to this reaper.
+    function statFields(pid) {
+      try {
+        const stat = readFileSync("/proc/" + pid + "/stat", "utf8");
+        const close = stat.lastIndexOf(")");
+        // After comm): state ppid pgrp session ... starttime is field 22
+        // overall = index 19 in this split (state is field 3 → index 0).
+        return stat.slice(close + 2).split(/\\s+/);
+      } catch { return null; }
+    }
+    const SUP_STARTTIME = (statFields(SUP) || [])[19] ?? null;
+    function supervisorAlive() {
+      const f = statFields(SUP);
+      if (!f) return false;              // gone entirely
+      if (f[0] === "Z") return false;    // zombie — dead for our purposes
+      // PID reuse guard: if the pid was recycled, starttime differs.
+      if (SUP_STARTTIME !== null && f[19] !== SUP_STARTTIME) return false;
+      return true;
+    }
     function portHeld() {
       const s = spawnSync("bash",
         ["-c", \`(exec 3<>/dev/tcp/127.0.0.1/\${PORT}) 2>/dev/null && echo OPEN || echo CLOSED\`],
@@ -427,8 +474,6 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
           try {
             const stat = readFileSync("/proc/" + d + "/stat", "utf8");
             const close = stat.lastIndexOf(")");
-            // /proc/<pid>/stat format after comm): state ppid pgrp session ...
-            // state = fields[0], ppid = fields[1], pgrp = fields[2]
             const fields = stat.slice(close + 2).split(/\\s+/);
             procs.set(Number(d), { ppid: Number(fields[1]), comm: (readFileSync("/proc/" + d + "/comm", "utf8") || "").trim() });
           } catch {}
@@ -456,30 +501,22 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
       }
       return out;
     }
-    while (Date.now() < deadline) {
-      let alive = true;
-      try {
-        // kill(pid,0) succeeds for a ZOMBIE (exited but unreaped) — a dead
-        // supervisor that its spawner hasn't waited on would pin this loop
-        // for the full deadline. Check the process STATE instead: "Z" means
-        // dead for our purposes.
-        const stat = readFileSync("/proc/" + SUP + "/stat", "utf8");
-        const close = stat.lastIndexOf(")");
-        const state = stat.slice(close + 2).split(/\\s+/)[0];
-        alive = state !== "Z";
-      } catch { alive = false; }
-      if (!alive) break;
+    // FR-RR-58: watch the supervisor INDEFINITELY — no deadline here. The
+    // bounded budget below is cleanup-after-death, not a lifetime cap.
+    for (;;) {
+      if (!supervisorAlive()) break;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
     }
+    // Supervisor is dead (or was never ours). Bounded orphan cleanup: kill
+    // until the port is free, at most 5 rounds.
     for (let round = 0; round < 5 && portHeld(); round++) {
       for (const pid of mine()) {
         // Kill workerd's whole GROUP (the wrangler shim re-groups; the
         // group contains bin → cli.js → workerd) and the pid itself.
         let pgid = pid;
         try {
-          const stat = readFileSync("/proc/" + pid + "/stat", "utf8");
-          const close = stat.lastIndexOf(")");
-          pgid = Number(stat.slice(close + 2).split(/\\s+/)[2]);
+          const f = statFields(pid);
+          pgid = Number(f[2]);
         } catch {}
         try { process.kill(-pgid, "SIGKILL"); } catch {}
         try { process.kill(pid, "SIGKILL"); } catch {}
@@ -491,8 +528,8 @@ function spawnGroupReaper(supervisorPid, groupPid, label) {
     detached: true, stdio: "ignore",
   });
   workerdReaper.unref?.();
-  log(`workerd reaper (${label}): pid=${workerdReaper.pid} watches supervisor=${supervisorPid} port=${port}`);
-  return reaper;
+  log(`workerd reaper (${label}): pid=${workerdReaper.pid} watches supervisor=${supervisorPid} port=${workerdPort}`);
+  return workerdReaper;
 }
 
 // Keep a tail of wrangler output for diagnostics, and watch for the line that
@@ -834,7 +871,22 @@ function killOurWorkerd(signal, label) {
 
 function watchWranglerExit() {
   if (wranglerExitPromise) return wranglerExitPromise;
-  wranglerExitPromise = new Promise((res) => child.once("exit", (c, s) => res({ c, s })));
+  wranglerExitPromise = new Promise((res) => {
+    // FR-RR-57: if the child already exited before this watch was
+    // installed, `once("exit")` never fires and the watch would hang
+    // forever. Check the exit state first, and subscribe + re-check inside
+    // the subscriber to close the race window (exit between check and
+    // subscribe still fires the event — a settled child re-fires nothing,
+    // so the post-subscribe re-check is the safety net).
+    if (child.exitCode !== null || child.signalCode !== null) {
+      res({ c: child.exitCode, s: child.signalCode });
+      return;
+    }
+    child.once("exit", (c, s) => res({ c, s }));
+    if (child.exitCode !== null || child.signalCode !== null) {
+      res({ c: child.exitCode, s: child.signalCode });
+    }
+  });
   return wranglerExitPromise;
 }
 
@@ -998,7 +1050,26 @@ if (args.command.length === 0) {
   // Same watchdog contract as the wrangler group: if the supervisor is
   // SIGKILLed, the detached suite group must not outlive it either.
   // (The wrangler-group + workerd reapers were armed at spawn time — P0-4.)
-  spawnGroupReaper(process.pid, suiteChild.pid, "suite");
+  // FR-RR-58: the suite spawn gets ONLY the group reaper — a workerd
+  // reaper here would be a SECOND bomb watching the same port.
+  spawnProcessGroupReaper(process.pid, suiteChild.pid, "suite");
+  // FR-RR-35: if the WRANGLER child dies while the suite is running, the
+  // run is INVALID — every remaining test would either fail with confusing
+  // connection errors or (worse) partially pass against a half-dead Worker.
+  // Fail the run ONCE, with the wrangler output tail for diagnosis; no
+  // auto-retry (a flaky Worker death is a release-gate finding, not
+  // something to paper over). The suite is killed first so it stops
+  // throwing requests at a dead Worker.
+  watchWranglerExit().then(({ c, s }) => {
+    if (exiting) return; // our own teardown — not a mid-suite death
+    failWithOutput(
+      `the wrangler dev process DIED mid-suite (exit=${c} signal=${s ?? "none"}). ` +
+      `The suite is running against a dead Worker — failing the run (FR-RR-35). ` +
+      `This is a wrangler/workerd lifecycle failure, NOT a test assertion: fix the ` +
+      `lifecycle (or file it as a release-gate finding); do not simply re-run.`
+    );
+    shutdown(1, "wrangler-died-mid-suite");
+  });
   suiteChild.on("exit", (code) => shutdown(code ?? 1, "suite-exit"));
   suiteChild.on("error", (err) => { console.error(err); shutdown(1, "suite-spawn-error"); });
 }

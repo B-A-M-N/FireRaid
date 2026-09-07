@@ -34,15 +34,14 @@ import {
   verifyEnvelopeOnly,
 } from "../cloudflare/session-envelope.js";
 import { loadSession } from "../cloudflare/session.js";;
-import { getPolicyOrThrow } from "../core/decision.js";
 import { reconstructIssuedProfile } from "../core/reconstruct.js";
 import type { DefenseRecipe } from "../core/recipe-schema.js";
 import { readLabAssignment, type LabAssignment } from "../core/lab-assignment.js";
 import { checkCsrf } from "../security/csrf.js";
 import { defaultVerificationProvider } from "../turnstile/verify.js";
-import { correlate, deriveCanaryReference, type ObservationSet } from "../core/correlation.js";
+import { deriveCanaryReference, type ObservationSet } from "../core/correlation.js";
+import { correlateByVersion, getScoringPolicyByVersion, decideByVersion } from "../core/scoring-versions.js";
 import { SESSION_RESPONSE_FIELD } from "../core/artifacts.js";
-import { decide } from "../core/decision.js";
 import { MAX_SUBMIT_BODY_BYTES } from "../types/telemetry.js";
 import { readJsonBody } from "../security/body-limits.js";
 import { isLabMode } from "../env.js";
@@ -203,7 +202,13 @@ export async function submit(req: Request, env: Env): Promise<Response> {
       // FR-R6-022 + FR-R7-021: missing-token attempts are always recorded
       // (every production signup benefits from a forensic trail of
       // unverified submissions; this path represents a deliberate gap).
-      await recordVerificationAttempt(env, sessionId, false, "missing_token", true).catch(() => {});
+      // FR-RR-39: persistence is best-EFFORT, not best-SILENT — a failed
+      // write on the FORENSIC path is surfaced (production logs; lab fails
+      // the request — research auditability is the lab contract, a silently
+      // missing record violates it).
+      await persistVerificationAttemptOrHonestFailure(
+        env, sessionId, false, "missing_token", true,
+      );
       return json({
         status: "verification_required",
         message: "Turnstile verification required. Please complete the challenge.",
@@ -235,13 +240,13 @@ export async function submit(req: Request, env: Env): Promise<Response> {
     // signups already record turnstile_ok on the submission, so an extra
     // row per signup is pure D1 amplification. Lab mode keeps full records
     // because research auditability is part of the experimental contract.
-    await recordVerificationAttempt(
+    await persistVerificationAttemptOrHonestFailure(
       env,
       sessionId,
       turnstileResult.ok,
       turnstileResult.ok ? undefined : (turnstileResult.errorCodes?.join(",") ?? "verification_failed"),
       isLabMode(env) || !turnstileResult.ok || env.FIRERAID_AUDIT_VERIFICATION_ATTEMPTS === "1"
-    ).catch(() => {});
+    );
     if (!turnstileResult.ok) {
       // Do NOT finalize session on Turnstile failure.
       return json({
@@ -496,9 +501,12 @@ export async function submit(req: Request, env: Env): Promise<Response> {
   // permissive-v1 are real treatments, not labels. STRICT lookup: an unknown
   // policy name is a configuration/derivation error, never a silent
   // default-v1 score (the profile and the decision plane must agree).
-  const policy = getPolicyOrThrow(profile.scoringPolicy);
-  const evidence = await correlate(profile, observations);
-  const decision = decide(evidence, policy);
+  // FR-RR-15: correlation + policy + decision route through the profile's
+  // OWN version (the frozen evidence model + policy table), never the live
+  // modules — a v2 change cannot mutate what a pv=1 session decides.
+  const policy = getScoringPolicyByVersion(profile.version, profile.scoringPolicy);
+  const evidence = await correlateByVersion(profile, observations);
+  const decision = decideByVersion(profile, evidence, policy);
 
   // FIX: 12. Atomic submission finalization (FR-R2-007 / FR-R6-015/016):
   // session claim + submission INSERT + evidence INSERTs in ONE db.batch via
@@ -612,4 +620,41 @@ async function recordVerificationAttempt(
   )
     .bind(sessionId, Date.now(), "turnstile", ok ? "success" : "failure", errorCode ?? null)
     .run();
+}
+
+/**
+ * FR-RR-39 — persistence HONESTY for the verification-attempt trail. The
+ * old `.catch(() => {})` swallowed EVERY write failure, so a D1 outage on
+ * a FAILED verification silently deleted the forensic record of a blocked
+ * bot — the audit trail claimed a completeness it did not have, and lab
+ * research (whose contract IS the record) ran on a silent hole. Now:
+ *   - PRODUCTION: the attempt outcome itself is unaffected (a verification
+ *     row write outage must not turn a bot rejection into a 5xx for the
+ *     applicant), but the loss is LOUD — an error log naming the session.
+ *   - LAB: the write failure FAILS THE REQUEST (500). Research
+ *     auditability is part of the lab contract; a silently missing record
+ *     would corrupt experiments downstream.
+ */
+async function persistVerificationAttemptOrHonestFailure(
+  env: Env,
+  sessionId: string,
+  ok: boolean,
+  errorCode: string | undefined,
+  persist: boolean
+): Promise<void> {
+  try {
+    await recordVerificationAttempt(env, sessionId, ok, errorCode, persist);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    if (isLabMode(env)) {
+      console.error(
+        `verification attempt persistence FAILED (lab, session ${sessionId}) — failing the request (FR-RR-39): ${detail}`
+      );
+      throw err;
+    }
+    console.error(
+      `verification attempt persistence FAILED (production, session ${sessionId}) — ` +
+        `the forensic trail is INCOMPLETE for this attempt: ${detail}`
+    );
+  }
 }

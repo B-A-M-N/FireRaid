@@ -15,6 +15,7 @@ import {
   ReferenceVerificationAdapter,
   ReferenceTelemetryAdapter,
   type HostEnforcementAdapter,
+  type EnforcementResult,
   ReferenceCanaryStore,
   ReferenceSubmissionStore,
 } from "../../src/host-adapter/index.js";
@@ -24,6 +25,7 @@ import {
 } from "../../src/eval/evaluation-middleware.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
 import { validateTelemetryBatch } from "../../src/security/request-validation.js";
+import { issuedCookie, issuedCookieForProfile } from "./helpers/test-issuance.js";
 
 const SECRET = "s".repeat(64);
 const VERSION = 1;
@@ -33,8 +35,8 @@ const VERSION = 1;
 const store: Record<string, { seq: number; dt: number; kind: string; target?: string }[]> = {};
 
 /** Build a POST Request carrying a valid signed cookie + keyed CSRF. */
-async function postRequest(sessionId: string, body: Record<string, unknown>) {
-  const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+async function postRequest(sessionId: string, body: Record<string, unknown>, cookieOverride?: string) {
+  const cookie = cookieOverride ?? (await issuedCookie(new ReferenceSessionAdapter(SECRET), SECRET, sessionId));
   const csrf = await makeCsrf(SECRET, sessionId);
   return new Request("http://mw/signup", {
     method: "POST",
@@ -47,10 +49,10 @@ class FakeEnforcement implements HostEnforcementAdapter {
   allowed = 0;
   denied = 0;
   lastForm: Record<string, string> | null = null;
-  async allow(_url: string, form: Record<string, string>, _cookies: string): Promise<boolean> {
+  async allow(_url: string, form: Record<string, string>, _cookies: string): Promise<EnforcementResult> {
     this.allowed++;
     this.lastForm = form;
-    return true;
+    return { kind: "created" };
   }
   deny(_sid: string, _reason: string): void {
     this.denied++;
@@ -125,7 +127,12 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     );
     const field = profile.decoyField!.fieldName;
     const nonce = profile.semantic!.nonce;
-    const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c", [field]: nonce } });
+    // The cookie must sign the hash of the LAB profile the middleware will
+    // re-derive (FR-RR-12 drift check) — issuedCookie(lab) does that.
+    const labCookie = await issuedCookie(d.session as ReferenceSessionAdapter, SECRET, sessionId, VERSION, "default", {
+      recipe: { families: ["semantic", "decoy-field", "decoy-route", "interaction"], semanticTemplate: "S06", semanticMode: "decoy" },
+    });
+    const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c", [field]: nonce } }, labCookie);
     const res = await admitEvaluation(req, d, htmlLoader);
     expect(res.disposition).toBe("QUARANTINE");
     expect(enforcement.allowed).toBe(0);
@@ -187,7 +194,7 @@ describe("host-neutral admission middleware (P1-24/P1-25)", () => {
     const enforcement = new FakeEnforcement();
     const d = deps({ enforcement });
     const sessionId = await d.session.createSession();
-    const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+    const cookie = await issuedCookie(new ReferenceSessionAdapter(SECRET), SECRET, sessionId);
     const res = await admitEvaluation(
       new Request("http://mw/signup", {
         method: "POST",
@@ -254,7 +261,10 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
       { seq: 2, dt: 100, kind: "input", target: "email" },
       { seq: 3, dt: 200, kind: "submit_attempt" },
     ];
-    const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" }, eventBatch: events });
+    // The middleware re-derives with the recipe under evaluation; the
+    // cookie hash must be of THAT profile (FR-RR-12).
+    const cookie = await issuedCookieForProfile(d.session as ReferenceSessionAdapter, sessionId, profile!);
+    const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" }, eventBatch: events }, cookie);
     const res = await admitEvaluation(req, d, htmlLoader);
     expect(res.kind).toBe("admit");
     expect(enforcement.allowed).toBe(1);
@@ -300,7 +310,10 @@ describe("P1-AUDIT-2: middleware telemetry parity with canonical submit", () => 
       { seq: 2, dt: 100, kind: "input", target: "email" },
       { seq: 3, dt: 200, kind: "submit_attempt" },
     ];
-    const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" }, eventBatch: events });
+    // The middleware re-derives with the recipe under evaluation; the
+    // cookie hash must be of THAT profile (FR-RR-12).
+    const cookie = await issuedCookieForProfile(d.session as ReferenceSessionAdapter, sessionId, profile!);
+    const req = await postRequest(sessionId, { form: { name: "A", email: "a@b.c" }, eventBatch: events }, cookie);
     const res = await admitEvaluation(req, d, htmlLoader);
     // The decision here depends on the FULL recipe's correlation: a captured
     // no-pointer stream is real interaction evidence, so it must NOT be
@@ -315,7 +328,7 @@ describe("P1-AUDIT-2 (P1-14): telemetry-drain carrier on the host plane", () => 
   it("POST /api/events accepts a valid batch and returns the Worker-shaped ACK", async () => {
     const d = deps();
     const sessionId = await d.session.createSession();
-    const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+    const cookie = await issuedCookie(new ReferenceSessionAdapter(SECRET), SECRET, sessionId);
     const req = new Request("http://mw/api/events", {
       method: "POST",
       headers: { "content-type": "application/json", cookie },
@@ -340,7 +353,7 @@ describe("P1-AUDIT-2 (P1-14): telemetry-drain carrier on the host plane", () => 
     const enforcement = new FakeEnforcement();
     const d = deps({ enforcement });
     const sessionId = await d.session.createSession();
-    const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+    const cookie = await issuedCookie(new ReferenceSessionAdapter(SECRET), SECRET, sessionId);
     const req = new Request("http://mw/api/events", {
       method: "POST",
       headers: { "content-type": "application/json", cookie },
@@ -372,7 +385,7 @@ describe("P1-AUDIT-2 (P1-14): telemetry-drain carrier on the host plane", () => 
   it("telemetryIngestPath: '' disables ingest handling (submit-only host)", async () => {
     const d = deps({ telemetryIngestPath: "" });
     const sessionId = await d.session.createSession();
-    const cookie = await new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+    const cookie = await issuedCookie(new ReferenceSessionAdapter(SECRET), SECRET, sessionId);
     const req = new Request("http://mw/api/events", {
       method: "POST",
       headers: { "content-type": "application/json", cookie },

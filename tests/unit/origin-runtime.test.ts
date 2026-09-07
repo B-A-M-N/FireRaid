@@ -69,6 +69,7 @@ describe("origin runtime (node:http adapter)", () => {
       htmlLoader,
 
       routes: ROUTES,
+      onAssessment: () => {},
     });
     port = await new Promise<number>((resolve, reject) => {
       server.listen(0, "127.0.0.1", () => {

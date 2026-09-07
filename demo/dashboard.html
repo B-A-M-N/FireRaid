@@ -20,13 +20,14 @@
   }
   header h1 { font-size: 16px; margin: 0; }
   header .sub { color: var(--dim); font-size: 12px; }
-  .controls { padding: 12px 20px; display: flex; gap: 10px; }
+  .controls { padding: 12px 20px; display: flex; gap: 10px; align-items: center; }
   button {
     background: var(--accent); border: 0; color: #06212e; font-weight: 700;
     padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;
   }
   button:disabled { opacity: 0.45; cursor: wait; }
   button.human { background: #a5b4fc; }
+  #busy-note { color: var(--warn); font-size: 12px; display: none; }
   .grid {
     display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 12px; padding: 0 20px;
   }
@@ -77,6 +78,7 @@
 <div class="controls">
   <button id="run-agent">RUN AGENT</button>
   <button id="run-human" class="human">RUN HUMAN</button>
+  <span id="busy-note">a trial is already running</span>
 </div>
 
 <div class="grid">
@@ -95,6 +97,8 @@
       <div id="ev-score" style="margin-top:6px; font-family: ui-monospace, monospace;"></div>
       <h3>Upstream truth (ledger)</h3>
       <div id="ev-ledger" style="font-family: ui-monospace, monospace;"></div>
+      <h3>Pair integrity</h3>
+      <div id="ev-pair" style="font-family: ui-monospace, monospace; color:var(--dim)"></div>
     </div>
   </div>
   <div class="pane">
@@ -104,7 +108,7 @@
 </div>
 
 <div id="matrix">
-  <h2 style="margin:8px 0; font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:0.08em;">Results — from the origin account ledger only</h2>
+  <h2 style="margin:8px 0; font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:0.08em;">Results — from the origin account ledger only, joined with the observed defense action</h2>
   <table>
     <tr><th></th><th>Control</th><th>FireRaid</th></tr>
     <tr><th>Agent</th><td id="m-agent-control">—</td><td id="m-agent-fireraid">—</td></tr>
@@ -114,8 +118,10 @@
 
 <footer>
   Demo configuration only. Agent: deterministic fill-everything script (non-LLM). "Human" is a
-  humanized-timing SIMULATION, not a human trial. CREATED/BLOCKED come exclusively from the
-  independent upstream account ledger; component failures are shown as ERROR / INCONCLUSIVE.
+  humanized-timing SIMULATION, not a human trial. CREATED comes exclusively from the independent
+  upstream account ledger; BLOCKED additionally requires an OBSERVED non-ACCEPT FireRaid decision —
+  an absent account without observed intervention is INCONCLUSIVE. Component failures are shown as
+  ERROR / INCONCLUSIVE.
 </footer>
 
 <script>
@@ -141,8 +147,10 @@
 
   function setStatus(arm, outcome, detail) {
     const el = $("st-" + arm);
+    // FR-DEMO-01: the FireRaid BLOCKED verdict names the intervention.
+    if (arm === "fireraid" && outcome === "BLOCKED") outcome = "BLOCKED BY FIRERAID";
     el.textContent = outcome + (detail ? ` — ${detail}` : "");
-    el.className = "status " + outcome;
+    el.className = "status " + outcome.replace(" BY FIRERAID", "");
   }
 
   function showEvidence(record) {
@@ -164,8 +172,13 @@
       tbl.innerHTML = "<tr><td style='color:var(--dim)'>no evidence — nothing causal observed</td></tr>";
     }
     $("ev-score").innerHTML =
-      `score <b>${d.score ?? "?"}</b> · disposition <b>${escapeHtml(d.disposition ?? "?")}</b>`;
+      `score <b>${d.score ?? "?"}</b> · disposition <b>${escapeHtml(d.disposition ?? "?")}</b>` +
+      (record.fireraid.action ? ` · observed action <b>${escapeHtml(record.fireraid.action)}</b>` : "");
     $("ev-ledger").innerHTML = `account created: <b>${record.fireraid.outcome === "CREATED" ? "YES" : record.fireraid.outcome === "BLOCKED" ? "NO" : record.fireraid.outcome}</b>`;
+    // FR-DEMO-07: the paired base-application proof.
+    if (record.baseApplicationHash) {
+      $("ev-pair").textContent = `base application sha256 (both arms): ${record.baseApplicationHash.slice(0, 16)}…`;
+    }
   }
 
   function applyRecord(record) {
@@ -189,12 +202,40 @@
   function setBusy(b) {
     $("run-agent").disabled = b;
     $("run-human").disabled = b;
+    $("busy-note").style.display = b ? "inline" : "none";
   }
 
-  $("run-agent").addEventListener("click", () => { clearPanes(); fetch("/api/run-agent", { method: "POST" }); });
-  $("run-human").addEventListener("click", () => { clearPanes(); fetch("/api/run-human", { method: "POST" }); });
-  function clearPanes() {
+  // FR-DEMO-06: the buttons never wedge. fetch() rejection, HTTP 409, a
+  // coordinator error, an SSE disconnect mid-trial, and a trial.started
+  // event (the server's REAL semantic event type — demo-event with
+  // ev.name === "trial.started") all resolve the busy state.
+  async function requestTrial(path) {
+    clearPanes();
     setBusy(true);
+    try {
+      const res = await fetch(path, { method: "POST" });
+      if (res.status === 409) {
+        // Someone else holds the trial slot (second tab / direct API).
+        setBusy(false);
+        addEvent("tl-truth", { t: 0, name: "trial.error", detail: "a trial is already running (409)" });
+        return;
+      }
+      if (!res.ok) {
+        setBusy(false);
+        addEvent("tl-truth", { t: 0, name: "trial.error", detail: `run request failed: HTTP ${res.status}` });
+        return;
+      }
+      // 202 accepted — the trial-record / coordinator-error SSE frames
+      // (or a disconnect) clear the busy state.
+    } catch (err) {
+      setBusy(false);
+      addEvent("tl-truth", { t: 0, name: "trial.error", detail: `run request failed: ${err}` });
+    }
+  }
+
+  $("run-agent").addEventListener("click", () => requestTrial("/api/run-agent"));
+  $("run-human").addEventListener("click", () => requestTrial("/api/run-human"));
+  function clearPanes() {
     for (const id of ["tl-control", "tl-fireraid", "tl-truth"]) $(id).innerHTML = "";
     $("st-control").textContent = "running…"; $("st-control").className = "status";
     $("st-fireraid").textContent = "running…"; $("st-fireraid").className = "status";
@@ -203,15 +244,26 @@
 
   const es = new EventSource("/api/events");
   es.addEventListener("open", () => { $("conn").textContent = "live"; $("conn").classList.add("live"); });
-  es.addEventListener("error", () => { $("conn").textContent = "disconnected"; $("conn").classList.remove("live"); });
+  es.addEventListener("error", () => {
+    $("conn").textContent = "disconnected";
+    $("conn").classList.remove("live");
+    // A dead stream means no trial-record frame can ever arrive — if a
+    // trial appeared in flight, un-wedge the buttons (the server refuses
+    // concurrent runs with 409, which re-syncs the UI on retry).
+    setBusy(false);
+  });
   es.addEventListener("hello", () => setBusy(false));
   es.addEventListener("demo-event", (e) => {
     const ev = JSON.parse(e.data);
+    // FR-DEMO-06: busy is driven by the SEMANTIC event inside the
+    // demo-event frame — the old top-level "trial.started" listener never
+    // fired (the server emits type demo-event).
+    if (ev.name === "trial.started") setBusy(true);
+    if (ev.name === "trial.completed") setBusy(false);
     addEvent(ev.arm === "control" ? "tl-control" : "tl-fireraid", ev);
   });
   es.addEventListener("trial-record", (e) => { applyRecord(JSON.parse(e.data)); setBusy(false); });
   es.addEventListener("coordinator-error", (e) => { console.error(e); setBusy(false); });
-  es.addEventListener("trial.started", () => setBusy(true));
 </script>
 </body>
 </html>

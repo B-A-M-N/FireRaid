@@ -8,9 +8,14 @@ explains the vocabulary and the rules; the ledger owns the tiers. Where any
 document (including this one) disagrees with the ledger, **the ledger
 wins**, and the prose must be corrected in the same change.
 
-`npm run release:verify` attests the LOCAL_VERIFIED tier for a given tree
-(writes `release-evidence.json`, which embeds the ledger's tier map); it
-deliberately does not attest MEASURED or PARTIALLY_ESTABLISHED claims.
+`npm run release:verify` runs the deterministic gates in FULL mode and now
+REQUIRES the `release_ready` tier to exit 0 (FR-RR-50:
+`--require-tier release_ready`); "all gates green but no tier satisfied"
+is a failed release verification. It writes `release-evidence.json`, which
+embeds the ledger's tier map; the run deliberately does not attest
+MEASURED or PARTIALLY_ESTABLISHED claims. For pre-deploy iteration use
+`release:verify:full` (gates only) or pass
+`--require-tier local_candidate|deploy_ready` explicitly.
 
 ## Claim vocabulary
 
@@ -59,7 +64,9 @@ Summary (tiers as of the ledger's `updated` date):
   `release-evidence.json` with git SHA + dirty flag + the ledger tier map.
   `local_candidate: true` requires a CLEAN tree in FULL mode; dirty
   evidence is still written for iteration but flagged. A missing or
-  malformed evidence ledger fails the run (fail-closed).
+  malformed evidence ledger fails the run (fail-closed). Exit 0 additionally
+  requires `release_ready` (FR-RR-50) — the release job cannot pass while
+  the deploy/smoke tiers are unmet.
 - Items 8 and 10 are user-gated: a real benchmark run, and a remote deploy
   smoke, are the owner's call (costs money / touches the internet).
 

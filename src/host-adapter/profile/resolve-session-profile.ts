@@ -9,10 +9,12 @@ import type { DefenseProfile } from "../../types/profile.js";
 import {
   deriveProductionProfileByVersion,
   deriveEvaluationProfileByVersion,
+  hashProfileByVersion,
 } from "../../core/profile-versions.js";
 import type { ProfileKeyRing } from "../../core/session.js";
 import type { MiddlewareDeps, EvaluationControls } from "../middleware-types.js";
-import { UnknownProfileKeyError } from "../middleware-errors.js";
+import { UnknownProfileKeyError, ProfileHashMismatchError } from "../middleware-errors.js";
+import { constantTimeTokenEqual } from "../../core/tokens.js";
 
 /**
  * Resolve the effective profile key secret for a session — EXACT lookup,
@@ -73,4 +75,58 @@ export function deriveForRequest(
   }
   // PRODUCTION: no recipe, no holdout, no mode override — ever.
   return deriveProductionProfileByVersion(key);
+}
+
+/**
+ * FR-RR-12 — THE issued-profile derivation entry for the host plane: derive
+ * AND verify against the hash signed into the session's fr2 envelope.
+ *
+ * Every route that evaluates a session that CARRIES an issued hash (submit,
+ * canary reconstruction, anything future) goes through here — bare
+ * `deriveForRequest` without the check is exactly the hole this closes:
+ * the envelope signature proved the hash is genuine, and then the hash was
+ * discarded, so the middleware could never notice that the treatment it
+ * was about to enforce differed from the treatment that was issued.
+ *
+ * Comparison is constant-time against the envelope's own signed value.
+ * A mismatch throws ProfileHashMismatchError — callers fail closed (deny /
+ * operational error, no upstream call, no canary persistence).
+ *
+ * FR-RR-27: `requireIssuedHash` (set on every PRODUCTION route — the
+ * production factory refuses a session adapter without the issued-hash
+ * capability) turns the legacy fr1 window into a hard failure: a
+ * production session WITHOUT a signed hash cannot be drift-checked and is
+ * refused, never passed through unverified. Evaluation wiring keeps the
+ * compatibility window (undefined/absent → derive and continue).
+ */
+export async function deriveAndVerifyIssuedProfile(params: {
+  secret: string;
+  version: number;
+  sessionId: string;
+  /** The hash signed into the session's fr2 envelope, when it carries one. */
+  expectedHash?: string;
+  evaluation: EvaluationControls | undefined;
+  labMode: boolean;
+  /** FR-RR-27: production callers MUST get a verifiable treatment. */
+  requireIssuedHash?: boolean;
+}): Promise<DefenseProfile> {
+  if (params.requireIssuedHash === true && params.expectedHash === undefined) {
+    throw new ProfileHashMismatchError(
+      params.sessionId,
+      "<required issued hash>",
+      "<absent — the session carrier is not an fr2 envelope>"
+    );
+  }
+  const profile = await deriveForRequest(
+    { secret: params.secret, version: params.version, sessionId: params.sessionId },
+    params.evaluation,
+    params.labMode
+  );
+  if (params.expectedHash !== undefined) {
+    const actual = await hashProfileByVersion(profile, params.version);
+    if (!constantTimeTokenEqual(actual, params.expectedHash)) {
+      throw new ProfileHashMismatchError(params.sessionId, params.expectedHash, actual);
+    }
+  }
+  return profile;
 }

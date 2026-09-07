@@ -58,6 +58,36 @@ not a requirement.
 - Class A exists → QUARANTINE
 - Strong + high score → REVIEW
 - Weak only → ACCEPT or REVIEW per policy
+- **FR-RR-15 — the version freeze covers the full admission TREATMENT
+  downstream of the observation set**: correlation, the scoring-policy
+  table, and the decide() rule are frozen per profile version
+  (`core/correlation-v1.ts`, `core/decision-v1.ts`), dispatched by the
+  reconstructed profile's version through `core/scoring-versions.ts` —
+  never resolved from live code. Editing a v1 weight/threshold in the live
+  modules cannot re-decide an issued pv=1 session; a semantics change
+  requires v2. An unsupported version or unknown policy name fails closed
+  (operational denial, never a default-policy score). Parity between the
+  frozen v1 path and the live modules at the freeze is pinned exhaustively
+  by `tests/unit/scoring-versions-parity.test.ts`.
+- **FR-RR-32 — freeze boundary, stated exactly**: the raw-input →
+  `ServerObservationSet` mapping is LIVE shared code, NOT frozen per
+  version. Form-field reads, the telemetry aggregator's thresholds
+  (`aggregateTelemetry`: 3s short-completion floor, dwell/cadence rules),
+  and the verified-canary readback run current logic for EVERY version —
+  including pv=1. The freeze therefore guarantees: the same observation
+  set always produces the same v1 evidence and decision. It does NOT
+  guarantee: the same raw request always produces the same observation
+  set across deployments. The mapping is pinned by parity tests
+  (`session-metrics-parity`, `host-worker-parity`) and changes to it are
+  observable — but they are v0-rolling behavior, not frozen treatment.
+  Freezing the mapper itself (a v1-frozen `observations-v1.ts`) is the
+  designated v2 work item.
+- **FR-RR-33 — recipes are OUTSIDE the freeze**: a `DefenseRecipe`
+  (strategy/composition override) is an EVALUATION-plane experimental
+  condition only. It is unreachable from production wiring (the
+  production factory refuses it at validation) and is never part of any
+  frozen version's treatment; recipe-schema validation may evolve without
+  touching any version freeze.
 - Turnstile failure → explicit path
 - Risk tiers are an EXACT partition of [0, ∞) validated at startup —
   no out-of-partition fallback; a verified Class-A observation forces

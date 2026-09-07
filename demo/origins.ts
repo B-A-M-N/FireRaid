@@ -16,9 +16,16 @@
  * The upstream (scripts/ledger-upstream.mjs) is started ONCE and serves
  * both arms; both origins point at the same registration endpoint and the
  * same read-only ledger probe. The 2×2 matrix joins on that ledger alone.
+ *
+ * FR-DEMO-07: ONE base application snapshot is fetched at startup and
+ * served — byte-identical — to BOTH arms (Control passes it through,
+ * FireRaid's htmlLoader injects into it). The trial record carries the
+ * snapshot's sha256, so the pair is provably "same base application;
+ * only the treatment differs". A mismatched fetch is a startup failure.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import http from "node:http";
+import { createHash } from "node:crypto";
 import { createEvaluationOriginServer } from "../src/eval/evaluation-origin.js";
 import { closeServer } from "../src/runtime/node.js";
 import {
@@ -36,6 +43,9 @@ import { readFileSync } from "node:fs";
 const SECRET = process.env.FIRERAID_DEMO_SECRET ?? "fireraid-demo-secret-key-not-for-production!!";
 const CSRF_SECRET = process.env.FIRERAID_DEMO_CSRF_SECRET ?? "fireraid-demo-csrf-secret-not-for-production!!!";
 
+/** FR-DEMO-08: bound the operator-plane decision map. */
+const MAX_RETAINED_DECISIONS = 64;
+
 export interface DemoOrigins {
   /** CONTROL origin base URL (plain passthrough). */
   controlUrl: string;
@@ -43,6 +53,8 @@ export interface DemoOrigins {
   fireraidUrl: string;
   /** The shared upstream base (registration + read-only ledger probe). */
   upstreamUrl: string;
+  /** FR-DEMO-07: sha256 of the base application page both arms serve. */
+  baseApplicationHash: string;
   /** Read-only ledger probe. null = probe FAILED (callers record INCONCLUSIVE). */
   ledgerHasAccount(email: string): Promise<boolean | null>;
   /**
@@ -70,6 +82,17 @@ interface FireraidDecisionShape {
   }>;
 }
 
+/**
+ * FR-DEMO-11: freePort() is FORBIDDEN for in-process servers — the
+ * probe-then-bind window is a TOCTOU race (another process can claim the
+ * port between the probe's close and the real bind, and the demo would
+ * then talk to — or fail against — the wrong listener). In-process servers
+ * bind on port 0 DIRECTLY and read the kernel-assigned port from the
+ * listen callback; freePort() remains ONLY for the one consumer that
+ * genuinely needs a port NUMBER in advance (the spawned upstream child's
+ * argv), where its residual risk is covered by that child's readiness
+ * probe and the supervised-death watchdog.
+ */
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = http.createServer();
@@ -78,6 +101,18 @@ async function freePort(): Promise<number> {
       srv.close(() => (port ? resolve(port) : reject(new Error("no ephemeral port"))));
     });
     srv.on("error", reject);
+  });
+}
+
+/** Bind an in-process server on an EPHEMERAL port and resolve with the
+ * actual assigned port — no probe-then-bind window at all. */
+function listenEphemeral(server: http.Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address() as { port: number };
+      resolve(addr.port);
+    });
   });
 }
 
@@ -102,7 +137,19 @@ export async function startDemoOrigins(): Promise<DemoOrigins> {
     throw new Error(`demo upstream failed to start on :${upstreamPort}`);
   }
   const upstreamUrl = `http://127.0.0.1:${upstreamPort}`;
-  const upstreamHtml = await (await fetch(`${upstreamUrl}/signup`)).text();
+  // FR-DEMO-07: the ONE base snapshot — served to both arms unchanged
+  // (Control) and as FireRaid's htmlLoader input (the treatment delta is
+  // injection alone). Strip the stub script tag once, here, so the two
+  // arms are byte-identical pre-injection.
+  const baseApplicationHtml = (await (await fetch(`${upstreamUrl}/signup`)).text())
+    .replace(/<script[^>]*\/signup\.js"[^>]*><\/script>/, "");
+  const baseApplicationHash = createHash("sha256").update(baseApplicationHtml).digest("hex");
+
+  // FR-DEMO-08: supervise the ledger upstream — an unexpected death is an
+  // explicit demo infrastructure failure, not silent probe failures later.
+  const upstreamDead = new Promise<void>((resolve) => {
+    upstream.once("exit", () => resolve());
+  });
 
   // ── 2. CONTROL origin: a plain proxy + a contract shim.
   // The page (injected by NOTHING here — it is the upstream's own HTML) is
@@ -113,13 +160,10 @@ export async function startDemoOrigins(): Promise<DemoOrigins> {
   const controlShim = http.createServer(async (req, res) => {
     try {
       if (req.method === "GET" && (req.url === "/signup" || req.url?.startsWith("/signup?"))) {
-        const upstreamRes = await fetch(`${upstreamUrl}/signup`);
-        const html = (await upstreamRes.text())
-          // The upstream serves a stub client script reference; CONTROL has
-          // no FireRaid client — drop the tag so agents never await it.
-          .replace(/<script[^>]*\/signup\.js"[^>]*><\/script>/, "");
+        // FR-DEMO-07: the cached base snapshot — byte-identical to what
+        // FireRaid's htmlLoader receives. Never refetched mid-demo.
         res.writeHead(200, { "content-type": "text/html" });
-        res.end(html);
+        res.end(baseApplicationHtml);
         return;
       }
       if (req.method === "GET" && req.url === "/signup.js") {
@@ -189,11 +233,9 @@ export async function startDemoOrigins(): Promise<DemoOrigins> {
       console.error("[demo] control origin error:", err);
     }
   });
-  const controlPort = await freePort();
-  await new Promise<void>((resolve, reject) => {
-    controlShim.once("error", reject);
-    controlShim.listen(controlPort, "127.0.0.1", () => resolve());
-  });
+  // FR-DEMO-11: bind on port 0 directly — the kernel assigns the port in
+  // the same atomic operation that opens the listener.
+  const controlPort = await listenEphemeral(controlShim);
 
   // ── 3. FireRaid origin: the REAL middleware, production composition.
   // Operator-plane decision sink: onAssessment is the runtime's host-internal
@@ -238,13 +280,18 @@ export async function startDemoOrigins(): Promise<DemoOrigins> {
   const DEMO_ROUTES = deps.routes!;
   const fireraidServer = createEvaluationOriginServer({
     middlewareDeps: deps,
-    htmlLoader: async () => upstreamHtml,
+    htmlLoader: async () => baseApplicationHtml,
     routes: DEMO_ROUTES,
     clientScriptSource: () =>
       readFileSync(new URL("../public/signup.js", import.meta.url), "utf-8"),
     clientScriptPath: "/signup.js",
     onAssessment: (a) => {
       if (a.submittedEmail) {
+        // FR-DEMO-08: bound the map — evict the OLDEST entry at capacity.
+        if (decisionsByEmail.size >= MAX_RETAINED_DECISIONS) {
+          const oldest = decisionsByEmail.keys().next().value;
+          if (oldest !== undefined) decisionsByEmail.delete(oldest);
+        }
         decisionsByEmail.set(a.submittedEmail.toLowerCase(), {
           sessionId: a.sessionId,
           disposition: a.disposition,
@@ -260,17 +307,19 @@ export async function startDemoOrigins(): Promise<DemoOrigins> {
       }
     },
   });
-  const fireraidPort = await freePort();
-  await new Promise<void>((resolve, reject) => {
-    fireraidServer.once("error", reject);
-    fireraidServer.listen(fireraidPort, "127.0.0.1", () => resolve());
-  });
+  // FR-DEMO-11: same — direct ephemeral bind, no TOCTOU window.
+  const fireraidPort = await listenEphemeral(fireraidServer);
 
   return {
     controlUrl: `http://127.0.0.1:${controlPort}`,
     fireraidUrl: `http://127.0.0.1:${fireraidPort}`,
     upstreamUrl,
+    baseApplicationHash,
     async ledgerHasAccount(email) {
+      // FR-DEMO-08: if the upstream child already died, the probe cannot
+      // possibly succeed — surface it immediately (the coordinator marks
+      // the trial INCONCLUSIVE with the infrastructure detail).
+      if (upstream.exitCode !== null || !upstream.pid) return null;
       try {
         const resp = await fetch(
           `${upstreamUrl}/api/ledger?email=${encodeURIComponent(email)}`
@@ -289,6 +338,15 @@ export async function startDemoOrigins(): Promise<DemoOrigins> {
       await closeServer(fireraidServer);
       await new Promise<void>((resolve) => controlShim.close(() => resolve()));
       upstream.kill("SIGTERM");
+      // FR-DEMO-08: strongly await the child's exit (with a grace kill).
+      const exited = await Promise.race([
+        upstreamDead.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 2_000)),
+      ]);
+      if (!exited) {
+        upstream.kill("SIGKILL");
+        await upstreamDead;
+      }
     },
   };
 }

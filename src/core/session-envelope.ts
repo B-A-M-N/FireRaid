@@ -141,6 +141,18 @@ export async function signSessionEnvelope(
   pv: number,
   opts?: SignEnvelopeOptions
 ): Promise<string> {
+  // FR-RR-38: the profile hash is a SHA-256 hex digest by construction.
+  // Signing a malformed value (truncated hash, "absent" placeholder, wrong
+  // encoding) would mint a treatment that NO derivation can ever verify —
+  // every subsequent request would fail closed with PROFILE_HASH_MISMATCH.
+  // Fail at issuance instead.
+  if (opts?.profileHash !== undefined && !/^[a-f0-9]{64}$/.test(opts.profileHash)) {
+    throw new Error(
+      `signSessionEnvelope: profileHash must be 64 lowercase hex chars ` +
+        `(got ${JSON.stringify(opts.profileHash.slice(0, 20))}…) — refusing to ` +
+        `sign an unverifiable treatment anchor`
+    );
+  }
   const format = opts?.profileHash !== undefined ? 2 : 1;
   const prefix = format === 2 ? "fr2" : ENVELOPE_PREFIX;
   const payload: SessionEnvelope = format === 2
@@ -211,7 +223,10 @@ export async function verifySessionEnvelope(
       parsed.kid.length === 0 ||
       // FR-P0-G: a v2 payload MUST carry the signed profile hash; a v1
       // payload MUST NOT (the field is meaningless there).
-      (version === 2 && (typeof parsed.ph !== "string" || parsed.ph.length === 0))
+      // FR-RR-38: the hash is a SHA-256 hex digest — anything else (wrong
+      // length, uppercase, non-hex) can never match a derivation and must
+      // be rejected at verification, not downstream at drift-check time.
+      (version === 2 && (typeof parsed.ph !== "string" || !/^[a-f0-9]{64}$/.test(parsed.ph)))
     ) {
       return { ok: false, code: "BAD_PAYLOAD" };
     }

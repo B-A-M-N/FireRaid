@@ -157,3 +157,63 @@ describe("FR-P1-19: session envelope — fail-closed verification", () => {
     if (!verdict.ok) expect(verdict.code).toBe("UNKNOWN_KEY");
   });
 });
+
+describe("FR-RR-38: profile-hash validation (fr2.ph)", () => {
+  const PH = "a".repeat(64);
+
+  /** Forge an fr2 envelope with an arbitrary ph, signed GENUINELY with
+   * KEY_A — so only the ph payload rule can reject it. */
+  async function forgeFr2(ph: unknown): Promise<string> {
+    const payload = { v: 2, sid: SID, iat: NOW, pv: PV, kid: KEY_A.id, ph };
+    const b64 = (s: string) =>
+      btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const body = b64(JSON.stringify(payload));
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(KEY_A.secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`fr2.${body}`));
+    const sigB64 = b64(String.fromCharCode(...new Uint8Array(sig)));
+    return `fr2.${body}.${sigB64}`;
+  }
+
+  it("issuance REFUSES a malformed profileHash (wrong length / non-hex / placeholder)", async () => {
+    for (const bad of [
+      "a".repeat(63), // truncated
+      "a".repeat(65), // overlong
+      "A".repeat(64), // uppercase
+      "g".repeat(64), // non-hex
+      "<required issued hash>", // a placeholder that would never verify
+      "",
+    ]) {
+      await expect(
+        signSessionEnvelope(RING_A, SID, NOW, PV, { profileHash: bad })
+      ).rejects.toThrow(/64 lowercase hex/);
+    }
+  });
+
+  it("issuance still accepts a valid hash (fr2) and an absent one (fr1)", async () => {
+    const fr2 = await signSessionEnvelope(RING_A, SID, NOW, PV, { profileHash: PH });
+    expect(fr2.startsWith("fr2.")).toBe(true);
+    expect((await verifySessionEnvelope(RING_A, fr2, NOW)).ok).toBe(true);
+    const fr1 = await signSessionEnvelope(RING_A, SID, NOW, PV);
+    expect(fr1.startsWith("fr1.")).toBe(true);
+    expect((await verifySessionEnvelope(RING_A, fr1, NOW)).ok).toBe(true);
+  });
+
+  it("verification REJECTS a genuinely-signed fr2 whose ph is not 64 lowercase hex (BAD_PAYLOAD)", async () => {
+    for (const badPh of ["a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64), ""]) {
+      const forged = await forgeFr2(badPh);
+      const verdict = await verifySessionEnvelope(RING_A, forged, NOW);
+      expect(verdict.ok, `ph=${JSON.stringify(badPh).slice(0, 14)}`).toBe(false);
+      if (!verdict.ok) expect(verdict.code).toBe("BAD_PAYLOAD");
+    }
+  });
+
+  it("a genuinely-signed fr2 with a VALID ph still verifies (control)", async () => {
+    expect((await verifySessionEnvelope(RING_A, await forgeFr2(PH), NOW)).ok).toBe(true);
+  });
+});

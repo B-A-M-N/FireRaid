@@ -71,9 +71,16 @@ wiring time and throws `MiddlewareConfigError` on any gap:
   route-evidence storage; a deployment that cannot observe a causal
   channel must not announce it)
 - `submissionStore` — REQUIRED (FR-P0-02: the durable
-  claim/replay/complete record that makes "one session → one irreversible
-  forward" true across retries and restarts)
+  claim/replay/complete/finalizeDecision record that makes "one session →
+  one irreversible forward" true across retries and restarts — the full
+  state machine is documented below)
 - `session`, `render`, `telemetry`, `enforcement` adapters
+- `session` — must declare `profileIntegrity: "issued-hash"` (FR-RR-27)
+  and honor it: sign the issued profile hash into the session envelope
+  (`fr2` with the `ph` claim) and return it from `resolveSession()`, so
+  every derivation is drift-checked against the treatment that was issued
+  (FR-RR-12). Hashless session carriers are the evaluation plane's domain
+  and are REJECTED here.
 - `verification` — REQUIRED. Every submit passes through it on the way to
   the forward. It must declare `verificationMode: "host-owned"` (you
   verified the human elsewhere and hand FireRaid the verdict) or
@@ -113,7 +120,7 @@ const deps = createFireRaidMiddleware({
   // "volatile" and are REJECTED here.
   telemetry: myDurableTelemetry,    // { durability: "durable", accept, collect }
   canaryStore: myDurableCanaryStore,// { durability: "durable", record, readVerified, drop }
-  submissionStore: myDurableSubmissions, // { durability: "durable", claim, complete, lookupFinal? }
+  submissionStore: myDurableSubmissions, // { durability: "durable", claim, complete, finalizeDecision, lookupFinal? }
   enforcement: { allow: myUpstreamCreate, deny: myDenyHook },
   verification: myVerifier, // REQUIRED — "host-owned" or "provider"
 });
@@ -126,22 +133,80 @@ const result = await admit(request, deps, htmlLoader);
 // and an accepted one are indistinguishable on the wire.
 ```
 
-A minimal durable `submissionStore` over SQL looks like:
+### The Submission Store Is a State Machine
+
+The store guards the ONE irreversible forward per session AND every
+terminal decision. Its states and legal transitions (FR-RR-40/41):
+
+```
+NONE ─claim───────────────────→ FORWARD_CLAIMED
+                                  ├─ complete(terminal outcome) → TERMINAL
+                                  └─ complete(uncertain)        → FORWARD_UNCERTAIN
+NONE ─finalizeDecision───────→ TERMINAL (decision-denied)
+```
+
+There is NO automatic transition out of `FORWARD_CLAIMED` or
+`FORWARD_UNCERTAIN` into a decision denial:
+
+- `FORWARD_CLAIMED` — another request may be mid-forward across the
+  irreversible boundary. `finalizeDecision` returns
+  `{ kind: "conflict", state: "forward-claimed" }`; it must never
+  overwrite the claim.
+- `FORWARD_UNCERTAIN` — the forward MAY have reached the upstream but its
+  outcome is unknown. This state is ABSORBING for automatic processing: a
+  later denial must NOT convert "unknown" into "blocked". Only an explicit
+  operator reconciliation may resolve it. `claim` and `finalizeDecision`
+  both return conflict.
+- `TERMINAL` — first writer wins, verbatim: a second finalizer (or a
+  claiming retry) receives `{ kind: "replay", record }` carrying the
+  EXACT original record.
+
+Methods (all REQUIRED in production — the factory checks at startup):
 
 ```ts
 const submissionStore = {
   durability: "durable" as const,
-  async claim(sessionId: string, idempotencyKey: string) {
-    // Conditional INSERT/UPDATE: succeeds exactly once per session.
-    // INSERT INTO submission_claims (session_id, idempotency_key, state)
-    // VALUES (?, ?, 'open') — unique(session_id) → conflict when held,
-    // replay when a terminal outcome row exists.
-    ...
-  },
-  async complete(claimId: string, outcome) { /* persist outcome; release on definite transport failure */ },
-  async lookupFinal(sessionId: string) { /* stored terminal outcome or null */ },
+
+  // NONE → FORWARD_CLAIMED (or replay/conflict). Implement as a
+  // conditional INSERT — unique(session_id) → conflict when held;
+  // a TERMINAL row → replay.
+  async claim(sessionId, idempotencyKey) { ... },
+
+  // Record the forward's outcome. FR-RR-45 overloads: a TERMINAL outcome
+  // (created / business-rejected / queued-for-retry) REQUIRES the
+  // assessment snapshot in the trailing meta object; only a
+  // transport-failure outcome may omit it.
+  async complete(claimId, outcome, signal, meta) { ... },
+
+  // NONE → TERMINAL (decision-denied). Returns:
+  //   { kind: "stored", record }                       — this call won
+  //   { kind: "replay", record }                       — first writer wins
+  //   { kind: "conflict", state: "forward-claimed" | "forward-uncertain" }
+  async finalizeDecision(sessionId, record, signal) { ... },
+
+  // Return the stored terminal record ({ version: 2, outcome,
+  // assessment }) or null. FORWARD_UNCERTAIN has NO final record.
+  async lookupFinal(sessionId) { ... },
+
+  // OPTIONAL (recommended): the deny PROJECTION ledger (FR-RR-42).
+  // enforcement.deny is a replayable projection of the durable record;
+  // these track whether the host-side denial annotation actually landed.
+  async markDenyProjectionComplete(sessionId) { ... },
+  async denyProjectionState(sessionId) { ... }, // "pending"|"complete"|undefined
 };
 ```
+
+Every transition MUST be an atomic conditional write in SQL (a single
+`UPDATE … WHERE state = …` or an equivalent unique-index insert) — never a
+read-then-write decided in application logic, which races concurrent
+requests.
+
+Record shape: ONLY the v2 schema is accepted at the parser boundary —
+`{ version: 2, outcome, assessment }` with the assessment snapshot
+mandatory. Older assessment-less records are rejected as malformed
+(FR-RR-46); a host with genuine pre-release data migrates it with an
+explicit reconciliation tool rather than keeping a compatibility window
+open in the runtime.
 
 Send the claim's `idempotencyKey` to your upstream with the forward
 (`Idempotency-Key` header) when the upstream supports it — that is what
@@ -187,6 +252,14 @@ acked once its annotation is durable. A rejecting hook fails the request
 with a generic 5xx (never a success receipt), because a receipt for an
 annotation that failed to persist is a promise the review pipeline cannot
 keep.
+
+**Replay safety (FR-RR-14)**: when a client retries after such a failure,
+the retried `onAssessment` carries the ORIGINAL assessment — the
+disposition, score, email, and risk evidence captured when the forward
+finalized — with `replayed: true` set (the semantic disposition is never
+replaced by "REPLAY"). Persist assessments with an UPSERT keyed on
+`assessment.sessionId`; a replay then rewrites the same review row
+idempotently instead of duplicating it.
 
 Two storage caveats:
 

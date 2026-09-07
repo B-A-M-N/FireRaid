@@ -33,6 +33,7 @@ import {
 } from "../../src/eval/evaluation-middleware.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
 import type { ProfileKeyRing } from "../../src/core/session.js";
+import { issuedCookie } from "./helpers/test-issuance.js";
 
 const SECRET = "s".repeat(64);
 const VERSION = 1;
@@ -56,7 +57,7 @@ function baseDeps(over: Partial<MiddlewareDeps> = {}): MiddlewareDeps {
       accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
       collect: async () => [],
     },
-    enforcement: { allow: async () => true, deny: () => {} },
+    enforcement: { allow: async () => ({ kind: "created" as const }), deny: () => {} },
     canaryStore: new DurableCanaryStore(), // durability:"durable"
     submissionStore: new DurableSubmissionStore(), // durability:"durable"
     enforcementMode: "enforcement",
@@ -104,13 +105,13 @@ describe("route table dispatch (audit item 14)", () => {
     const d = createFireRaidMiddleware(baseDeps({
       routes: ROUTES,
       enforcement: {
-        allow: async () => { enforcement.allowed++; return true; },
+        allow: async () => { enforcement.allowed++; return { kind: "created" as const }; },
         deny: () => { enforcement.denied++; },
       },
     }));
     const adapter = new ReferenceSessionAdapter(SECRET);
     const sid = await adapter.createSession();
-    const cookie = await adapter.sessionCookie(sid);
+    const cookie = await issuedCookie(adapter, SECRET, sid);
     const csrf = await makeCsrf(SECRET, sid);
     const res = await admit(
       new Request("http://mw/api/submit", {
@@ -133,7 +134,7 @@ describe("route table dispatch (audit item 14)", () => {
     }));
     const adapter = new ReferenceSessionAdapter(SECRET);
     const sid = await adapter.createSession();
-    const cookie = await adapter.sessionCookie(sid);
+    const cookie = await issuedCookie(adapter, SECRET, sid);
     const profile = await deriveProfilePure(
       { secret: SECRET, version: 1, sessionId: sid, mode: "production" }
     );
@@ -171,7 +172,7 @@ describe("custom canaryPrefix full causal chain (audit P0)", () => {
         routes: CUSTOM,
         canaryStore: store,
         enforcement: {
-          allow: async () => { enforcement.allowed++; return true; },
+          allow: async () => { enforcement.allowed++; return { kind: "created" as const }; },
           deny: () => { enforcement.denied++; },
         },
       })),
@@ -247,13 +248,13 @@ describe("legacy behavior when routes is OMITTED", () => {
     const enforcement: { allowed: number } = { allowed: 0 };
     const d = baseDeps({
       enforcement: {
-        allow: async () => { enforcement.allowed++; return true; },
+        allow: async () => { enforcement.allowed++; return { kind: "created" as const }; },
         deny: () => {},
       },
     });
     const adapter = new ReferenceSessionAdapter(SECRET);
     const sid = await adapter.createSession();
-    const cookie = await adapter.sessionCookie(sid);
+    const cookie = await issuedCookie(adapter, SECRET, sid);
     const csrf = await makeCsrf(SECRET, sid);
     const res = await admitEvaluation(
       new Request("http://mw/anything", {
@@ -290,6 +291,29 @@ describe("createFireRaidMiddleware factory (audit item 17 + Batch 1/2)", () => {
   it("missing canaryStore throws (production route-evidence capability)", () => {
     const { canaryStore: _omitted, ...rest } = baseDeps({ routes: ROUTES });
     expect(() => createFireRaidMiddleware(rest as unknown as MiddlewareDeps)).toThrow(/canaryStore/);
+  });
+
+  // ── FR-RR-27: profile integrity is a MANDATORY production capability ──────
+  it("a session adapter WITHOUT profileIntegrity:'issued-hash' is refused at wiring", () => {
+    // A generic host adapter that ignores the issuance object can silently
+    // discard the signed hash — production wiring must declare the
+    // capability, so the drift guarantee holds at EVERY host, not just the
+    // reference one.
+    const stripped = {
+      ...baseDeps({ routes: ROUTES }),
+      session: {
+        createSession: async () => "s1",
+        sessionCookie: async (sid: string) => `sid=${sid}`,
+        resolveSession: async () => ({ id: "s1", profileVersion: 1, keyId: "default" }),
+      },
+    } as unknown as MiddlewareDeps;
+    try {
+      createFireRaidMiddleware(stripped);
+      expect.unreachable("factory must refuse a hashless session adapter");
+    } catch (e) {
+      expect(e).toBeInstanceOf(MiddlewareConfigError);
+      expect((e as Error).message).toMatch(/profileIntegrity/);
+    }
   });
 
   // ── Rereview item 3: per-strategy capability enumeration ──────────────────
@@ -400,6 +424,51 @@ describe("createFireRaidMiddleware factory (audit item 17 + Batch 1/2)", () => {
     ).toThrow(/disabled-test/);
   });
 
+  it("FR-RR-56: the EVALUATION factory accepts disabled-test + hashless session; production refuses BOTH", () => {
+    // The chosen contract: the no-op verifier and the hashless session
+    // carrier are the evaluation plane's domain, gated by the internal
+    // evaluation path — permitted there, refused on the public production
+    // entry. (The evaluation fixture deps here otherwise satisfy the
+    // structural checks: durable stores, ring synthesis via secret.)
+    const evalDeps = {
+      secret: SECRET,
+      version: VERSION,
+      upstreamRegisterUrl: "https://upstream.invalid/api/register",
+      session: {
+        createSession: async () => "s1",
+        sessionCookie: async (sid: string) => `sid=${sid}`,
+        resolveSession: async () => ({ id: "s1", profileVersion: 1, keyId: "default" }),
+        // NO profileIntegrity — hashless carrier, evaluation-legal
+      },
+      render: { inject: (h: string) => h },
+      verification: { verificationMode: "disabled-test" as const, verify: async () => true },
+      telemetry: {
+        durability: "volatile" as const,
+        accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
+        collect: async () => [],
+      },
+      enforcement: { allow: async () => ({ kind: "created" as const }), deny: () => {} },
+      canaryStore: { durability: "volatile" as const, record: async () => true, readVerified: async () => false },
+      submissionStore: {
+        durability: "volatile" as const,
+        claim: async () => ({ kind: "claimed" as const, claimId: "c", idempotencyKey: "k" }),
+        complete: async () => {},
+        finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+      },
+      enforcementMode: "enforcement" as const,
+      routes: ROUTES,
+    } as unknown as Parameters<typeof createEvaluationMiddleware>[0];
+    expect(() => createEvaluationMiddleware(evalDeps)).not.toThrow();
+    // Same shape through the PRODUCTION factory: refused — twice over.
+    expect(() => createFireRaidMiddleware(evalDeps as unknown as MiddlewareDeps)).toThrow(/disabled-test/);
+    // And a hashless session alone (host-owned verifier) is also refused.
+    const hashlessOnly = {
+      ...evalDeps,
+      verification: { verificationMode: "host-owned" as const, verify: async () => true },
+    } as unknown as MiddlewareDeps;
+    expect(() => createFireRaidMiddleware(hashlessOnly)).toThrow(/profileIntegrity/);
+  });
+
   it("valid config returns deps unchanged", () => {
     const d = baseDeps({ routes: ROUTES });
     const result = createFireRaidMiddleware(d);
@@ -462,6 +531,72 @@ describe("createFireRaidMiddleware factory (audit item 17 + Batch 1/2)", () => {
       createFireRaidMiddleware({ ...d, canaryPathPrefix: "/c/" } as unknown as MiddlewareDeps)
     ).toThrow(MiddlewareConfigError);
   });
+
+  // ── FR-RR-19: deadline budgets are validated at wiring time ──────────────
+  describe("FR-RR-19: adapter/durability deadline budgets", () => {
+    it("accepts omitted budgets (defaults apply) and legal explicit ones", () => {
+      expect(() => createFireRaidMiddleware(baseDeps({ routes: ROUTES }))).not.toThrow();
+      expect(() =>
+        createFireRaidMiddleware(
+          baseDeps({ routes: ROUTES, adapterTimeoutMs: 1, durabilityTimeoutMs: 600_000 })
+        )
+      ).not.toThrow();
+    });
+
+    it("rejects 0 and negative budgets (instant fail-closed denial of everything)", () => {
+      for (const bad of [0, -1, -10_000]) {
+        expect(() =>
+          createFireRaidMiddleware(baseDeps({ routes: ROUTES, adapterTimeoutMs: bad }))
+        ).toThrow(/adapterTimeoutMs/);
+        expect(() =>
+          createFireRaidMiddleware(baseDeps({ routes: ROUTES, durabilityTimeoutMs: bad }))
+        ).toThrow(/durabilityTimeoutMs/);
+      }
+    });
+
+    it("rejects non-finite and non-number budgets (setTimeout would treat them as ~0)", () => {
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, "5000", null]) {
+        expect(() =>
+          createFireRaidMiddleware(
+            baseDeps({ routes: ROUTES, adapterTimeoutMs: bad as unknown as number })
+          )
+        ).toThrow(/adapterTimeoutMs/);
+      }
+    });
+
+    it("rejects unbounded budgets (a deadline that stops bounding)", () => {
+      expect(() =>
+        createFireRaidMiddleware(baseDeps({ routes: ROUTES, adapterTimeoutMs: 600_001 }))
+      ).toThrow(/adapterTimeoutMs/);
+      expect(() =>
+        createFireRaidMiddleware(baseDeps({ routes: ROUTES, durabilityTimeoutMs: 60 * 60_000 }))
+      ).toThrow(/durabilityTimeoutMs/);
+      // The exact ceiling is legal.
+      expect(() =>
+        createFireRaidMiddleware(baseDeps({ routes: ROUTES, adapterTimeoutMs: 600_000 }))
+      ).not.toThrow();
+    });
+
+    it("the error names the field, the legal range, and the default", () => {
+      try {
+        createFireRaidMiddleware(baseDeps({ routes: ROUTES, durabilityTimeoutMs: 0 }));
+        expect.unreachable("construction should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(MiddlewareConfigError);
+        const msg = (err as Error).message;
+        expect(msg).toContain("durabilityTimeoutMs");
+        expect(msg).toContain("600000");
+        expect(msg).toContain("DEFAULT_DURABILITY_TIMEOUT_MS (5s)");
+      }
+    });
+
+    it("the EVALUATION factory validates budgets too (shared structural path)", () => {
+      const base = baseDeps({ routes: ROUTES });
+      expect(() =>
+        createEvaluationMiddleware({ ...base, labMode: false, adapterTimeoutMs: -5 })
+      ).toThrow(/adapterTimeoutMs/);
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -507,6 +642,7 @@ describe("createEvaluationMiddleware (evaluation surface)", () => {
         durability: "volatile",
         claim: async () => ({ kind: "claimed" as const, claimId: "c1", idempotencyKey: "k" }),
         complete: async () => {},
+        finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
       } as unknown as MiddlewareDeps["submissionStore"],
     });
     expect(() => createEvaluationMiddleware(d as unknown as EvaluationMiddlewareDeps)).not.toThrow();
@@ -555,10 +691,12 @@ describe("profile key ring (audit item 18 + P1 fail-closed)", () => {
   };
 
   it("session under previous key reconstructs and admits", async () => {
-    // Issue session with the OLD key (secret = KEY_1, kid = "k1")
+    // Issue session with the OLD key (secret = KEY_1, kid = "k1"). The
+    // signed hash must be the REAL derived profile's hash (FR-RR-12 drift
+    // check) — the middleware re-derives under the same production key.
     const oldAdapter = new ReferenceSessionAdapter(KEY_1, { version: 1, keyId: "k1" });
     const sid = await oldAdapter.createSession();
-    const cookie = await oldAdapter.sessionCookie(sid);
+    const cookie = await issuedCookie(oldAdapter, KEY_1, sid, 1, "k1");
 
     const sessionAdapter = new ReferenceSessionAdapter(RING);
     const ctx = await sessionAdapter.resolveSession(
@@ -573,7 +711,7 @@ describe("profile key ring (audit item 18 + P1 fail-closed)", () => {
       profileKeys: RING,
       session: sessionAdapter,
       enforcement: {
-        allow: async () => { enforcement.allowed++; return true; },
+        allow: async () => { enforcement.allowed++; return { kind: "created" as const }; },
         deny: () => { enforcement.denied++; },
       },
     }));
@@ -597,12 +735,12 @@ describe("profile key ring (audit item 18 + P1 fail-closed)", () => {
   it("envelope with unknown kid is denied", async () => {
     const rogueAdapter = new ReferenceSessionAdapter(SECRET, { keyId: "unknown" });
     const sid = await rogueAdapter.createSession();
-    const cookie = await rogueAdapter.sessionCookie(sid);
+    const cookie = await rogueAdapter.sessionCookie(sid, { profileVersion: 1, profileKeyId: "unknown", profileHash: "a".repeat(64) });
 
     const d = createFireRaidMiddleware(baseDeps({
       routes: ROUTES,
       profileKeys: RING,
-      enforcement: { allow: async () => true, deny: () => {} },
+      enforcement: { allow: async () => ({ kind: "created" as const }), deny: () => {} },
     }));
 
     const res = await admit(
@@ -631,7 +769,7 @@ describe("CSRF secret separation (audit item 19 + P0 roundtrip)", () => {
     const d = createFireRaidMiddleware(baseDeps({
       routes: ROUTES,
       csrfSecret: CSRF_SECRET,
-      enforcement: { allow: async () => { enforcement.allowed++; return true; }, deny: () => {} },
+      enforcement: { allow: async () => { enforcement.allowed++; return { kind: "created" as const }; }, deny: () => {} },
     }));
     // 1. GET the application page — the middleware MINTS the token.
     const get = await admit(new Request("http://mw/signup"), d, async () => SIGNUP_HTML);
@@ -657,7 +795,7 @@ describe("CSRF secret separation (audit item 19 + P0 roundtrip)", () => {
     const enforcement: { allowed: number } = { allowed: 0 };
     const d = createFireRaidMiddleware(baseDeps({
       routes: ROUTES,
-      enforcement: { allow: async () => { enforcement.allowed++; return true; }, deny: () => {} },
+      enforcement: { allow: async () => { enforcement.allowed++; return { kind: "created" as const }; }, deny: () => {} },
     }));
     const get = await admit(new Request("http://mw/signup"), d, async () => SIGNUP_HTML);
     const csrf = (get.html ?? "").match(/name="csrf" value="([^"]+)"/)?.[1] ?? "";
@@ -679,7 +817,7 @@ describe("CSRF secret separation (audit item 19 + P0 roundtrip)", () => {
     const d = createFireRaidMiddleware(baseDeps({ routes: ROUTES, csrfSecret: CSRF_SECRET }));
     const adapter = new ReferenceSessionAdapter(SECRET);
     const sid = await adapter.createSession();
-    const cookie = await adapter.sessionCookie(sid);
+    const cookie = await issuedCookie(adapter, SECRET, sid);
     const csrf = await makeCsrf(SECRET, sid); // wrong secret on purpose
 
     const res = await admit(
@@ -705,7 +843,7 @@ describe("CSRF secret separation (audit item 19 + P0 roundtrip)", () => {
     };
     const oldAdapter = new ReferenceSessionAdapter(KEY_OLD, { version: 1, keyId: "old" });
     const sid = await oldAdapter.createSession();
-    const cookie = await oldAdapter.sessionCookie(sid);
+    const cookie = await issuedCookie(oldAdapter, KEY_OLD, sid, 1, "old");
     const d = createFireRaidMiddleware(baseDeps({
       routes: ROUTES,
       profileKeys: ROT_RING,
@@ -764,7 +902,7 @@ describe("trustedIngress boundary (rereview item 24)", () => {
     const run = async (deps: MiddlewareDeps) => {
       seen.length = 0;
       const sid = await (deps.session as ReferenceSessionAdapter).createSession();
-      const cookie = await (deps.session as ReferenceSessionAdapter).sessionCookie(sid);
+      const cookie = await issuedCookie(deps.session as ReferenceSessionAdapter, SECRET, sid);
       const csrf = await makeCsrf(SECRET, sid);
       const res = await admitEvaluation(
         new Request("http://mw/api/submit", {
@@ -804,14 +942,14 @@ describe("FR-P1-10: forward-cookie allowlist through admit", () => {
       enforcement: {
         allow: async (_url, _form, cookies) => {
           forwardedCookies = cookies;
-          return true;
+          return { kind: "created" as const };
         },
         deny: () => {},
       },
     });
     const adapter = new ReferenceSessionAdapter(SECRET);
     const sid = await adapter.createSession();
-    const cookie = await adapter.sessionCookie(sid); // __Host-fr_sid=...
+    const cookie = await issuedCookie(adapter, SECRET, sid); // __Host-fr_sid=...
     const csrf = await makeCsrf(SECRET, sid);
     // The client carries the FireRaid envelope AND a host cookie. Only the
     // allowlisted host cookie may reach the upstream.
@@ -837,14 +975,14 @@ describe("FR-P1-10: forward-cookie allowlist through admit", () => {
       enforcement: {
         allow: async (_url, _form, cookies) => {
           forwardedCookies = cookies;
-          return true;
+          return { kind: "created" as const };
         },
         deny: () => {},
       },
     });
     const adapter = new ReferenceSessionAdapter(SECRET);
     const sid = await adapter.createSession();
-    const cookie = await adapter.sessionCookie(sid);
+    const cookie = await issuedCookie(adapter, SECRET, sid);
     const csrf = await makeCsrf(SECRET, sid);
     const res = await admitEvaluation(
       new Request("http://mw/anything", {
@@ -868,10 +1006,12 @@ describe("FR-P1-10: forward-cookie allowlist through admit", () => {
 
 // ── Closure 6 (FR-P1-03): exact durability match, no public bypass ───────
 
-describe("closure 6: durability is asserted, not assumed", () => {
-  function baseValidDeps(): MiddlewareDeps {
+// ── FR-RR-16: the production posture is explicit ─────────────────────────
+
+describe("FR-RR-16: enforcementMode is explicit in production", () => {
+  // Minimal structurally-valid deps with NO enforcementMode.
+  function depsWithoutMode(): MiddlewareDeps {
     const SECRET = "s".repeat(64);
-    const durable = () => ({ durability: "durable" as const });
     return {
       profileKeys: { current: { id: "default", secret: SECRET } },
       version: 1,
@@ -886,16 +1026,102 @@ describe("closure 6: durability is asserted, not assumed", () => {
       render: { inject: referenceInject },
       verification: { verificationMode: "host-owned" as const, verify: async () => true },
       telemetry: {
+        durability: "durable" as const,
+        accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
+        collect: async () => [],
+      },
+      enforcement: { allow: async () => ({ kind: "created" as const }), deny: () => {} },
+      canaryStore: {
+        durability: "durable" as const,
+        record: async () => true,
+        readVerified: async () => false,
+      },
+      submissionStore: {
+        durability: "durable" as const,
+        claim: async () => ({ kind: "claimed", claimId: "c", idempotencyKey: "k" }),
+        complete: async () => {},
+        finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+      },
+    } as unknown as MiddlewareDeps;
+  }
+
+  it("an OMITTED enforcementMode throws (undefined previously meant silent advisory)", () => {
+    expect(() => createFireRaidMiddleware(depsWithoutMode())).toThrow(
+      /enforcementMode is REQUIRED in production/
+    );
+  });
+
+  it("an explicit advisory mode is accepted (and warned, not refused)", () => {
+    const deps = depsWithoutMode();
+    deps.enforcementMode = "advisory";
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (m?: unknown) => warns.push(String(m));
+    try {
+      expect(() => createFireRaidMiddleware(deps)).not.toThrow();
+    } finally {
+      console.warn = origWarn;
+    }
+    expect(warns.some((w) => w.includes("advisory"))).toBe(true);
+  });
+
+  it("review and enforcement postures are accepted without warning", () => {
+    for (const mode of ["review", "enforcement"] as const) {
+      const deps = depsWithoutMode();
+      deps.enforcementMode = mode;
+      const warns: string[] = [];
+      const origWarn = console.warn;
+      console.warn = (m?: unknown) => warns.push(String(m));
+      try {
+        expect(() => createFireRaidMiddleware(deps)).not.toThrow();
+      } finally {
+        console.warn = origWarn;
+      }
+      expect(warns.some((w) => w.includes("advisory"))).toBe(false);
+    }
+  });
+
+  it("the evaluation plane still defaults to advisory EXPLICITLY ( wired, not silent)", async () => {
+    const { createEvaluationMiddleware } = await import("../../src/eval/evaluation-middleware.js");
+    const deps = depsWithoutMode();
+    // No enforcementMode — the evaluation factory must inject its own
+    // explicit advisory default and pass.
+    expect(() => createEvaluationMiddleware(deps as never)).not.toThrow();
+    expect(deps.enforcementMode).toBe("advisory");
+  });
+});
+
+describe("closure 6: durability is asserted, not assumed", () => {
+  function baseValidDeps(): MiddlewareDeps {
+    const SECRET = "s".repeat(64);
+    const durable = () => ({ durability: "durable" as const });
+    return {
+      profileKeys: { current: { id: "default", secret: SECRET } },
+      version: 1,
+      upstreamRegisterUrl: "https://upstream.example.com/api/register",
+      // FR-RR-16: production names its posture explicitly.
+      enforcementMode: "enforcement" as const,
+      routes: {
+        applicationPage: "/signup",
+        applicationSubmit: "/api/submit",
+        telemetry: "/api/events",
+        canaryPrefix: "/c/",
+      },
+      session: new ReferenceSessionAdapter(SECRET),
+      render: { inject: referenceInject },
+      verification: { verificationMode: "host-owned" as const, verify: async () => true },
+      telemetry: {
         ...durable(),
         accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
         collect: async () => [],
       },
-      enforcement: { allow: async () => true, deny: () => {} },
+      enforcement: { allow: async () => ({ kind: "created" as const }), deny: () => {} },
       canaryStore: { ...durable(), record: async () => {}, readVerified: async () => null, drop: async () => {} },
       submissionStore: {
         ...durable(),
         claim: async () => ({ kind: "claimed", claimId: "c", idempotencyKey: "k" }),
         complete: async () => {},
+        finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
         lookupFinal: async () => null,
       },
     } as unknown as MiddlewareDeps;

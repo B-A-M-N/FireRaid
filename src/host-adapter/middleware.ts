@@ -64,6 +64,7 @@ export {
 export {
   MiddlewareConfigError,
   UnknownProfileKeyError,
+  ProfileHashMismatchError,
 } from "./middleware-errors.js";
 export { resolveRoutes } from "./config/routes.js";
 export type {

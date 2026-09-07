@@ -63,6 +63,7 @@ function boot(): Promise<number> {
     } as never,
     htmlLoader: async () => SIGNUP_HTML,
     routes: ROUTES,
+    onAssessment: () => {},
   });
   servers.push(server);
   return new Promise<number>((resolve, reject) => {

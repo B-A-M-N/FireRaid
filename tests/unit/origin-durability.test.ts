@@ -56,7 +56,7 @@ describe("P0-5: onAssessment durability", () => {
       render: { inject: referenceInject },
       verification: { verificationMode: "host-owned" as const, verify: async () => true },
       telemetry: new DurableTelemetryAdapter(), // FR-P1-03: production path needs durable stores
-      enforcement: { allow: async () => true, deny: () => {} },
+      enforcement: { allow: async () => ({ kind: "created" as const }), deny: () => {} },
       canaryStore: new DurableCanaryStore(),
     submissionStore: new DurableSubmissionStore(),
       enforcementMode: "enforcement" as const,

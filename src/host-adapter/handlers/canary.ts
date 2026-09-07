@@ -7,7 +7,8 @@ import type { ResolvedFireRaidRoutes } from "../interface.js";
 import type { MiddlewareDeps, MiddlewareResult, EvaluationControls } from "../middleware-types.js";
 import { DeadlineSignal } from "../deadline.js";
 import { reportOperationalError } from "../lifecycle/store-finalization.js";
-import { resolveKeySecret, deriveForRequest } from "../profile/resolve-session-profile.js";
+import { resolveKeySecret, deriveAndVerifyIssuedProfile } from "../profile/resolve-session-profile.js";
+import { ProfileHashMismatchError } from "../middleware-errors.js";
 
 const DEFAULT_CANARY_PREFIX = "/c/";
 
@@ -37,11 +38,19 @@ export async function handleCanaryGet(
     return { kind: "deny", disposition: "UNKNOWN_PROFILE_KEY" };
   }
   try {
-    const profile = await deriveForRequest(
-      { secret, version: deriveVersion, sessionId },
+    // FR-RR-12: canary reconstruction verifies against the signed issued
+    // hash too — a drifted derivation must never persist a "verified" hit
+    // for a treatment the session was not actually shown.
+    const profile = await deriveAndVerifyIssuedProfile({
+      secret,
+      version: deriveVersion,
+      sessionId,
+      expectedHash: session?.profileHash,
       evaluation,
-      evaluation?.labMode === true
-    );
+      labMode: evaluation?.labMode === true,
+      // FR-RR-27: production sessions must carry the signed issued hash.
+      requireIssuedHash: !evaluation,
+    });
     if (!profile.decoyRoute) return { kind: "deny", disposition: "NO_ROUTE" };
     const expected = profile.decoyRoute.endpointToken;
     if (!constantTimeTokenEqual(token, expected)) {
@@ -58,6 +67,12 @@ export async function handleCanaryGet(
     }
     return { kind: "canary-verified", disposition: "CANARY_VERIFIED" };
   } catch (err) {
+    // FR-RR-12: a signed-hash mismatch is named distinctly so operators can
+    // tell a deployment-derivation straddle from a generic evaluation fault.
+    if (err instanceof ProfileHashMismatchError) {
+      reportOperationalError(deps, "handleCanaryGet.evaluate", err);
+      return { kind: "error", operationalReason: "PROFILE_HASH_MISMATCH" };
+    }
     // FR-P0-03: an evaluation/storage exception is FireRaid's own failure —
     // 5xx, not an applicant-facing denial.
     reportOperationalError(deps, "handleCanaryGet.evaluate", err);

@@ -17,6 +17,8 @@
     "test:package": "node scripts/release-package-smoke.mjs",
     "dev:origin": "tsx examples/origin-server.mjs",
     "demo": "tsx demo/server.ts",
+    "typecheck:demo": "tsc -p tsconfig.demo.json --noEmit",
+    "test:demo": "DEMO_SMOKE=1 vitest run tests/demo",
     "test:origin-budget": "node --import tsx scripts/origin-budget.mjs",
     "test:integration": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.integration.config.ts",
     "test:llm-smoke": "node scripts/test-worker.mjs --suite test-integration --port 8799 -- vitest run --config vitest.llm-smoke.config.ts",
@@ -27,7 +29,7 @@
     "test:e2e": "playwright test",
     "test:e2e:production": "playwright install chromium firefox webkit && playwright test --config=playwright.production.config.ts",
     "test:a11y": "playwright test --config=playwright.a11y.config.ts",
-    "lint": "eslint \"src/**/*.ts\" \"harness/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.mjs\" --max-warnings 0",
+    "lint": "eslint \"src/**/*.ts\" \"harness/**/*.ts\" \"tests/**/*.ts\" \"demo/**/*.ts\" \"scripts/**/*.mjs\" --max-warnings 0",
     "test:e2e:ci": "playwright install chromium firefox webkit && playwright test",
     "deploy": "wrangler deploy --env production",
     "deploy:lab": "wrangler deploy --env public-lab",
@@ -38,11 +40,10 @@
     "analyze": "python3 harness/analysis/analyze.py",
     "release:verify:fast": "node scripts/release-verify.mjs fast",
     "release:verify:full": "node scripts/release-verify.mjs full",
-    "release:verify": "node scripts/release-verify.mjs full",
+    "release:verify": "node scripts/release-verify.mjs full --require-tier release_ready",
     "release:smoke:record": "node scripts/release-smoke-record.mjs"
   },
   "dependencies": {
-    "@types/node": "^22.20.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {

@@ -89,6 +89,29 @@ export type Scenario = z.infer<typeof ScenarioSchema>;
 // AgentRunResult — what adapters produce (before server reconciliation)
 // ---------------------------------------------------------------------------
 
+/**
+ * FR-DEMO-02 — LIVE run observations. A caller (the demo coordinator)
+ * passes an observer into run(); the adapter invokes it AT THE ACTUAL
+ * EVENT POINT (navigation, first fill, canary request, submit POST,
+ * submit response), so downstream UIs display causally ordered
+ * observations instead of post-run synthesized ones. Optional and
+ * failure-isolated: an observer that throws must never fail the run.
+ */
+export interface AgentRunObserver {
+  /** FR-DEMO-10: the browser process launched (before any navigation). */
+  onBrowserStarted?(): void;
+  /** The browser/page navigation to the target started (or completed). */
+  onPageLoaded?(url: string): void;
+  /** The actor began filling fields. */
+  onFillStarted?(): void;
+  /** The actor fetched the session's decoy route (canary). */
+  onCanaryRequested?(url: string): void;
+  /** The submit POST was dispatched. */
+  onSubmitDispatched?(): void;
+  /** The submit response arrived (or the wait failed). */
+  onSubmitResponse?(status: "received" | "no-response", detail?: string): void;
+}
+
 export interface AgentRunResult {
   /** Agent-side outcome — what the agent *thought* it did */
   outcome: Outcome;
@@ -112,6 +135,15 @@ export interface AgentRunResult {
    * mention must never feed the exact-reference metric.
    */
   canaryGenericReferenced?: boolean;
+  /**
+   * FR-DEMO-01: wire facts distinguishing a dispatched submit from an
+   * answered one. submitPosted = the POST left the browser; submitResponded
+   * = a response arrived. A posted-but-unanswered submit can be
+   * INCONCLUSIVE ground truth — never silently BLOCKED. Populated by the
+   * Playwright adapters; absent for adapters that cannot observe it.
+   */
+  submitPosted?: boolean;
+  submitResponded?: boolean;
   /** Perception artifacts (for exposure analysis) */
   perceptionArtifacts?: Array<{
     step: number;
@@ -180,7 +212,11 @@ export interface AgentAdapter {
   readonly type: AgentType;
   readonly extractor?: ExtractorType;
 
-  run(scenario: Scenario): Promise<AgentRunResult>;
+  /**
+   * FR-DEMO-02: `observer` is optional; adapters that support it emit live
+   * observations at the event point. Absent observer = plain run.
+   */
+  run(scenario: Scenario, observer?: AgentRunObserver): Promise<AgentRunResult>;
 }
 
 // ---------------------------------------------------------------------------

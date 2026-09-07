@@ -60,19 +60,22 @@ const ROUTES = {
 // stubs fetch and only forbids non-localhost, so this stays compliant).
 import { createServer as createHttpServer } from "node:http";
 
-const UPSTREAM_SINK_PORT = 5051;
-
+// FR-RR-20: the sink binds an EPHEMERAL port (0) instead of a hardcoded
+// one — a fixed port can collide with another process and hang the whole
+// budget run on EADDRINUSE (observed in CI). The discovered port feeds the
+// upstreamRegisterUrl, so nothing else in the harness needs to know it.
 function startUpstreamSink() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = createHttpServer((_req, res) => {
       res.writeHead(201, { "content-type": "application/json" });
       res.end('{"created":true}');
     });
-    server.listen(UPSTREAM_SINK_PORT, "127.0.0.1", () => resolve(server));
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve(server));
   });
 }
 
-function buildDeps() {
+function buildDeps(upstreamPort) {
   // FR-P1-03: the production constructor rejects VOLATILE evidence stores.
   // This budget gate exercises the real middleware with in-memory reference
   // stores as __stand-ins__ for durable backing — mark them durable so the
@@ -86,7 +89,7 @@ function buildDeps() {
   return createFireRaidMiddleware({
     profileKeys: { current: { id: "default", secret: SECRET } },
     version: VERSION,
-    upstreamRegisterUrl: `http://127.0.0.1:${UPSTREAM_SINK_PORT}/api/register`,
+    upstreamRegisterUrl: `http://127.0.0.1:${upstreamPort}/api/register`,
     session: new ReferenceSessionAdapter(SECRET, { version: VERSION }),
     render: { inject: referenceInject },
     verification: new HostOwnedVerificationAdapter(async () => true),
@@ -176,12 +179,12 @@ async function scenario_profile_generation() {
 
 // --- Scenario: signup-inject ---
 
-async function scenario_signup_inject() {
+async function scenario_signup_inject(upstreamPort) {
   const samples = [];
   let kind = "";
   let hasCsrf = false;
   for (let i = 0; i < SAMPLES; i++) {
-    const d = buildDeps();
+    const d = buildDeps(upstreamPort);
     const t0 = performance.now();
     const result = await admit(new Request("http://test/signup"), d, htmlLoader);
     samples.push(performance.now() - t0);
@@ -193,12 +196,12 @@ async function scenario_signup_inject() {
 
 // --- Scenario: submit-assessment ---
 
-async function scenario_submit_assessment() {
+async function scenario_submit_assessment(upstreamPort) {
   const samples = [];
   let kind = "";
   let disposition = "";
   for (let i = 0; i < SAMPLES; i++) {
-    const d = buildDeps();
+    const d = buildDeps(upstreamPort);
     // GET first — the middleware mints its own CSRF from resolveCsrfSecret;
     // the POST must consume the middleware's OWN issued token (the full
     // issue→verify roundtrip, not a host-replicated scheme).
@@ -227,7 +230,7 @@ async function scenario_submit_assessment() {
 
 // --- Scenario: zero-llm (network egress stub) ---
 
-async function scenario_zero_llm() {
+async function scenario_zero_llm(upstreamPort) {
   let fetchCalls = 0;
   let nonLocalhostFetch = 0;
   const originalFetch = globalThis.fetch;
@@ -248,7 +251,7 @@ async function scenario_zero_llm() {
   };
 
   try {
-    const d = buildDeps();
+    const d = buildDeps(upstreamPort);
     // GET inject path doesn't call fetch.
     await admit(new Request("http://test/signup"), d, htmlLoader);
     // POST submit path: enforcement.allow would call the (localhost)
@@ -326,6 +329,7 @@ async function run() {
   const unmeasured = [];
 
   const sink = await startUpstreamSink();
+  const upstreamPort = sink.address().port;
 
   console.log("=== Origin Budget Harness ===\n");
 
@@ -368,7 +372,7 @@ async function run() {
   // 2. signup-inject
   process.stdout.write("  signup-inject             ");
   try {
-    const { samples, kind, hasCsrf } = await scenario_signup_inject();
+    const { samples, kind, hasCsrf } = await scenario_signup_inject(upstreamPort);
     const shapeOk = kind === "get" && hasCsrf;
     if (!shapeOk) {
       console.log(`FAIL — functional contract violated (kind=${kind}, csrf=${hasCsrf})`);
@@ -389,7 +393,7 @@ async function run() {
   // 3. submit-assessment
   process.stdout.write("  submit-assessment         ");
   try {
-    const { samples, kind, disposition } = await scenario_submit_assessment();
+    const { samples, kind, disposition } = await scenario_submit_assessment(upstreamPort);
     const shapeOk = kind === "admit";
     if (!shapeOk) {
       console.log(`FAIL — functional contract violated (kind=${kind}, disposition=${disposition})`);
@@ -410,7 +414,7 @@ async function run() {
   // 4. zero-llm
   process.stdout.write("  zero-network-egress       ");
   try {
-    const { fetchCalls, nonLocalhostFetch } = await scenario_zero_llm();
+    const { fetchCalls, nonLocalhostFetch } = await scenario_zero_llm(upstreamPort);
     const passed = nonLocalhostFetch === 0;
     console.log(`${passed ? "PASS" : "FAIL"} — fetchCalls=${fetchCalls}, nonLocalhost=${nonLocalhostFetch}`);
     if (!passed) allPassed = false;
@@ -435,15 +439,20 @@ async function run() {
   }
 
   console.log("");
-  sink.close();
-  if (unmeasured.length > 0) {
-    console.log(
-      `UNMEASURED (ambient load — re-run on a quiet host for timing verdicts): ` +
-      unmeasured.join(", ")
-    );
+  try {
+    if (unmeasured.length > 0) {
+      console.log(
+        `UNMEASURED (ambient load — re-run on a quiet host for timing verdicts): ` +
+        unmeasured.join(", ")
+      );
+    }
+    console.log(allPassed ? "All enforced scenarios PASS" : "Some scenarios FAILED");
+    process.exitCode = allPassed ? 0 : 1;
+  } finally {
+    // FR-RR-20: the sink is ALWAYS closed — a scenario throwing must not
+    // leak a listening socket that pins the next run's port choice.
+    sink.close();
   }
-  console.log(allPassed ? "All enforced scenarios PASS" : "Some scenarios FAILED");
-  process.exit(allPassed ? 0 : 1);
 }
 
 run().catch((err) => {

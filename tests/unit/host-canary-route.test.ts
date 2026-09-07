@@ -32,6 +32,7 @@ import {
 } from "../../src/eval/evaluation-middleware.js";
 import { ABLATION_RECIPES } from "../../src/core/profile.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
+import { issuedCookieForProfile } from "./helpers/test-issuance.js";
 
 const SECRET = "host-canary-test-secret".padEnd(32, "x");
 
@@ -50,7 +51,7 @@ function deps(over: Partial<EvaluationMiddlewareDeps> = {}): EvaluationMiddlewar
       accept: async () => ({ kind: "accepted" as const, received: 0, acceptedThrough: -1, duplicate: true }),
       collect: async () => [],
     },
-    enforcement: { allow: async () => true, deny: () => {} },
+    enforcement: { allow: async () => ({ kind: "created" as const }), deny: () => {} },
     canaryStore: new ReferenceCanaryStore(),
     submissionStore: new ReferenceSubmissionStore(),
     labMode: false,
@@ -64,7 +65,13 @@ function deps(over: Partial<EvaluationMiddlewareDeps> = {}): EvaluationMiddlewar
 
 async function issueSessionCookie(d: EvaluationMiddlewareDeps): Promise<string> {
   const sid = await d.session.createSession();
-  return d.session.sessionCookie(sid);
+  // The middleware re-derives with deps.recipe — the signed hash must be of
+  // THAT derivation (FR-RR-12 drift check).
+  const profile = await deriveProfilePure(
+    { secret: SECRET, version: 1, sessionId: sid, mode: "production" },
+    d.recipe
+  );
+  return issuedCookieForProfile(d.session as ReferenceSessionAdapter, sid, profile);
 }
 
 describe("host canary route (audit item 6)", () => {

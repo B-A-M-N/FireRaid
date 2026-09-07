@@ -17,6 +17,7 @@ export {
   createFireRaidMiddleware,
   MiddlewareConfigError,
   UnknownProfileKeyError,
+  ProfileHashMismatchError,
   resolveRoutes,
 } from "./middleware.js";
 export type { MiddlewareDeps, MiddlewareResult, EvaluationControls } from "./middleware.js";

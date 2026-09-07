@@ -241,22 +241,27 @@ npm run deploy:lab               # named-env deploys only
 # See docs/INVARIANTS.md / the check:production-graph gate (FR-P1-05).
 ```
 
-After the deploy, smoke the **exact deployed worker version** against the
-production Worker: `/signup` 200 on the clean production plane, a headless
-submit without a solved Turnstile token returns `403 verification_required`
-(fail-closed), and a solved-widget submission reaches a success receipt. Then
-record the EXTERNAL smoke receipt (FR-P0-A — post-deploy evidence must not be
-committed into the git object it certifies, so the receipt is untracked):
+After the deploy, run the smoke RUNNER (FR-RR-49 — it performs the probes
+itself and records OBSERVED statuses, not assertions): `/signup` 200 on the
+clean production plane, a headless submit without a solved Turnstile token
+refused fail-closed (4xx), and your own solved-widget submission's observed
+status. The receipt (FR-P0-A — post-deploy evidence must not be committed
+into the git object it certifies, so it is untracked) separates
+`machine_checks` from `operator_attestations`:
 
     npm run release:smoke:record -- \
       --git-sha "$(git rev-parse HEAD)" \
-      --worker-version <wrangler version id from the deploy output> \
-      --url https://fireraid-production.<subdomain>.workers.dev \
-      --checks signup_page,submit_failclosed,human_submit
+      --worker-version <32-hex version id from the deploy output> \
+      --human-submit-observed-status <status from your solved-widget submit> \
+      --verify-version   # optional: confirm the version id on the Worker via the CF API
 
-The next `npm run release:verify` run reads the receipt and claims
-`release_ready` for that SHA. (The ledger's `remote-deployment-smoke` entry
-records smoke HISTORY; the current release's attestation is the receipt.)
+The URL defaults to the production `TURNSTILE_EXPECTED_HOSTNAME` from
+`wrangler.jsonc` and must be HTTPS on that host. The next
+`npm run release:verify` run reads the receipt and claims `release_ready`
+for that SHA — the verifier requires the v2 machine-observed schema (the
+old v1 attestation format is rejected). (The ledger's
+`remote-deployment-smoke` entry records smoke HISTORY; the current
+release's proof is the receipt.)
 
 ## Testing
 

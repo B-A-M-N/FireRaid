@@ -32,10 +32,11 @@ export async function handleInjectGet(
     // current key. resolveCsrfSecret with no sessionKeyId covers exactly
     // that, and POST verifies with the SAME resolver.
     const csrfToken = await makeCsrf(resolveCsrfSecret(deps, ring), sessionId);
-    // FR-RR (P2 sunset rule): hash the issued profile (frozen v1 semantics)
-    // and hand it to the session adapter so envelope-signing hosts issue
-    // fr2 with the signed `ph` claim — Worker parity for the FR-P0-G drift
-    // check. Adapters that ignore the parameter keep their own format.
+    // FR-RR (P2 sunset rule) + FR-RR-17: hash the issued profile (frozen
+    // versioned semantics) and hand the adapter the COMPLETE issuance —
+    // the version, key id, and hash FireRaid just derived. The adapter
+    // signs what it is told; there is no second configuration source that
+    // can disagree with the treatment actually rendered.
     const issuedHash = await hashProfileByVersion(profile, deps.version);
     const html = await htmlLoader();
     const renderOpts: RenderInjectOptions = {
@@ -46,7 +47,13 @@ export async function handleInjectGet(
     return {
       kind: "get",
       html: page,
-      setCookie: await deadline.run(deps.session.sessionCookie(sessionId, { profileHash: issuedHash })),
+      setCookie: await deadline.run(
+        deps.session.sessionCookie(sessionId, {
+          profileVersion: deps.version,
+          profileKeyId: ring.current.id,
+          profileHash: issuedHash,
+        })
+      ),
     };
   } catch (err) {
     // Fail-closed, but never silent: an inject path failure is a host

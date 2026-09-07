@@ -28,10 +28,19 @@ import { readFile } from "node:fs/promises";
 import { resolve, relative, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
+// FR-RR-48: an overridable root (FIRERAID_BOUNDARY_ROOT) so the behavioral
+// fixture tests can point the gate at a synthetic tree — same pattern as
+// the production-graph checker's FIRERAID_GRAPH_ROOT.
+const ROOT = process.env.FIRERAID_BOUNDARY_ROOT
+  ? resolve(process.env.FIRERAID_BOUNDARY_ROOT)
+  : resolve(fileURLToPath(import.meta.url), "..", "..");
 
-/** The product dependency closure — MUST mirror tsconfig.product.json. */
-const PRODUCT_FILES = [
+/** The product dependency closure — MUST mirror tsconfig.product.json.
+ * Under FIRERAID_BOUNDARY_ROOT the fixtures provide their own closure
+ * entry (the synthetic worker-production.ts) instead. */
+const PRODUCT_FILES = process.env.FIRERAID_BOUNDARY_ROOT
+  ? ["src/worker-production.ts"]
+  : [
   // core (host-neutral)
   "src/core/artifacts.ts",
   "src/core/catalog.ts",
@@ -91,9 +100,33 @@ async function resolveImports(files) {
     }
     const lines = content.split("\n");
     for (let i = 0; i < lines.length; i++) {
+      // FR-RR-37: dynamic imports are edges too. A quoted string OR an
+      // interpolated-free backtick template literal resolves statically;
+      // anything else after `import(` is a computed specifier — recorded
+      // as an UNRESOLVABLE edge (the boundary check below refuses it).
       const m = lines[i].match(/(?:from\s+|import\s*\(\s*)["'](\.[^"']+)["']/);
-      if (!m) continue;
-      const spec = m[1].replace(/\.js$/, ".ts");
+      const dyn = !m
+        ? lines[i].match(/import\s*\(\s*`(\.[^`$]*)`\s*\)/)
+        : null;
+      // FR-RR-48 fix-note: `import("…")` in TYPE position (e.g.
+      // `type CryptoKey = import("node:crypto").webcrypto.CryptoKey`) is a
+      // compile-time type reference, not a runtime dynamic import — strip
+      // type annotations before hunting computed specifiers.
+      const typeStripped = lines[i].replace(/\btype\s+\w+\s*=\s*import\s*\([^)]*\)[^;]*/, "");
+      const computed = !m && !dyn && /import\s*\(\s*[^)\s][^)]*[^)\s]*\)/.test(typeStripped)
+        ? typeStripped.match(/import\s*\(\s*([^)]*)\)/)
+        : null;
+      if (computed) {
+        edges.push({
+          from: file,
+          to: `<computed dynamic import> ${(computed[1] ?? "").trim().slice(0, 40)}`,
+          line: i + 1,
+          text: lines[i].trim(),
+        });
+        continue;
+      }
+      if (!m && !dyn) continue;
+      const spec = (m ? m[1] : dyn[1]).replace(/\.js$/, ".ts");
       const resolvedRel = relative(ROOT, join(dirname(join(ROOT, file)), spec)).replace(/\\/g, "/");
       edges.push({ from: file, to: resolvedRel, line: i + 1, text: lines[i].trim() });
       if (!seen.has(resolvedRel)) queue.push(resolvedRel);
@@ -135,12 +168,31 @@ const VIOLATIONS = [
     name: "product → src/cloudflare import",
     test: (edge) => edge.to.startsWith("src/cloudflare/"),
   },
+  {
+    // FR-RR-37: a computed dynamic import specifier cannot be verified to
+    // stay inside the product closure — refused outright.
+    name: "computed dynamic import",
+    test: (edge) => edge.to.startsWith("<computed dynamic import>"),
+  },
+];
+
+/** FR-RR-48: the violations evaluated PER EDGE (as opposed to file-level
+ * rules like the LLM literal / D1 annotations, which run once per file).
+ * Every entry of VIOLATIONS that names an edge rule MUST appear here —
+ * the omission of "computed dynamic import" from the old inline list is
+ * exactly the defect this closes. */
+const EDGE_VIOLATION_NAMES = [
+  "harness import",
+  "model-provider/openai/browser-use import",
+  "product → src/eval import",
+  "product → src/cloudflare import",
+  "computed dynamic import",
 ];
 
 async function main() {
   const { files, edges } = await resolveImports(PRODUCT_FILES);
 
-  if (!files.includes("src/host-adapter/middleware.ts")) {
+  if (!process.env.FIRERAID_BOUNDARY_ROOT && !files.includes("src/host-adapter/middleware.ts")) {
     console.error("Boundary check misconfigured: product closure did not resolve");
     process.exit(1);
   }
@@ -162,7 +214,11 @@ async function main() {
   }
   for (const edge of edges) {
     for (const v of VIOLATIONS) {
-      if (["harness import", "model-provider/openai/browser-use import", "product → src/eval import", "product → src/cloudflare import"].includes(v.name)) {
+      // FR-RR-48: EVERY edge rule runs against every edge. The old
+      // hand-picked list omitted "computed dynamic import", so a computed
+      // specifier was recorded as an unresolvable edge and then NEVER
+      // evaluated — the violation existed in name only.
+      if (EDGE_VIOLATION_NAMES.includes(v.name)) {
         if (v.test(edge)) {
           found.push(`${edge.from}:${edge.line}: ${v.name} — ${edge.text}`);
         }

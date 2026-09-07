@@ -9,7 +9,7 @@
  *
  *   1. FORMAT parity: cookie value parses with verifySessionEnvelope — one
  *      format, one verifier, both planes.
- *   2. TAMPER: any body/signature edit → readSessionId null (fail-closed).
+ *   2. TAMPER: any body/signature edit → resolveSession null (fail-closed).
  *   3. TTL: an expired envelope is rejected (the context-free tag had NO
  *      server-side lifetime at all).
  *   4. FUTURE-DATED: iat beyond clock slack → rejected.
@@ -46,13 +46,17 @@ describe("host session envelope parity (audit item 9)", () => {
   it("FORMAT parity: the adapter's cookie verifies with the CORE verifier", async () => {
     const adapter = new ReferenceSessionAdapter(SECRET);
     const sid = await adapter.createSession();
-    const cookie = await adapter.sessionCookie(sid);
+    // FR-RR-27: the reference adapter is an issued-hash carrier — the
+    // middleware's GET path always passes the complete issuance; direct
+    // calls in this test do the same.
+    const cookie = await adapter.sessionCookie(sid, {
+      profileVersion: 1,
+      profileKeyId: "default",
+      profileHash: "a".repeat(64),
+    });
     const raw = cookieValue(cookie);
 
-    // FR-RR (P2 sunset rule): the reference adapter issued WITHOUT a hash
-    // keeps legacy fr1 here (this test calls sessionCookie directly, no
-    // hash handed in) — but the GET path now always passes one (next test).
-    expect(raw.startsWith("fr1.")).toBe(true);
+    expect(raw.startsWith("fr2.")).toBe(true);
     const verdict = await verifySessionEnvelope(RING, raw, nowMs());
     expect(verdict.ok).toBe(true);
     if (verdict.ok) {
@@ -69,7 +73,9 @@ describe("host session envelope parity (audit item 9)", () => {
     const sid = await adapter.createSession();
     // What the GET handler now passes: the issued profile's hash.
     const ph = "a".repeat(64);
-    const raw = cookieValue(await adapter.sessionCookie(sid, { profileHash: ph }));
+    const raw = cookieValue(
+      await adapter.sessionCookie(sid, { profileVersion: 1, profileKeyId: "default", profileHash: ph })
+    );
     expect(raw.startsWith("fr2.")).toBe(true);
     const verdict = await verifySessionEnvelope(RING, raw, nowMs());
     expect(verdict.ok).toBe(true);
@@ -80,10 +86,14 @@ describe("host session envelope parity (audit item 9)", () => {
     }
   });
 
-  it("TAMPER: flipped body/signature bit → readSessionId null (fail-closed)", async () => {
+  it("TAMPER: flipped body/signature bit → resolveSession null (fail-closed)", async () => {
     const adapter = new ReferenceSessionAdapter(SECRET);
     const sid = await adapter.createSession();
-    const raw = cookieValue(await adapter.sessionCookie(sid));
+    // FR-RR-27: the reference adapter is an issued-hash carrier — direct
+    // sessionCookie calls must carry a hash (tests use a fixed digest).
+    const raw = cookieValue(
+      await adapter.sessionCookie(sid, { profileVersion: 1, profileKeyId: "default", profileHash: "a".repeat(64) })
+    );
     const [prefix, body, sig] = raw.split(".");
 
     // Flip one character of the body (sid edit attempt).
@@ -95,7 +105,7 @@ describe("host session envelope parity (audit item 9)", () => {
     const req1 = new Request("http://mw/", {
       headers: { cookie: `__Host-fr_sid=${prefix}.${flippedBody}.${sig}` },
     });
-    expect(await tampered.readSessionId(req1)).toBeNull();
+    expect(await tampered.resolveSession(req1)).toBeNull();
 
     // Flip one character of the signature.
     const flippedSig =
@@ -103,21 +113,24 @@ describe("host session envelope parity (audit item 9)", () => {
     const req2 = new Request("http://mw/", {
       headers: { cookie: `__Host-fr_sid=${prefix}.${body}.${flippedSig}` },
     });
-    expect(await tampered.readSessionId(req2)).toBeNull();
+    expect(await tampered.resolveSession(req2)).toBeNull();
 
     // Cross-signing: valid envelope from a DIFFERENT secret → rejected.
     const other = new ReferenceSessionAdapter("other-secret".padEnd(32, "y"));
-    const forged = cookieValue(await other.sessionCookie(sid));
+    const forged = cookieValue(
+      await other.sessionCookie(sid, { profileVersion: 1, profileKeyId: "default", profileHash: "a".repeat(64) })
+    );
     const req3 = new Request("http://mw/", {
       headers: { cookie: `__Host-fr_sid=${forged}` },
     });
-    expect(await tampered.readSessionId(req3)).toBeNull();
+    expect(await tampered.resolveSession(req3)).toBeNull();
 
     // The untampered cookie still verifies.
     const reqOk = new Request("http://mw/", {
       headers: { cookie: `__Host-fr_sid=${raw}` },
     });
-    expect(await tampered.readSessionId(reqOk)).toBe(sid);
+    const ok = await tampered.resolveSession(reqOk);
+    expect(ok?.id).toBe(sid);
   });
 
   it("TTL: an expired envelope is rejected (the old tag had no lifetime)", async () => {
@@ -128,7 +141,7 @@ describe("host session envelope parity (audit item 9)", () => {
     const req = new Request("http://mw/", {
       headers: { cookie: `__Host-fr_sid=${stale}` },
     });
-    expect(await adapter.readSessionId(req)).toBeNull();
+    expect(await adapter.resolveSession(req)).toBeNull();
   });
 
   it("FUTURE-DATED: iat beyond clock slack → rejected", async () => {
@@ -164,10 +177,14 @@ describe("host session envelope parity (audit item 9)", () => {
     if (!bad.ok) expect(bad.code).toBe("UNKNOWN_KEY");
   });
 
-  it("VERSION CARRIAGE: pv records the issuance profile version", async () => {
-    const adapter = new ReferenceSessionAdapter(SECRET, { version: 7 });
+  it("VERSION CARRIAGE: pv records the ISSUANCE profile version (FR-RR-17)", async () => {
+    // FR-RR-17: the adapter no longer owns a version — the issuance call
+    // names pv (and kid), and the adapter signs what it is told.
+    const adapter = new ReferenceSessionAdapter(SECRET);
     const sid = await adapter.createSession();
-    const raw = cookieValue(await adapter.sessionCookie(sid));
+    const raw = cookieValue(
+      await adapter.sessionCookie(sid, { profileVersion: 7, profileKeyId: "default", profileHash: "7".repeat(64) })
+    );
     const verdict = await verifySessionEnvelope(RING, raw, nowMs());
     expect(verdict.ok).toBe(true);
     if (verdict.ok) expect(verdict.payload.pv).toBe(7);
@@ -178,13 +195,20 @@ describe("host session envelope parity (audit item 9)", () => {
     const sid = "parity-session-0001";
     // The adapter signs with Date.now(); capture one envelope and re-derive
     // the core signature for the SAME (ring, sid, iat, pv) extracted from it.
-    const raw = cookieValue(await adapter.sessionCookie(sid));
+    // FR-RR-27: the reference adapter is an issued-hash carrier — the call
+    // carries a (fixed) hash; envelope PARITY is about the SIGNATURE over
+    // (ring, sid, iat, pv), which does not cover the ph claim's VALUE.
+    const raw = cookieValue(
+      await adapter.sessionCookie(sid, { profileVersion: 1, profileKeyId: "default", profileHash: "a".repeat(64) })
+    );
     const [, body, sig] = raw.split(".");
     const payload = JSON.parse(atob(body.replace(/-/g, "+").replace(/_/g, "/"))) as {
       iat: number;
       pv: number;
     };
-    const expected = await signSessionEnvelope(RING, sid, payload.iat, payload.pv);
+    const expected = await signSessionEnvelope(RING, sid, payload.iat, payload.pv, {
+      profileHash: "a".repeat(64),
+    });
     expect(expected).toBe(raw);
     expect(sig.length).toBe(43); // base64url of 32 bytes, unpadded
   });

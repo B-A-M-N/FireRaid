@@ -75,13 +75,13 @@ async function listen(server: http.Server): Promise<number> {
 describe("P0-6: publicOrigin parsing", () => {
   it("throws at construction on a malformed URL", () => {
     expect(() =>
-      createOriginServer({ middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, routes: ROUTES, publicOrigin: "not a url" })
+      createOriginServer({ onAssessment: () => {}, middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, routes: ROUTES, publicOrigin: "not a url" })
     ).toThrow(/not a valid URL/);
   });
 
   it("throws on a non-http(s) scheme", () => {
     expect(() =>
-      createOriginServer({ middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, routes: ROUTES, publicOrigin: "ftp://example.org" })
+      createOriginServer({ onAssessment: () => {}, middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, routes: ROUTES, publicOrigin: "ftp://example.org" })
     ).toThrow(/scheme must be http: or https:/);
   });
 
@@ -89,7 +89,7 @@ describe("P0-6: publicOrigin parsing", () => {
     const cases = ["https://example.org/signup", "https://example.org/?a=1", "https://example.org/#x", "https://user:pass@example.org"];
     for (const bad of cases) {
       expect(() =>
-        createOriginServer({ middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, routes: ROUTES, publicOrigin: bad }),
+        createOriginServer({ onAssessment: () => {}, middlewareDeps: deps(), htmlLoader: async () => SIGNUP_HTML, routes: ROUTES, publicOrigin: bad }),
         bad
       ).toThrow(/scheme \+ host/);
     }
@@ -107,6 +107,7 @@ describe("P0-6: publicOrigin parsing", () => {
     const seenUrls: string[] = [];
     const d = deps();
     const server = createOriginServer({
+      onAssessment: () => {},
       middlewareDeps: {
         ...d,
         verification: {
@@ -153,6 +154,7 @@ describe("P0-6: publicOrigin parsing", () => {
     // priority over the base. P0-6's promise is that the pinned origin
     // governs; such a request is a client error, not something to re-home.
     const server = createOriginServer({
+      onAssessment: () => {},
       middlewareDeps: deps(),
       htmlLoader: async () => SIGNUP_HTML,
       routes: ROUTES,
@@ -191,6 +193,7 @@ describe("P0-6: publicOrigin parsing", () => {
 describe("P0-7: maxHeaderSize at construction", () => {
   it("rejects a header block over the configured limit at the socket level", async () => {
     const server = createOriginServer({
+      onAssessment: () => {},
       middlewareDeps: deps(),
       htmlLoader: async () => SIGNUP_HTML,
 
@@ -228,6 +231,7 @@ describe("P0-7: maxHeaderSize at construction", () => {
 
   it("a header block under the limit is served normally", async () => {
     const server = createOriginServer({
+      onAssessment: () => {},
       middlewareDeps: deps(),
       htmlLoader: async () => SIGNUP_HTML,
 
@@ -237,5 +241,46 @@ describe("P0-7: maxHeaderSize at construction", () => {
     const port = await listen(server);
     const res = await fetch(`http://127.0.0.1:${port}/signup`);
     expect(res.status).toBe(200);
+  });
+});
+
+// ── FR-RR-16: onAssessment is the required production decision channel ──
+
+describe("FR-RR-16: onAssessment is required on the production origin", () => {
+  it("construction without onAssessment throws (a server that discards every assessment is a config error)", () => {
+    const options = {
+      middlewareDeps: deps(),
+      htmlLoader: async () => SIGNUP_HTML,
+      routes: ROUTES,
+      // A JS host can omit the (typed-required) hook; the runtime check
+      // must catch it.
+      onAssessment: undefined,
+    } as unknown as Parameters<typeof createOriginServer>[0];
+    expect(() => createOriginServer(options)).toThrow(/onAssessment is REQUIRED/);
+  });
+
+  it("the evaluation origin permits an omitted onAssessment (warned, not refused)", async () => {
+    const { createEvaluationOriginServer } = await import("../../src/eval/evaluation-origin.js");
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (m?: unknown) => warns.push(String(m));
+    let server: http.Server | undefined;
+    try {
+      server = createEvaluationOriginServer({
+        middlewareDeps: deps(),
+        htmlLoader: async () => SIGNUP_HTML,
+        routes: ROUTES,
+        onAssessment: undefined,
+      } as unknown as Parameters<typeof createEvaluationOriginServer>[0]);
+      expect(warns.some((w) => w.includes("onAssessment is REQUIRED"))).toBe(true);
+      const port = await new Promise<number>((resolve) => {
+        server!.listen(0, "127.0.0.1", () => resolve((server!.address() as AddressInfo).port));
+      });
+      const res = await fetch(`http://127.0.0.1:${port}/signup`);
+      expect(res.status).toBe(200);
+    } finally {
+      console.warn = origWarn;
+      if (server?.listening) await closeServer(server);
+    }
   });
 });

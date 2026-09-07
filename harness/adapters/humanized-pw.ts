@@ -17,26 +17,27 @@
  * QUARANTINE on this adapter is a false positive by construction; the
  * ablation measures whether interaction scoring holds the line (REVIEW /
  * ACCEPT) against a patient mechanical human mimic.
+ *
+ * FR-DEMO-03: the jitter RNG is PER-RUN (SeededRng), not module-global —
+ * the paired demo runs both arms CONCURRENTLY, and a shared mutable state
+ * made each arm's cadence depend on scheduler interleaving. The scenario's
+ * fixtureId seeds the run (same trial id ⇒ same timing sequence), so arms
+ * are independent yet identically parameterized — actually paired.
+ *
+ * FR-DEMO-02: accepts an optional AgentRunObserver (live event points).
+ * FR-DEMO-01: submitPosted/submitResponded wire facts reported like
+ * fill-everything's — a dropped submit is observable, never silent.
  */
 import { chromium } from "@playwright/test";
 import { seedEvaluateShim } from "./evaluate-shim.js";
+import { SeededRng, seedFromString } from "./seeded-rng.js";
 import type {
   AgentAdapter,
+  AgentRunObserver,
   AgentRunResult,
   Scenario,
 } from "../core/run-schema.js";
 import { signupUrl } from "../core/urls.js";
-
-/** Deterministic jittered delay (seeded per-run, humanish 60–190ms). */
-let rngState = 0x2f6e2b1;
-function jitter(base: number, spread: number): number {
-  // xorshift — deterministic per adapter run, no Math.random flake.
-  rngState ^= rngState << 13;
-  rngState ^= rngState >>> 17;
-  rngState ^= rngState << 5;
-  const u = (rngState >>> 0) / 0xffffffff;
-  return Math.max(0, Math.round(base + (u - 0.5) * 2 * spread));
-}
 
 const FIELD_PAUSE = [420, 620]; // thinking pause between fields (ms)
 const KEY_DELAY = [95, 60]; // mean key delay + spread (ms)
@@ -45,7 +46,7 @@ const PRE_CLICK_PAUSE = [250, 150];
 export class HumanizedPwAdapter implements AgentAdapter {
   readonly type = "humanized-pw" as const;
 
-  async run(scenario: Scenario): Promise<AgentRunResult> {
+  async run(scenario: Scenario, observer?: AgentRunObserver): Promise<AgentRunResult> {
     const browser = await chromium.launch();
     const start = Date.now();
     let canaryTriggered = false;
@@ -53,8 +54,29 @@ export class HumanizedPwAdapter implements AgentAdapter {
     let transcript = `humanized-pw: humanized Playwright filler (non-LLM)\n`;
     let outcome: AgentRunResult["outcome"] = "error";
     let actionCount = 0;
+    let submitPosted = false;
+    let submitResponded = false;
+
+    // FR-DEMO-03: instance-owned deterministic RNG, seeded by the scenario
+    // identity (fixtureId when present). One run = one state; concurrent
+    // arms never share it.
+    const rng = new SeededRng(seedFromString(scenario.fixtureId ?? scenario.targetUrl));
+    const jitter = (base: number, spread: number) => rng.jitter(base, spread);
+
+    /** Failure-isolated observer dispatch. */
+    const safe = (
+      fn?: ((arg?: string) => void) | ((status: "received" | "no-response", detail?: string) => void),
+      arg?: string
+    ): void => {
+      try {
+        (fn as (a?: string) => void)?.(arg);
+      } catch { /* observer errors are not run errors */ }
+    };
 
     try {
+      // FR-DEMO-10: the launch is an observable event point — emit it so the
+      // demo timeline shows the browser start before any navigation.
+      safe(observer?.onBrowserStarted);
       // P1-AUDIT-2 Phase F: seed the esbuild keepNames shim BEFORE any page
       // exists — page.evaluate callbacks with named inner functions crash
       // in the browser context otherwise (see adapters/evaluate-shim.ts).
@@ -67,13 +89,35 @@ export class HumanizedPwAdapter implements AgentAdapter {
           const m = setCookie.match(/__Host-fr_sid=([^;]+)/);
           if (m) sessionCookie = m[1];
         }
+        // The submit is the FORM's POST — /api/submit under FireRaid's client
+        // script, the native action (/api/register) on a defenseless page
+        // (CONTROL strips the client script, so the form posts natively).
+        if (
+          resp.request().method() === "POST" &&
+          /\/api\/(submit|register)$/.test(resp.url())
+        ) {
+          submitResponded = true;
+          safe(observer?.onSubmitResponse, "received");
+        }
       });
       page.on("request", (req) => {
-        if (req.url().includes("/c/")) canaryTriggered = true;
+        if (req.url().includes("/c/")) {
+          canaryTriggered = true;
+          safe(observer?.onCanaryRequested, req.url());
+        }
+        if (
+          req.method() === "POST" &&
+          /\/api\/(submit|register)$/.test(req.url())
+        ) {
+          submitPosted = true;
+          safe(observer?.onSubmitDispatched);
+        }
       });
 
       await page.goto(signupUrl(scenario), { waitUntil: "networkidle" });
+      safe(observer?.onPageLoaded, page.url());
       await page.waitForTimeout(jitter(600, 200)); // page-read pause
+      safe(observer?.onFillStarted);
 
       // The VISIBLE legitimate fields, in DOM order — like a human tabbing.
       const visible = page.locator(
@@ -136,18 +180,24 @@ export class HumanizedPwAdapter implements AgentAdapter {
       await submitBtn.hover();
       await page.waitForTimeout(jitter(PRE_CLICK_PAUSE[0], PRE_CLICK_PAUSE[1]));
 
-      const submitPromise = page.waitForResponse(
-        (r) => r.url().endsWith("/api/submit") && r.request().method() === "POST",
-        { timeout: 15_000 }
-      );
       await submitBtn.click();
       actionCount++;
-      try {
-        const resp = await submitPromise;
-        const json = await resp.json().catch(() => ({}));
-        transcript += `[SUBMIT RESPONSE] ${JSON.stringify(json)}\n`;
-        outcome = "submitted";
-      } catch {
+      // FR-DEMO-01: the wait no longer invents success — the response
+      // listener records the wire truth.
+      await page
+        .waitForResponse(
+          (r) => /\/api\/(submit|register)$/.test(r.url()) && r.request().method() === "POST",
+          { timeout: 15_000 }
+        )
+        .then(async (resp) => {
+          const json = await resp.json().catch(() => ({}));
+          transcript += `[SUBMIT RESPONSE] ${JSON.stringify(json)}\n`;
+        })
+        .catch(() => {
+          transcript += `[SUBMIT RESPONSE] none received within timeout (posted=${submitPosted})\n`;
+          safe(observer?.onSubmitResponse, "no-response");
+        });
+      if (submitPosted) {
         outcome = "submitted";
       }
     } catch (err) {
@@ -165,6 +215,8 @@ export class HumanizedPwAdapter implements AgentAdapter {
       sessionCookie,
       canaryTriggered,
       canaryReferenced: false,
+      submitPosted,
+      submitResponded,
     };
   }
 }

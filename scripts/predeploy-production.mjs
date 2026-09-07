@@ -159,17 +159,22 @@ if (!hostname) {
   pass("production-hostname", `TURNSTILE_EXPECTED_HOSTNAME=${hostname}`);
 }
 
-// FR-P1-07: production must declare an authoritative edge limiter for
-// /api/admin/login. NOTE: this value is an OPERATOR ATTESTATION — the env
-// var names the edge limiter; it is not (yet) programmatic proof an edge
-// rule exists. Closure 7 tracks stricter verification.
+// FR-P1-07 + FR-RR-51: production must declare an authoritative edge
+// limiter for /api/admin/login. The check is named
+// `rate-limit-login-ATTESTED` on purpose: this value is an OPERATOR
+// ATTESTATION — the env var names the edge limiter; it is NOT programmatic
+// proof an edge rule exists, is enabled, targets /api/admin/login, or
+// carries the right action. The name keeps the evidence honest (an
+// attestation must never masquerade as a verification); a future
+// Cloudflare-API-based verification would add a separate
+// `rate-limit-login-verified` check rather than upgrade this one silently.
 const rateLimitLogin = productionVars.FIRERAID_RATE_LIMIT_LOGIN;
 if (!rateLimitLogin) {
-  fail("rate-limit-login", "production env FIRERAID_RATE_LIMIT_LOGIN is unset — declare the authoritative edge rate-limiter (WAF/Access/ratelimit) for /api/admin/login");
+  fail("rate-limit-login-attested", "production env FIRERAID_RATE_LIMIT_LOGIN is unset — declare the authoritative edge rate-limiter (WAF/Access/ratelimit) for /api/admin/login");
 } else if (rateLimitLogin === "REPLACE_WITH_EDGE_LIMITER_NAME") {
-  fail("rate-limit-login", "FIRERAID_RATE_LIMIT_LOGIN still carries the tracked placeholder — set it to the actual limiter rule/plan name");
+  fail("rate-limit-login-attested", "FIRERAID_RATE_LIMIT_LOGIN still carries the tracked placeholder — set it to the actual limiter rule/plan name");
 } else {
-  pass("rate-limit-login", `FIRERAID_RATE_LIMIT_LOGIN=${rateLimitLogin} (operator attestation of the edge limiter)`);
+  pass("rate-limit-login-attested", `FIRERAID_RATE_LIMIT_LOGIN=${rateLimitLogin} (operator ATTESTATION of the edge limiter — not programmatic verification)`);
 }
 
 // ── Production entrypoint import graph (FR-P1-05) ────────────────────────

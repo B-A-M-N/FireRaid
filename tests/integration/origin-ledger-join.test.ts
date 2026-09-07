@@ -30,6 +30,7 @@ import { startOriginLedgerRuntime, trialEmail } from "../../harness/core/origin-
 import { RawHttpAdapter } from "../../harness/adapters/raw-http.js";
 import { ABLATION_RECIPES } from "../../src/core/profile.js";
 import type { Scenario } from "../../harness/core/run-schema.js";
+import { issuedCookieForProfile } from "../unit/helpers/test-issuance.js";
 
 const SECRET = "origin-ledger-test-secret".padEnd(32, "x");
 
@@ -114,7 +115,10 @@ describe("Phase C: real agent → middleware → origin ledger", () => {
     const field = profile.decoyField!.fieldName;
 
     // POST through the facade: signed cookie + keyed CSRF + nonce-in-field.
-    const cookie = await session.sessionCookie(sessionId);
+    // The cookie must sign the hash of the profile the facade will ACTUALLY
+    // derive (the FULL recipe in lab mode) — the FR-RR-27 drift check
+    // fails closed on any other issuance, by design.
+    const cookie = await issuedCookieForProfile(session, sessionId, profile);
     const csrf = await makeCsrf(SECRET, sessionId);
     const resp = await fetch(`${runtime.facadeUrl}/api/submit`, {
       method: "POST",
@@ -215,10 +219,18 @@ describe("Phase C: real agent → middleware → origin ledger", () => {
     const email = trialEmail("exp-join-test", "drain-then-submit-rep0");
 
     const { makeCsrf, ReferenceSessionAdapter } = await import("../../src/host-adapter/index.js");
+    const { deriveProfilePure: deriveForDrain } = await import("../../src/core/profile.js");
 
     const session = new ReferenceSessionAdapter(SECRET);
     const sessionId = await session.createSession();
-    const cookie = await session.sessionCookie(sessionId);
+    // Sign the hash of the profile the facade ACTUALLY derives for this
+    // session (INTERACTION_ONLY recipe) — the FR-RR-27 drift check fails
+    // closed on any other issuance, by design.
+    const drainProfile = await deriveForDrain(
+      { secret: SECRET, version: 1, sessionId, mode: "production" },
+      ABLATION_RECIPES.INTERACTION_ONLY
+    );
+    const cookie = await issuedCookieForProfile(session, sessionId, drainProfile);
     const csrf = await makeCsrf(SECRET, sessionId);
     const post = async (path: string, body: unknown) =>
       fetch(`${runtime!.facadeUrl}${path}`, {

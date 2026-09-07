@@ -20,11 +20,23 @@
  * MUST NOT trigger decoys (it is the legitimate-user proxy); fill-everything
  * MUST trigger them (it is the trap-springer). The pair brackets the decoy
  * field's true/false-positive behavior.
+ *
+ * FR-DEMO-02: accepts an optional AgentRunObserver and emits observations
+ * AT THE EVENT POINT (page load, first fill, canary fetch, submit POST,
+ * submit response) — the demo timeline streams live facts, not post-run
+ * reconstructions.
+ *
+ * FR-DEMO-01: `outcome` no longer collapses a failed submit-response wait
+ * into "submitted". The adapter reports whether the submit POST was
+ * observed AND whether a response was received; the demo coordinator
+ * combines these with server truth — a run whose response never arrived
+ * can be INCONCLUSIVE, never silently BLOCKED.
  */
 import { chromium } from "@playwright/test";
 import { seedEvaluateShim } from "./evaluate-shim.js";
 import type {
   AgentAdapter,
+  AgentRunObserver,
   AgentRunResult,
   Scenario,
 } from "../core/run-schema.js";
@@ -33,7 +45,7 @@ import { signupUrl } from "../core/urls.js";
 export class FillEverythingAdapter implements AgentAdapter {
   readonly type = "fill-everything" as const;
 
-  async run(scenario: Scenario): Promise<AgentRunResult> {
+  async run(scenario: Scenario, observer?: AgentRunObserver): Promise<AgentRunResult> {
     const browser = await chromium.launch();
     const start = Date.now();
     let canaryTriggered = false;
@@ -41,6 +53,21 @@ export class FillEverythingAdapter implements AgentAdapter {
     let transcript = `fill-everything: omnivorous filler (non-LLM)\n`;
     let outcome: AgentRunResult["outcome"] = "error";
     let actionCount = 0;
+    // FR-DEMO-01: the wire facts the ground-truth model needs. submitPosted
+    // is true the moment the POST leaves the browser; submitResponded is
+    // true only when the browser actually received the response.
+    let submitPosted = false;
+    let submitResponded = false;
+
+    /** Failure-isolated observer dispatch — a broken stream never fails a run. */
+    const safe = (
+      fn?: ((arg?: string) => void) | ((status: "received" | "no-response", detail?: string) => void),
+      arg?: string
+    ): void => {
+      try {
+        (fn as (a?: string) => void)?.(arg);
+      } catch { /* observer errors are not run errors */ }
+    };
 
     try {
       // P1-AUDIT-2 Phase F: seed the esbuild keepNames shim BEFORE any page
@@ -55,12 +82,33 @@ export class FillEverythingAdapter implements AgentAdapter {
           const m = setCookie.match(/__Host-fr_sid=([^;]+)/);
           if (m) sessionCookie = m[1];
         }
+        // The submit is the FORM's POST — /api/submit under FireRaid's client
+        // script, the native action (/api/register) on a defenseless page
+        // (CONTROL strips the client script, so the form posts natively).
+        if (
+          resp.request().method() === "POST" &&
+          /\/api\/(submit|register)$/.test(resp.url())
+        ) {
+          submitResponded = true;
+          safe(observer?.onSubmitResponse, "received");
+        }
       });
       page.on("request", (req) => {
-        if (req.url().includes("/c/")) canaryTriggered = true;
+        if (req.url().includes("/c/")) {
+          canaryTriggered = true;
+          safe(observer?.onCanaryRequested, req.url());
+        }
+        if (
+          req.method() === "POST" &&
+          /\/api\/(submit|register)$/.test(req.url())
+        ) {
+          submitPosted = true;
+          safe(observer?.onSubmitDispatched);
+        }
       });
 
       await page.goto(signupUrl(scenario), { waitUntil: "networkidle" });
+      safe(observer?.onPageLoaded, page.url());
 
       // EVERY text-entry element — visible or not, decoy or not, ANY input
       // type that carries text (text/email/password/tel/url/search/number/
@@ -83,6 +131,7 @@ export class FillEverythingAdapter implements AgentAdapter {
           // fill() works on visually-hidden inputs (it does not require
           // visibility) — which is exactly the omnivore behavior.
           await el.fill(value, { timeout: 2000 });
+          if (filled === 0) safe(observer?.onFillStarted);
           filled++;
           actionCount++;
         } catch {
@@ -107,17 +156,27 @@ export class FillEverythingAdapter implements AgentAdapter {
       actionCount++;
 
       // Submit via the visible submit button.
-      const submitPromise = page.waitForResponse(
-        (r) => r.url().endsWith("/api/submit") && r.request().method() === "POST",
-        { timeout: 10000 }
-      );
       await page.locator('#submit-btn, button[type="submit"]').first().click();
-      try {
-        const resp = await submitPromise;
-        const json = await resp.json().catch(() => ({}));
-        transcript += `[SUBMIT RESPONSE] ${JSON.stringify(json)}\n`;
-        outcome = "submitted";
-      } catch {
+      // FR-DEMO-01: the wait no longer invents success. The response
+      // listener above records what actually happened on the wire.
+      await page
+        .waitForResponse(
+          (r) => /\/api\/(submit|register)$/.test(r.url()) && r.request().method() === "POST",
+          { timeout: 10_000 }
+        )
+        .then(async (resp) => {
+          const json = await resp.json().catch(() => ({}));
+          transcript += `[SUBMIT RESPONSE] ${JSON.stringify(json)}\n`;
+        })
+        .catch(() => {
+          transcript += `[SUBMIT RESPONSE] none received within timeout (posted=${submitPosted})\n`;
+          safe(observer?.onSubmitResponse, "no-response");
+        });
+      // "submitted" now MEANS the POST was observed leaving the browser —
+      // the outcome enum's contract. A dispatched-but-unanswered submit
+      // still reports submitted (the POST is real); the coordinator uses
+      // submitResponded for its ground-truth model.
+      if (submitPosted) {
         outcome = "submitted";
       }
     } catch (err) {
@@ -135,6 +194,8 @@ export class FillEverythingAdapter implements AgentAdapter {
       sessionCookie,
       canaryTriggered,
       canaryReferenced: false,
+      submitPosted,
+      submitResponded,
     };
   }
 }

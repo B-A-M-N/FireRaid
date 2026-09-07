@@ -86,7 +86,7 @@ describe("P0 origin opacity: decision-blind wire", () => {
       // Stub upstream: records forwards; the origin's receipts don't depend
       // on it (the assertion is about FireRaid's wire, not the upstream's).
       enforcement: {
-        allow: async () => true,
+        allow: async () => ({ kind: "created" as const }),
         deny: () => {},
       },
       canaryStore: new DurableCanaryStore(),

@@ -20,13 +20,25 @@
  * Comments are stripped first so a prose mention of "src/eval/" in the
  * entrypoint header cannot defeat the check.
  *
+ * P2 (rereview): DYNAMIC imports are edges too. `await import("../eval/x.js")`
+ * reaches the same bundle as a static import (wrangler's bundler follows
+ * string-literal dynamic specifiers), so this gate matches BOTH import
+ * forms. A computed specifier (`import(variable)`) is UNVERIFIABLE here and
+ * fails closed: the bundler would either error on it or emit an
+ * unverifiable edge, and neither belongs in the production graph.
+ *
  * Exit 1 on any reachable forbidden import; 0 otherwise.
  */
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// P2 (testability): the root defaults to the repo but can be overridden
+// (FIRERAID_GRAPH_ROOT) so the behavioral tests can point the gate at a
+// synthetic fixture tree without touching the real one.
+const ROOT = process.env.FIRERAID_GRAPH_ROOT
+  ? resolve(process.env.FIRERAID_GRAPH_ROOT)
+  : resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Forbidden subtrees/films (repo-relative prefixes). */
 const FORBIDDEN = [
@@ -99,22 +111,45 @@ function walk(file) {
   const re = /import\s+(?!type\b)[\s\S]*?from\s+["']([^"']+)["']|import\s+["']([^"']+)["']/g;
   let m;
   while ((m = re.exec(src))) {
-    const spec = m[1] ?? m[2];
-    const target = resolveSpecifier(spec, dirname(file));
-    if (!target) continue;
-    const trel = target.replace(`${ROOT}/`, "");
-    if (FORBIDDEN.some((f) => f.endsWith("/") ? trel.startsWith(f) : trel === f)) {
+    recordEdge(rel, m[1] ?? m[2], dirname(file));
+  }
+  // P2: string-literal DYNAMIC imports — `await import("./x.js")` — are
+  // real bundle edges (the wrangler bundler follows them). The static
+  // regex above does not match the `import(` form, so scan for it
+  // explicitly. FR-RR-37: the accepted literal forms are quotes AND a
+  // backtick template literal WITHOUT interpolation (`` import(`./x.js`) ``
+  // resolves exactly like the quoted form, so skipping it was an invisible
+  // edge). A template WITH `${` or any other expression is unverifiable —
+  // itself a violation (fail closed — no unverifiable edges in the
+  // production graph).
+  const dynRe = /\bimport\s*\(\s*("[^"]*"|'[^']*'|`[^`$]*`)\s*\)/g;
+  while ((m = dynRe.exec(src))) {
+    recordEdge(rel, m[1].slice(1, -1), dirname(file));
+  }
+  const computedRe = /\bimport\s*\(\s*[^)]*\)/g;
+  while ((m = computedRe.exec(src))) {
+    // Skip the literal forms already handled above (quote or plain backtick).
+    if (/^import\s*\(\s*("[^"]*"|'[^']*'|`[^`$]*`)\s*\)$/.test(m[0].trim())) continue;
+    violations.push({ from: rel, to: `<computed dynamic import> ${m[0].slice(0, 60)}` });
+  }
+}
+
+/** Register an import edge: forbidden-target check + recursion. */
+function recordEdge(rel, spec, fromDir) {
+  const target = resolveSpecifier(spec, fromDir);
+  if (!target) return;
+  const trel = target.replace(`${ROOT}/`, "");
+  if (FORBIDDEN.some((f) => f.endsWith("/") ? trel.startsWith(f) : trel === f)) {
+    violations.push({ from: rel, to: trel });
+  }
+  if (FORBIDDEN_MODULES.has(trel)) {
+    // Even if not a direct match above, a lab module import is a violation
+    // whether it resolves to .ts or .js — record it.
+    if (!violations.some((v) => v.from === rel && v.to === trel)) {
       violations.push({ from: rel, to: trel });
     }
-    if (FORBIDDEN_MODULES.has(trel)) {
-      // Even if not a direct match above, a lab module import is a violation
-      // whether it resolves to .ts or .js — record it.
-      if (!violations.some((v) => v.from === rel && v.to === trel)) {
-        violations.push({ from: rel, to: trel });
-      }
-    }
-    walk(target);
   }
+  walk(target);
 }
 
 const entry = resolve(ROOT, "src/worker-production.ts");

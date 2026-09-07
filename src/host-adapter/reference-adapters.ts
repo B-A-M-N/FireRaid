@@ -11,6 +11,9 @@ import type {
   HostSubmissionStore,
   HostSubmissionClaimResult,
   FinalSubmissionOutcome,
+  FinalSubmissionRecord,
+  FinalizeDecisionResult,
+  AssessmentSnapshot,
   EnforcementResult,
 } from "./interface.js";
 import { submissionIdempotencyKey } from "./interface.js";
@@ -21,7 +24,8 @@ import {
 } from "../core/session-envelope.js";
 import type { ProfileKeyRing } from "../core/session.js";
 import { validateTelemetryBatch, type ValidatedEvent } from "../security/request-validation.js";
-import type { HostTelemetryIngest, HostSessionContext, VerificationInput } from "./interface.js";
+import type { HostTelemetryIngest, HostSessionContext, HostSessionIssuance, VerificationInput } from "./interface.js";
+import { resolveKeySecret } from "./profile/resolve-session-profile.js";
 import type { DefenseProfile } from "../types/profile.js";
 import { getPolicyOrThrow, type ScoringPolicy } from "../core/decision.js";
 
@@ -54,20 +58,30 @@ const SESSION_TTL_S = 30 * 60;
  */
 export class ReferenceSessionAdapter implements HostSessionAdapter {
   private readonly ring: ProfileKeyRing;
-  private readonly version: number;
+
+  /**
+   * FR-RR-27: the reference adapter always signs the issued profile hash
+   * (fr2) and always returns it from resolveSession — the drift check has
+   * full coverage on this carrier.
+   */
+  readonly profileIntegrity = "issued-hash" as const;
 
   /**
    * Create a session adapter.
    * - (secret, opts?) — legacy single-key constructor (synthesizes a ring).
    * - (ring, opts?) — new constructor accepting a full ProfileKeyRing.
+   *
+   * FR-RR-17: the adapter no longer owns a profile version. The DEPRECATED
+   * `opts.version` is accepted (and silently ignored with a warning in
+   * development) so old wirings keep constructing — but the version that
+   * lands in a session envelope now comes ONLY from the middleware's
+   * issuance call, the single configuration source.
    */
   constructor(secretOrRing: string | ProfileKeyRing, opts?: { version?: number; keyId?: string }) {
     if (typeof secretOrRing === "string") {
       this.ring = { current: { id: opts?.keyId ?? "default", secret: secretOrRing } };
-      this.version = opts?.version ?? 1;
     } else {
       this.ring = secretOrRing;
-      this.version = opts?.version ?? 1;
     }
   }
 
@@ -77,13 +91,32 @@ export class ReferenceSessionAdapter implements HostSessionAdapter {
       .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
-  async sessionCookie(sessionId: string, envelope?: { profileHash?: string }): Promise<string> {
-    // FR-RR (P2 sunset rule): when the middleware hands the issued profile
-    // hash, issue the fr2 format carrying the signed `ph` claim (Worker
-    // parity) so the host plane's stateless sessions get the same drift
-    // check at reconstruction. Legacy fr1 issuance here would silently
-    // create sessions whose treatment can never be verified.
-    const signed = await signSessionEnvelope(this.ring, sessionId, Date.now(), this.version, envelope);
+  async sessionCookie(sessionId: string, issuance?: HostSessionIssuance): Promise<string> {
+    // FR-RR-17: the adapter signs what FireRaid tells it was issued — the
+    // profile version and key id come from the issuance call, never from
+    // adapter-local configuration. The profile hash (required on the fr2
+    // path) selects the fr2 format and carries the signed drift anchor.
+    // FR-RR-27: with profileIntegrity === "issued-hash", a hashless
+    // issuance is a CALLER BUG — this adapter's guarantee is that every
+    // cookie it mints carries the signed hash, so it throws rather than
+    // silently minting an unverifiable fr1 carrier.
+    if (issuance?.profileHash === undefined) {
+      throw new Error(
+        "ReferenceSessionAdapter: profileIntegrity 'issued-hash' requires issuance.profileHash — " +
+          "the middleware must pass the complete HostSessionIssuance (hashless carriers are an " +
+          "evaluation-plane posture, not this adapter's contract)"
+      );
+    }
+    const pv = issuance.profileVersion;
+    const kid = issuance?.profileKeyId ?? this.ring.current.id;
+    const signed = await signSessionEnvelope(
+      // Sign under the ISSUING key (the issuance names it).
+      { ...this.ring, current: { id: kid, secret: resolveKeySecret(this.ring, kid) } },
+      sessionId,
+      Date.now(),
+      pv,
+      { profileHash: issuance.profileHash }
+    );
     return `${SESSION_COOKIE}=${signed}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_S}`;
   }
 
@@ -93,18 +126,17 @@ export class ReferenceSessionAdapter implements HostSessionAdapter {
     return verdict.ok ? verdict.payload : null;
   }
 
-  async readSessionId(req: Request): Promise<string | null> {
-    const raw = this.rawCookieValue(req);
-    if (!raw) return null;
-    const payload = await this.verifiedPayload(raw);
-    return payload ? payload.sid : null;
-  }
-
   /**
    * P1-1: the VERIFIED context — the envelope's own pv/kid/iat, not the
    * deployment defaults. Middleware derives the session's profile with
    * THIS pv so a mid-session key/version bump cannot silently re-derive a
    * different treatment for an in-flight session.
+   *
+   * FR-RR-12: the fr2 envelope's SIGNED profile hash (`ph`) is surfaced as
+   * `profileHash` instead of being dropped after signature verification.
+   * The signature proves the hash is the one issuance recorded; the
+   * middleware's derive-and-verify step uses it to prove the treatment it
+   * is about to evaluate against is the treatment that was issued.
    */
   async resolveSession(req: Request): Promise<HostSessionContext | null> {
     const raw = this.rawCookieValue(req);
@@ -116,6 +148,7 @@ export class ReferenceSessionAdapter implements HostSessionAdapter {
       profileVersion: payload.pv,
       keyId: payload.kid,
       issuedAt: payload.iat,
+      ...(payload.ph !== undefined ? { profileHash: payload.ph } : {}),
     };
   }
 
@@ -326,9 +359,16 @@ export class ReferenceTelemetryAdapter implements HostTelemetryAdapter {
  */
 export type { EnforcementResult } from "./interface.js";
 
-/** HTTP statuses the reference adapter treats as TRANSIENT upstream
- * failures (worth a durable retry), as opposed to business rejections
- * (permanent — the upstream's own answer about this application). */
+/**
+ * FR-RR-13 — HTTP statuses the reference adapter treats as TRANSIENT
+ * upstream failures (worth reconciliation), as opposed to business
+ * rejections (permanent — the upstream's own answer about this
+ * application). A received-and-answered retryable status is still
+ * AMBIGUOUS about whether the upstream committed before failing (an
+ * origin can INSERT+COMMIT and then throw before its handler returns —
+ * or a reverse proxy can fail after the upstream did the work), so the
+ * classification carries uncertain: true and the claim slot is held.
+ */
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 /**
@@ -342,11 +382,40 @@ const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
  * (P0-8: the previous `return resp.ok` / `catch { return false }` collapsed
  * 409-duplicate, 422-invalid, upstream 5xx, timeout, and connection-refused
  * into one boolean — indistinguishable to every consumer downstream.)
+ *
+ * FR-RR-13 — AMBIGUITY IS CONSERVATIVE BY DEFAULT. The Fetch API gives no
+ * protocol-level proof of WHEN a thrown failure happened relative to the
+ * request hitting the origin: a TypeError can surface after the origin
+ * received the POST, committed the account, and dropped the socket before
+ * replying. This adapter therefore classifies EVERY fetch() failure and
+ * every received-but-ambiguous answer as an UNCERTAIN transport failure —
+ * the middleware holds the session's forward slot on those (fail closed,
+ * operator reconciliation) instead of releasing it for an automatic retry
+ * that could create a second irreversible forward. Only a response with
+ * positive semantics settles the outcome:
+ *   - a documented CREATED status (createdStatuses, default [201] —
+ *     plain `resp.ok` would treat a 202 Accepted as a durable create)
+ *     → created;
+ *   - a definite business rejection (the other 4xx: received, considered,
+ *     refused) → business-rejected;
+ *   - anything else → transport-failure, uncertain.
+ * A host whose upstream has richer application semantics wraps or replaces
+ * this adapter (the HostEnforcementAdapter seam) rather than loosening
+ * these defaults.
  */
 export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
   /** Forward timeout (ms) — a hung upstream is a transport failure, not a
    * successful no-op. AbortSignal so the socket is actually released. */
   forwardTimeoutMs = 10_000;
+  /**
+   * FR-RR-13: the response statuses this upstream DOCUMENTS as "the
+   * requested account is durably created". Default [201] — 201 Created is
+   * the one status whose HTTP semantics assert a resource was created.
+   * Any other 2xx (200/202/204, …) is deliberately NOT a create: it may
+   * be queued, proxied, or merely acknowledged. A host whose upstream
+   * answers a different documented status passes that here explicitly.
+   */
+  createdStatuses: readonly number[] = [201];
 
   async allow(
     upstreamUrl: string,
@@ -397,36 +466,67 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
           : /redirect/i.test(causeMsg)
             ? "upstream_redirect"
             : "network_error";
-      // A timeout AFTER the request was dispatched cannot rule out that the
-      // upstream received (and committed) it — uncertain. A redirect
-      // rejection means the upstream RESPONDED (received, then answered
-      // non-locally): received, so also uncertain, but named distinctly.
-      // Everything else failed before the request left: definite.
+      // FR-RR-13: EVERY thrown fetch failure is uncertain. A timeout after
+      // dispatch, a refused redirect (received, answered non-locally), AND
+      // a generic network error are all incapable of proving the request
+      // did not cross the irreversible boundary — an origin can receive
+      // and commit before a mid-response socket reset surfaces here as a
+      // bare TypeError. Nothing in the Fetch API offers positive
+      // protocol-level proof of a pre-send failure, so nothing in this
+      // catch releases the claim slot.
+      return { kind: "transport-failure", reason, uncertain: true };
+    }
+    if (this.createdStatuses.includes(resp.status)) {
+      // The documented CREATED response — positive evidence the account
+      // is durably created.
+      return { kind: "created" };
+    }
+    if (RETRYABLE_STATUS.has(resp.status)) {
+      // FR-RR-13: a received-and-answered 408/425/429/5xx is NOT proof the
+      // upstream did not commit (INSERT + COMMIT + a later handler throw,
+      // or a proxy failing after the origin did the work, both answer 5xx
+      // over a completed upstream write). Ambiguous → uncertain, slot held.
       return {
         kind: "transport-failure",
-        reason,
-        ...(e instanceof Error && e.name === "TimeoutError" || /redirect/i.test(causeMsg)
-          ? { uncertain: true }
-          : {}),
+        reason: `upstream_${resp.status}`,
+        uncertain: true,
       };
     }
-    if (resp.ok) return { kind: "created" };
-    if (RETRYABLE_STATUS.has(resp.status)) {
-      // FR-P0-02: a received-and-answered 5xx/408/429 means the upstream
-      // processed the request but did not commit (its own failure paths) —
-      // the received answer makes this KNOWN, not uncertain, but the slot
-      // release stays the store's policy for recorded transport failures.
-      return { kind: "transport-failure", reason: `upstream_${resp.status}` };
+    if (resp.status >= 200 && resp.status < 300) {
+      // FR-RR-13: a 2xx that is NOT the documented CREATED status (202
+      // Accepted, 200 with a non-create contract, 204, …) does not assert
+      // a durable create. It also is not a refusal. Ambiguous → uncertain.
+      return {
+        kind: "transport-failure",
+        reason: `undocumented_success_${resp.status}`,
+        uncertain: true,
+      };
     }
-    // Any other 4xx is the upstream's OWN answer about this application:
-    // received, considered, refused. That is a terminal business outcome.
-    let body: string | undefined;
-    try {
-      body = (await resp.text()).slice(0, 512);
-    } catch {
-      // body unreadable — status alone still classifies
+    if (resp.status >= 400 && resp.status < 500) {
+      // FR-RR-28: the branch is now EXHAUSTIVE — only a client-error status
+      // is the upstream's OWN answer about this application (received,
+      // considered, refused): a terminal business outcome. The retryable
+      // members (408/425/429) were already diverted above.
+      let body: string | undefined;
+      try {
+        body = (await resp.text()).slice(0, 512);
+      } catch {
+        // body unreadable — status alone still classifies
+      }
+      return { kind: "business-rejected", status: resp.status, body };
     }
-    return { kind: "business-rejected", status: resp.status, body };
+    // FR-RR-28: everything else — every unclassified 5xx (501 Not
+    // Implemented, 505 Version Not Supported, 507 Insufficient Storage,
+    // 511 Network Authentication Required, …) and any 1xx/3xx that slipped
+    // past redirect:"error" — is a SERVER-side or unclassifiable condition.
+    // It is NOT the upstream's answer about the application, and it may
+    // have committed before failing. Conservative: UNCERTAIN transport
+    // failure, slot held.
+    return {
+      kind: "transport-failure",
+      reason: `upstream_${resp.status}`,
+      uncertain: true,
+    };
   }
 
   deny(_sessionId: string, _reason: string): void {
@@ -501,77 +601,191 @@ export class ReferenceCanaryStore implements HostCanaryStore {
  */
 export class ReferenceSubmissionStore implements HostSubmissionStore {
   durability: "durable" | "volatile" = "volatile";
-  /** sessionId → claim state. A completed claim holds its outcome forever. */
+  /**
+   * FR-RR-40: the per-session submission state machine.
+   *
+   *   NONE ─claimForward──────────→ FORWARD_CLAIMED
+   *                                   ├─ complete(terminal)  → TERMINAL
+   *                                   └─ complete(uncertain) → FORWARD_UNCERTAIN
+   *   NONE ─finalizeDecision──────→ TERMINAL (decision-denied)
+   *
+   * A DEFINITE transport-failure complete() releases a FORWARD_CLAIMED
+   * slot back to NONE (the upstream captured nothing — a genuine retry may
+   * re-attempt). FORWARD_UNCERTAIN has NO automatic exit.
+   */
   private readonly claims = new Map<
     string,
     {
+      state: "forward-claimed" | "forward-uncertain" | "terminal";
       claimId: string;
       idempotencyKey: string;
-      open: boolean;
-      /** FR-P0-02: a held-open UNCERTAIN claim — operator reconciliation required. */
-      heldUncertain?: boolean;
-      outcome?: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string };
+      /** TERMINAL only. */
+      outcome?: FinalSubmissionOutcome;
+      /** TERMINAL only — FR-RR-14/26: the immutable assessment snapshot. */
+      assessment?: AssessmentSnapshot;
+      /**
+       * FR-RR-42: the enforcement.deny PROJECTION state for a terminal
+       * decision-denied record — "pending" until the deny side effect has
+       * landed durably, so a retry can repair it before acknowledging.
+       */
+      denyProjection?: "pending" | "complete";
     }
   >();
 
   async claim(sessionId: string, idempotencyKey: string): Promise<HostSubmissionClaimResult> {
     const existing = this.claims.get(sessionId);
     if (existing) {
-      // Open claim held by another in-flight request → conflict.
-      if (existing.open) return { kind: "conflict" };
-      // Finalized claim → replay the durable outcome (idempotent receipt).
-      if (existing.outcome) {
-        const o = existing.outcome;
-        return o.kind === "transport-failure"
-          ? // A recorded transport failure RELEASED the slot: take it over.
-            this.takeOver(sessionId, idempotencyKey)
-          : { kind: "replay", outcome: o };
+      switch (existing.state) {
+        case "forward-claimed":
+          // Open claim held by another in-flight request → conflict.
+          return { kind: "conflict" };
+        case "forward-uncertain":
+          // FR-RR-41: the upstream outcome is UNKNOWN — an automatic retry
+          // must NEVER re-forward. Held until operator reconciliation.
+          return { kind: "conflict" };
+        case "terminal": {
+          const o = existing.outcome!;
+          return { kind: "replay", record: this.finalRecord(o, existing.assessment) };
+        }
       }
-      return { kind: "conflict" };
     }
     return this.takeOver(sessionId, idempotencyKey);
+  }
+
+  /** FR-RR-26: a stored record is ALWAYS v2 (assessment-bearing). */
+  private finalRecord(
+    outcome: FinalSubmissionOutcome,
+    assessment?: AssessmentSnapshot
+  ): FinalSubmissionRecord {
+    if (!assessment) {
+      throw new Error(
+        "ReferenceSubmissionStore: internal invariant violated — terminal outcome without its assessment snapshot"
+      );
+    }
+    return { version: 2, outcome, assessment };
   }
 
   /** Create a fresh open claim for a session with no live claim. */
   private takeOver(sessionId: string, idempotencyKey: string): HostSubmissionClaimResult {
     const claimId = `${sessionId}:${crypto.randomUUID()}`;
-    this.claims.set(sessionId, { claimId, idempotencyKey, open: true });
+    this.claims.set(sessionId, { state: "forward-claimed", claimId, idempotencyKey });
     return { kind: "claimed", claimId, idempotencyKey: submissionIdempotencyKey(sessionId) };
   }
 
   /**
-   * FR-P0-02 (rereview P0-E): read the finalized outcome WITHOUT claiming.
-   * An uncertain-held slot is deliberately NOT a final outcome — the caller
-   * proceeds, hits claim() → conflict, and fails closed.
+   * FR-RR-21/40 — atomically finalize a DECISION denial as the session's
+   * TERMINAL outcome. The transition is legal ONLY from NONE: an existing
+   * FORWARD_CLAIMED or FORWARD_UNCERTAIN state yields conflict — the
+   * decision never overwrites a forward that may already have crossed the
+   * irreversible boundary, and never fabricates "blocked" for an UNKNOWN
+   * upstream state. (The in-memory Map is single-threaded-synchronous, so
+   * the conditional set below IS the atomic transition; the durable SQL
+   * implementation must express the same shape as a conditional UPDATE.)
    */
-  async lookupFinal(sessionId: string): Promise<FinalSubmissionOutcome | null> {
+  async finalizeDecision(
+    sessionId: string,
+    record: FinalSubmissionRecord
+  ): Promise<FinalizeDecisionResult> {
     const existing = this.claims.get(sessionId);
-    if (!existing || existing.open || !existing.outcome) return null;
-    const o = existing.outcome;
-    return o.kind === "transport-failure" ? null : o;
+    if (existing) {
+      if (existing.state === "forward-claimed") {
+        return { kind: "conflict", state: "forward-claimed" };
+      }
+      if (existing.state === "forward-uncertain") {
+        // FR-RR-41: absorbing — only operator reconciliation may resolve.
+        return { kind: "conflict", state: "forward-uncertain" };
+      }
+      // TERMINAL → replay the EXISTING record verbatim (first writer wins;
+      // a concurrent finalizer must not overwrite the original denial).
+      return { kind: "replay", record: this.finalRecord(existing.outcome!, existing.assessment) };
+    }
+    this.claims.set(sessionId, {
+      state: "terminal",
+      claimId: `decision:${sessionId}`,
+      idempotencyKey: submissionIdempotencyKey(sessionId),
+      outcome: record.outcome,
+      assessment: record.assessment,
+      // FR-RR-42: the deny side effect has NOT run yet — the projection is
+      // born pending; the coordinator marks it complete after deny lands.
+      denyProjection: "pending",
+    });
+    return { kind: "stored", record };
+  }
+
+  /**
+   * FR-RR-42 — mark the enforcement.deny projection durably complete for a
+   * terminal decision-denied record. Only a "pending" decision-denied
+   * record transitions; anything else is a no-op throw (call-shape bug).
+   */
+  async markDenyProjectionComplete(sessionId: string): Promise<void> {
+    const existing = this.claims.get(sessionId);
+    if (
+      !existing ||
+      existing.state !== "terminal" ||
+      existing.outcome?.kind !== "decision-denied" ||
+      existing.denyProjection !== "pending"
+    ) {
+      throw new Error(
+        `ReferenceSubmissionStore.markDenyProjectionComplete: no pending deny projection for ${sessionId}`
+      );
+    }
+    existing.denyProjection = "complete";
+  }
+
+  /** FR-RR-42: the pending-projection state, for retry repair. */
+  async denyProjectionState(
+    sessionId: string
+  ): Promise<"pending" | "complete" | undefined> {
+    return this.claims.get(sessionId)?.denyProjection;
+  }
+
+  /**
+   * FR-P0-02 (rereview P0-E): read the finalized outcome WITHOUT claiming.
+   * A FORWARD_UNCERTAIN state has NO final record — the upstream outcome is
+   * genuinely unknown; the caller proceeds, hits claim() → conflict, and
+   * fails closed. FR-RR-14: the COMPLETE record (outcome + assessment) is
+   * returned so the replay reproduces the original assessment.
+   */
+  async lookupFinal(sessionId: string): Promise<FinalSubmissionRecord | null> {
+    const existing = this.claims.get(sessionId);
+    if (!existing || existing.state !== "terminal" || !existing.outcome) return null;
+    return this.finalRecord(existing.outcome, existing.assessment);
   }
 
   async complete(
     claimId: string,
-    outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string; uncertain?: boolean }
+    outcome: FinalSubmissionOutcome | { kind: "transport-failure"; reason: string; uncertain?: boolean },
+    signal?: AbortSignal,
+    meta?: { assessment?: AssessmentSnapshot }
   ): Promise<void> {
+    void signal; // accepted for contract parity; the in-memory store is synchronous
+    const assessment = meta?.assessment;
     for (const [sessionId, claim] of this.claims) {
       if (claim.claimId !== claimId) continue;
       // FR-P0-02: a DEFINITE transport failure releases the slot entirely —
-      // a genuine client retry must be able to re-attempt the forward. An
-      // UNCERTAIN outcome (post-send timeout / ambiguous network error)
-      // HOLDS the slot open without an outcome: the upstream may have
-      // committed, so an automatic retry could create a duplicate. The
-      // session stays claimed (later retries → conflict) until an operator
-      // reconciles the unknown state.
+      // back to NONE, so a genuine client retry can re-attempt the forward.
       if (outcome.kind === "transport-failure" && outcome.uncertain === true) {
-        claim.open = false;
-        claim.heldUncertain = true;
+        // FR-RR-41: FORWARD_UNCERTAIN is absorbing — no outcome recorded,
+        // no exit by retry, deny, or finalizeDecision.
+        claim.state = "forward-uncertain";
         return;
       }
-      claim.open = false;
+      if (outcome.kind === "transport-failure") {
+        claim.state = "forward-claimed";
+        this.claims.delete(sessionId); // → NONE (slot released)
+        return;
+      }
+      // FR-RR-26: a replayable terminal outcome REQUIRES its assessment —
+      // writing one without the other would manufacture exactly the
+      // degraded-replay state this rereview removed.
+      if (!assessment) {
+        throw new Error(
+          "ReferenceSubmissionStore.complete: terminal outcome without its assessment snapshot — the v2 record contract requires both"
+        );
+      }
+      claim.state = "terminal";
       claim.outcome = outcome;
-      if (outcome.kind === "transport-failure") this.claims.delete(sessionId);
+      claim.assessment = assessment;
       return;
     }
     // Unknown claimId: the claim record was lost (volatile-store restart).
@@ -580,8 +794,8 @@ export class ReferenceSubmissionStore implements HostSubmissionStore {
   }
 
   /** Test/diagnostics accessor. */
-  stateFor(sessionId: string): { open: boolean; outcome?: unknown } | undefined {
+  stateFor(sessionId: string): { state: string; outcome?: unknown } | undefined {
     const c = this.claims.get(sessionId);
-    return c ? { open: c.open, outcome: c.outcome } : undefined;
+    return c ? { state: c.state, outcome: c.outcome } : undefined;
   }
 }

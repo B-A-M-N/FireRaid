@@ -22,16 +22,22 @@ import { createEvaluationMiddleware } from "./evaluation-middleware.js";
 export function createEvaluationOriginServer(
   options: OriginServerOptions & { labMode?: boolean }
 ): http.Server {
-  return __buildOriginServerWithValidator(options, (deps) => {
-    const evalDeps: Record<string, unknown> = { ...deps, routes: options.routes };
-    // Only SET labMode when actually requested — a present-but-false key
-    // would trip the validator's smuggle-refusal on a later production pass.
-    if (options.labMode === true) evalDeps.labMode = true;
-    // The evaluation validator runs the SAME structural checks via the
-    // internal evaluation path (honestly-"volatile" stores permitted).
-    const validated = createEvaluationMiddleware(evalDeps as never);
-    // createEvaluationMiddleware runs ensureEvaluationRing: profileKeys is
-    // defined on the returned deps (synthesized from `secret` when needed).
-    return validated as MiddlewareDeps;
-  });
+  return __buildOriginServerWithValidator(
+    options,
+    (deps) => {
+      const evalDeps: Record<string, unknown> = { ...deps, routes: options.routes };
+      // Only SET labMode when actually requested — a present-but-false key
+      // would trip the validator's smuggle-refusal on a later production pass.
+      if (options.labMode === true) evalDeps.labMode = true;
+      // The evaluation validator runs the SAME structural checks via the
+      // internal evaluation path (honestly-"volatile" stores permitted).
+      const validated = createEvaluationMiddleware(evalDeps as never);
+      // createEvaluationMiddleware runs ensureEvaluationRing: profileKeys is
+      // defined on the returned deps (synthesized from `secret` when needed).
+      return validated as MiddlewareDeps;
+    },
+    // FR-RR-16: throwaway experiment wiring may omit onAssessment (warned,
+    // not refused) — the production posture is the strict one.
+    "evaluation"
+  );
 }

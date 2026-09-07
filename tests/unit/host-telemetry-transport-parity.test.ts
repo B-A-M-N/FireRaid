@@ -22,6 +22,7 @@
  * event stream — the same invariant the Worker's watermark gate gives D1.
  */
 import { describe, it, expect } from "vitest";
+import { issuedCookie, issuedCookieForProfile } from "./helpers/test-issuance.js";
 import {
   makeCsrf,
   ReferenceSessionAdapter,
@@ -29,6 +30,7 @@ import {
   ReferenceVerificationAdapter,
   ReferenceTelemetryAdapter,
   type HostEnforcementAdapter,
+  type EnforcementResult,
   ReferenceCanaryStore,
   ReferenceSubmissionStore,
 } from "../../src/host-adapter/index.js";
@@ -46,9 +48,9 @@ const HTML = '<html><body><form id="signup-form"></form></body></html>';
 
 class CountingEnforcement implements HostEnforcementAdapter {
   allowed = 0;
-  async allow(): Promise<boolean> {
+  async allow(): Promise<EnforcementResult> {
     this.allowed++;
-    return true;
+    return { kind: "created" };
   }
   deny(): void {}
 }
@@ -70,8 +72,16 @@ function deps(telemetry: ReferenceTelemetryAdapter, recipe?: { families: string[
   };
 }
 
-function cookieFor(sessionId: string): Promise<string> {
-  return new ReferenceSessionAdapter(SECRET).sessionCookie(sessionId);
+function cookieFor(sessionId: string, recipe?: { families: string[] }): Promise<string> {
+  if (!recipe) {
+    return issuedCookie(new ReferenceSessionAdapter(SECRET), SECRET, sessionId);
+  }
+  // The middleware re-derives with the recipe (FR-RR-12 drift check) — the
+  // signed hash must be of THAT derivation.
+  return deriveProfilePure(
+    { secret: SECRET, version: VERSION, sessionId, mode: "production" },
+    recipe as never
+  ).then((p) => issuedCookieForProfile(new ReferenceSessionAdapter(SECRET), sessionId, p));
 }
 
 function csrfFor(sessionId: string): Promise<string> {
@@ -85,7 +95,7 @@ async function postJson(
   path: string,
   body: Record<string, unknown>
 ): Promise<{ status: number; json: Record<string, unknown> | null; kind: string; result: Awaited<ReturnType<typeof admitEvaluation>> }> {
-  const cookie = await cookieFor(sessionId);
+  const cookie = await cookieFor(sessionId, (depsObj as { recipe?: { families: string[] } }).recipe);
   const req = new Request(`http://mw${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", cookie },

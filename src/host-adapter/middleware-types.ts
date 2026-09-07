@@ -169,6 +169,17 @@ export interface MiddlewareResult {
   httpStatus?: 400 | 403 | 405 | 413;
   /** Whether the upstream ledger created the account (the experiment's truth). */
   upstreamCreated?: boolean;
+  /**
+   * FR-RR-14: TRUE when this receipt is a REPLAY of a durably-recorded
+   * terminal outcome rather than the request that performed the work.
+   * Orthogonal to `disposition` — a replay carries the ORIGINAL semantic
+   * disposition (ACCEPT/REVIEW/QUARANTINE), the original score, and the
+   * original risk evidence captured at complete() time; it never overwrites
+   * the disposition with "REPLAY". A host's onAssessment receives the same
+   * assessment the original request produced (idempotent on the
+   * snapshot's sessionId identity).
+   */
+  replayed?: boolean;
   /** Ingest ACK (kind === "ingest"): events accepted, stream watermark. */
   received?: number;
   acceptedThrough?: number;

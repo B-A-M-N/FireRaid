@@ -2,10 +2,11 @@
  * FireRaid paired demo — the trial coordinator.
  *
  * One runTrial() = one PAIRED experiment: the same actor configuration
- * (same adapter, same fixture identity) drives the CONTROL origin and the
- * FireRaid origin. Events stream to the dashboard over SSE. The final
- * CREATED/BLOCKED verdict for each arm is a LEDGER fact — probed
- * read-only after the run — never FireRaid's own decision object.
+ * (same adapter, same fixture identity, SAME behavior seed) drives the
+ * CONTROL origin and the FireRaid origin. Events stream to the dashboard
+ * over SSE. The final CREATED/BLOCKED verdict for each arm is a LEDGER
+ * fact — probed read-only after the run — never FireRaid's own decision
+ * object.
  *
  * Actors:
  *   agent — harness/adapters FillEverythingAdapter (the deterministic
@@ -14,18 +15,35 @@
  *           humanized timing/pointer behavior; the dashboard labels it as
  *           such — it is not a human trial)
  *
- * INCONCLUSIVE discipline: a ledger probe failure (null) or an adapter
- * error yields ERROR/INCONCLUSIVE for that arm — never BLOCKED. BLOCKED
- * means "the run completed and the upstream ledger has no account for
- * this arm's identity."
+ * FR-DEMO-01 discipline: ground truth (the ledger) and the observed
+ * FireRaid action are separate facts, joined by joinOutcome(). BLOCKED is
+ * rendered ONLY when the ledger probe succeeded, the account is absent,
+ * AND the FireRaid assessment was observed with a non-ACCEPT terminal
+ * decision. A missing assessment or a failed probe is INCONCLUSIVE —
+ * never BLOCKED. Adapter errors are ERROR; a dropped submit (no response
+ * observed) with an absent account is INCONCLUSIVE.
+ *
+ * FR-DEMO-02: the timeline streams LIVE observations — the adapters emit
+ * at the actual event point through the AgentRunObserver, not post-run
+ * reconstructions.
+ *
+ * FR-DEMO-03: both arms share ONE behavior seed (trialBehaviorSeed) —
+ * independently-owned per-run RNGs, identically parameterized.
+ *
+ * INCONCLUSIVE discipline: a ledger probe failure (null) yields
+ * INCONCLUSIVE for that arm — never BLOCKED.
  */
 import { FillEverythingAdapter } from "../harness/adapters/fill-everything.js";
 import { HumanizedPwAdapter } from "../harness/adapters/humanized-pw.js";
 import type { Scenario } from "../harness/core/run-schema.js";
 import { startDemoOrigins, type DemoOrigins } from "./origins.js";
 import {
+  joinOutcome,
+  trialBehaviorSeed,
   trialEmails,
   type DemoEvent,
+  type FireRaidAction,
+  type GroundTruth,
   type TrialOutcome,
   type TrialRecord,
 } from "./shared.js";
@@ -39,11 +57,22 @@ const FIXTURE = {
 
 export interface DemoCoordinator {
   runTrial(actor: "agent" | "human"): Promise<TrialRecord>;
+  /**
+   * FR-DEMO-05: ATOMIC trial admission. Either the slot is taken
+   * ({accepted: true, done}) or refused ({accepted: false}) — a caller can
+   * never acknowledge a run the coordinator then rejects.
+   */
+  tryRunTrial(
+    actor: "agent" | "human"
+  ): { accepted: true; done: Promise<TrialRecord> } | { accepted: false };
   history(): TrialRecord[];
   subscribe(fn: (e: DemoEvent) => void): () => void;
   ready(): Promise<{ controlUrl: string; fireraidUrl: string }>;
   shutdown(): Promise<void>;
 }
+
+/** FR-DEMO-08: bound the trial history. */
+const MAX_HISTORY = 100;
 
 export async function startDemoCoordinator(): Promise<DemoCoordinator> {
   const origins: DemoOrigins = await startDemoOrigins();
@@ -62,15 +91,18 @@ export async function startDemoCoordinator(): Promise<DemoCoordinator> {
   /**
    * Drive one arm: build a fresh Scenario for the harness adapter against
    * the arm's origin and translate the run into timeline events. The
-   * adapter launches its own browser; its wire observations (canary GETs,
-   * submit POSTs) are already server-adjacent truth.
+   * adapter launches its own browser; the observer emits events AT THE
+   * EVENT POINT (FR-DEMO-02), so the timeline is causally ordered.
    */
   async function driveArm(
     arm: "control" | "fireraid",
     actor: "agent" | "human",
     trialId: string,
     onEvent: (name: DemoEvent["name"], detail?: string) => void
-  ): Promise<{ ok: true } | { ok: false; error: string }> {
+  ): Promise<
+    | { ok: true; submitPosted: boolean; submitResponded: boolean }
+    | { ok: false; error: string }
+  > {
     const targetUrl = arm === "control" ? origins.controlUrl : origins.fireraidUrl;
     const email =
       arm === "control"
@@ -82,7 +114,7 @@ export async function startDemoCoordinator(): Promise<DemoCoordinator> {
       fixture: { ...FIXTURE, email },
       promptVariant: "demo",
       objective: "honest",
-      fixtureId: trialId,
+      fixtureId: trialBehaviorSeed(trialId), // FR-DEMO-03: shared seed
       model: "none",
       maxSteps: 12,
       timeoutMs: 45_000,
@@ -98,18 +130,38 @@ export async function startDemoCoordinator(): Promise<DemoCoordinator> {
         : "human simulation (humanized timing — not a human trial)"
     );
     try {
-      const result = await adapter.run(scenario);
+      const result = await adapter.run(scenario, {
+        // FR-DEMO-10: browser.started is now a REAL event — emitted at the
+        // actual chromium launch inside the humanized adapter, not a
+        // declared-but-never-emitted enum member.
+        onBrowserStarted: () => onEvent("browser.started", "browser launched (humanized filler)"),
+        onPageLoaded: (url) => onEvent("page.loaded", url),
+        onFillStarted: () => onEvent("form.fill.started", undefined),
+        onCanaryRequested: (url) =>
+          arm === "fireraid"
+            ? onEvent("canary.requested", `agent fetched the session's decoy route (${url})`)
+            : undefined,
+        // FR-DEMO-09: ONE form.submitted event per trial. The old wiring
+        // emitted it twice for the same POST — once from the
+        // onSubmitDispatched callback ("dispatched") and once after the
+        // run returned (with the elapsed time) — double-counting the
+        // submit in the timeline.
+        onSubmitResponse: (status) =>
+          onEvent(
+            "form.response",
+            status === "received" ? "submit response received" : "no submit response observed"
+          ),
+      });
       if (result.outcome === "error") {
         return { ok: false, error: result.errorMessage ?? "adapter error" };
       }
-      onEvent("page.loaded", `${targetUrl}/signup`);
-      onEvent("form.fill.started", undefined);
       onEvent("form.fill.progress", `${result.actionCount} actions`);
-      if (arm === "fireraid" && result.canaryTriggered) {
-        onEvent("canary.requested", "agent fetched the session's decoy route");
+      const submitPosted = result.submitPosted === true;
+      const submitResponded = result.submitResponded === true;
+      if (submitPosted) {
+        onEvent("form.submitted", `POST /api/submit (${result.elapsedMs}ms)`);
       }
-      onEvent("form.submitted", `POST /api/submit (${result.elapsedMs}ms)`);
-      return { ok: true };
+      return { ok: true, submitPosted, submitResponded };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -122,6 +174,7 @@ export async function startDemoCoordinator(): Promise<DemoCoordinator> {
       trialId,
       actor,
       startedAt: Date.now(),
+      baseApplicationHash: origins.baseApplicationHash, // FR-DEMO-07
       control: { email: emails.control, outcome: "ERROR" },
       fireraid: { email: emails.fireraid, outcome: "ERROR", decision: { evidence: [] } },
     };
@@ -131,7 +184,7 @@ export async function startDemoCoordinator(): Promise<DemoCoordinator> {
     emit(stamp({ trialId, arm: "control", name: "trial.started", detail: `actor=${actor}` }));
     emit(stamp({ trialId, arm: "fireraid", name: "trial.started" }));
 
-    // ── Drive BOTH arms in parallel (matched configuration).
+    // ── Drive BOTH arms in parallel (matched configuration, shared seed).
     const [controlRes, fireraidRes] = await Promise.all([
       driveArm("control", actor, trialId, (name, detail) =>
         emit(stamp({ trialId, arm: "control", name, detail }))
@@ -145,6 +198,7 @@ export async function startDemoCoordinator(): Promise<DemoCoordinator> {
     // onAssessment seam, joined by the submitted email. Displayed as
     // FireRaid's decision — never as the ground truth.
     const decision = origins.fireraidDecisionFor(emails.fireraid);
+    let fireraidAction: FireRaidAction = "UNOBSERVED";
     if (decision) {
       record.fireraid.sessionId = decision.sessionId;
       record.fireraid.decision = {
@@ -152,6 +206,7 @@ export async function startDemoCoordinator(): Promise<DemoCoordinator> {
         score: decision.score,
         evidence: decision.evidence,
       };
+      fireraidAction = (decision.disposition as FireRaidAction | undefined) ?? "UNOBSERVED";
       emit(
         stamp({
           trialId,
@@ -162,62 +217,88 @@ export async function startDemoCoordinator(): Promise<DemoCoordinator> {
       );
     }
 
-    // ── THE LEDGER IS THE TRUTH (read-only probes, one per arm).
+    // ── THE LEDGER IS THE TRUTH (read-only probes, one per arm), joined
+    // with the observed defense action per FR-DEMO-01.
     for (const [arm, res, email] of [
       ["control", controlRes, emails.control],
       ["fireraid", fireraidRes, emails.fireraid],
     ] as const) {
-      if (!res.ok) {
-        // The actor never completed — ERROR, never BLOCKED.
+      const setArm = (outcome: TrialOutcome, detail?: string): void => {
         if (arm === "control") {
-          record.control = { email, outcome: "ERROR", detail: res.error };
-        } else {
-          record.fireraid = { ...record.fireraid, email, outcome: "ERROR", detail: res.error };
-        }
-        emit(stamp({ trialId, arm, name: "trial.error", detail: res.error }));
-        continue;
-      }
-      emit(stamp({ trialId, arm, name: "ledger.checked", detail: `probing ${email}` }));
-      const exists = await origins.ledgerHasAccount(email);
-      if (exists === null) {
-        if (arm === "control") {
-          record.control = { email, outcome: "INCONCLUSIVE", detail: "ledger probe unreachable" };
+          record.control = { email, outcome, ...(detail !== undefined ? { detail } : {}) };
         } else {
           record.fireraid = {
             ...record.fireraid,
             email,
-            outcome: "INCONCLUSIVE",
-            detail: "ledger probe unreachable",
+            outcome,
+            ...(detail !== undefined ? { detail } : {}),
+            ...(arm === "fireraid" ? { action: fireraidAction } : {}),
           };
         }
-        emit(stamp({ trialId, arm, name: "trial.error", detail: "ledger probe unreachable — INCONCLUSIVE" }));
+      };
+
+      if (!res.ok) {
+        // The actor never completed — ERROR, never BLOCKED.
+        setArm("ERROR", res.error);
+        emit(stamp({ trialId, arm, name: "trial.error", detail: res.error }));
         continue;
       }
-      const outcome: TrialOutcome = exists ? "CREATED" : "BLOCKED";
-      if (arm === "control") {
-        record.control = { email, outcome };
-      } else {
-        record.fireraid = { ...record.fireraid, email, outcome };
+
+      // FR-DEMO-01: a submit that never left the browser cannot have been
+      // evaluated — with an absent account that is INCONCLUSIVE, and we
+      // skip the probe only for attribution (the probe would tell us
+      // nothing about FireRaid's action).
+      if (!res.submitPosted) {
+        setArm(
+          "INCONCLUSIVE",
+          "submit POST never observed — cannot attribute the ledger absence to FireRaid"
+        );
+        emit(stamp({ trialId, arm, name: "trial.error", detail: "submit never dispatched — INCONCLUSIVE" }));
+        continue;
       }
-      emit(
-        stamp({
-          trialId,
-          arm,
-          name: "ledger.checked",
-          detail: `account ${exists ? "EXISTS" : "ABSENT"} — ${outcome}`,
-        })
-      );
+
+      emit(stamp({ trialId, arm, name: "ledger.checked", detail: `probing ${email}` }));
+      const exists = await origins.ledgerHasAccount(email);
+      const truth: GroundTruth =
+        exists === null ? "INCONCLUSIVE" : exists ? "CREATED" : "NOT_CREATED";
+      // The CONTROL arm has no middleware — there is no FireRaid action to
+      // join; pass UNOBSERVED (joinOutcome treats ACCEPT and UNOBSERVED
+      // alike: an absent account without intervention is INCONCLUSIVE).
+      const action: FireRaidAction = arm === "fireraid" ? fireraidAction : "UNOBSERVED";
+      const outcome = joinOutcome(truth, action);
+      const detail =
+        truth === "INCONCLUSIVE"
+          ? "ledger probe unreachable — INCONCLUSIVE"
+          : `account ${exists ? "EXISTS" : "ABSENT"} — ${outcome}`;
+      setArm(outcome, detail);
+      emit(stamp({ trialId, arm, name: "ledger.checked", detail }));
     }
 
     record.finishedAt = Date.now();
+    // FR-DEMO-08: bound the history.
     history.push(record);
+    if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
     emit(stamp({ trialId, arm: "control", name: "trial.completed", detail: record.control.outcome }));
     emit(stamp({ trialId, arm: "fireraid", name: "trial.completed", detail: record.fireraid.outcome }));
     return record;
   }
 
+  // FR-DEMO-05: one paired run at a time; the admission slot is atomic.
+  let busy = false;
+  const tryRunTrial = (
+    actor: "agent" | "human"
+  ): { accepted: true; done: Promise<TrialRecord> } | { accepted: false } => {
+    if (busy) return { accepted: false };
+    busy = true;
+    const done = runTrial(actor).finally(() => {
+      busy = false;
+    });
+    return { accepted: true, done };
+  };
+
   return {
     runTrial,
+    tryRunTrial,
     history: () => [...history],
     subscribe(fn) {
       listeners.add(fn);

@@ -45,7 +45,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { makeCsrf, ReferenceSessionAdapter, referenceInject, ReferenceVerificationAdapter, ReferenceTelemetryAdapter, ReferenceCanaryStore, ReferenceSubmissionStore, type HostEnforcementAdapter } from "../../src/host-adapter/index.js";
+import { makeCsrf, ReferenceSessionAdapter, referenceInject, ReferenceVerificationAdapter, ReferenceTelemetryAdapter, ReferenceCanaryStore, ReferenceSubmissionStore, type HostEnforcementAdapter, type EnforcementResult } from "../../src/host-adapter/index.js";
 import { admitEvaluation, type EvaluationMiddlewareDeps } from "../../src/eval/evaluation-middleware.js";
 import { deriveProfilePure } from "../../src/core/profile.js";
 import type { DefenseRecipe } from "../../src/core/recipe-schema.js";
@@ -114,18 +114,30 @@ export interface OriginLedgerRuntime {
 class LedgerEnforcement implements HostEnforcementAdapter {
   upstreamCreated = false;
   constructor(private readonly upstreamRegisterUrl: string) {}
-  async allow(_url: string, form: Record<string, string>, cookies: string): Promise<boolean> {
+  async allow(_url: string, form: Record<string, string>, cookies: string): Promise<EnforcementResult> {
     try {
       const resp = await fetch(this.upstreamRegisterUrl, {
         method: "POST",
         headers: { "content-type": "application/json", cookie: cookies },
         body: JSON.stringify({ form }),
       });
-      this.upstreamCreated = resp.ok;
-      return this.upstreamCreated;
+      // FR-RR-24/FR-RR-13: only 201 is "created"; any other 2xx is
+      // ambiguous (undocumented success); 4xx (non-retryable) is the
+      // upstream's own terminal refusal; everything else is UNCERTAIN —
+      // a bare boolean can no longer express this seam's answers.
+      this.upstreamCreated = resp.status === 201;
+      if (this.upstreamCreated) return { kind: "created" };
+      if (resp.status >= 200 && resp.status < 300) {
+        return { kind: "transport-failure", reason: `undocumented_success_${resp.status}`, uncertain: true };
+      }
+      if (resp.status >= 400 && resp.status < 500 && ![408, 425, 429].includes(resp.status)) {
+        return { kind: "business-rejected", status: resp.status };
+      }
+      return { kind: "transport-failure", reason: `upstream_${resp.status}`, uncertain: true };
     } catch {
       this.upstreamCreated = false;
-      return false;
+      // Post-send ambiguity: hold the slot (uncertain), never release it.
+      return { kind: "transport-failure", reason: "network_error", uncertain: true };
     }
   }
   deny(_sid: string, reason: string): void {

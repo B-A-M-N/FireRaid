@@ -25,6 +25,138 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const { classifyMigrationList } = await import(
   join(ROOT, "scripts", "lib", "migrations.mjs")
 );
+const { EXPECTED_PREFLIGHT_CHECKS, validatePreflightResult } = await import(
+  join(ROOT, "scripts", "lib", "preflight-schema.mjs")
+);
+
+// ── FR-RR-18: the preflight gate's schema + exit-status validation ──────
+// These tests execute the REAL validator (extracted into
+// scripts/lib/preflight-schema.mjs precisely so they could), not a
+// source-grep of release-verify.mjs.
+
+/** All-expected-IDs PASSing checks array with matching tallies. */
+function validChecks(status: "PASS" | "SKIP" | "FAIL" = "PASS") {
+  const checks = [...EXPECTED_PREFLIGHT_CHECKS].map((name) => ({ name, status }));
+  return {
+    checks,
+    passed: checks.filter((c) => c.status === "PASS").length,
+    skipped: checks.filter((c) => c.status === "SKIP").length,
+    failed: checks.filter((c) => c.status === "FAIL").length,
+  };
+}
+
+describe("FR-RR-18: validatePreflightResult (preflight schema + exit consistency)", () => {
+  it("accepts a well-formed PASS result at exit 0 and derives the counts", () => {
+    const v = validatePreflightResult(validChecks(), 0);
+    expect(v.ok).toBe(true);
+    if (v.ok) {
+      expect(v.preflight.failed).toBe(0);
+      expect(v.preflight.passed).toBe(EXPECTED_PREFLIGHT_CHECKS.size);
+      expect(v.preflight.exit).toBe(0);
+    }
+  });
+
+  it("accepts the legitimate local-mode SKIP (remote-migrations, no token) at exit 0", () => {
+    const parsed = validChecks();
+    parsed.checks.find((c) => c.name === "remote-migrations")!.status = "SKIP";
+    parsed.skipped = 1;
+    parsed.passed -= 1;
+    const v = validatePreflightResult(parsed, 0);
+    expect(v.ok).toBe(true);
+    if (v.ok) {
+      expect(v.preflight.skipped).toBe(1);
+      expect(v.preflight.failed).toBe(0);
+    }
+  });
+
+  it("REJECTS: producer exits NONZERO with ZERO FAIL rows (the half-implemented direction)", () => {
+    const v = validatePreflightResult(validChecks(), 1);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.error).toContain("ZERO FAIL rows");
+  });
+
+  it("REJECTS: exit 0 with FAIL rows (the other direction)", () => {
+    const parsed = validChecks();
+    parsed.checks.find((c) => c.name === "dry-run")!.status = "FAIL";
+    parsed.failed = 1;
+    parsed.passed -= 1;
+    const v = validatePreflightResult(parsed, 0);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.error).toContain("exited 0 while reporting 1 FAIL");
+  });
+
+  it("accepts a genuine failure: nonzero exit AND a FAIL row present", () => {
+    const parsed = validChecks();
+    parsed.checks.find((c) => c.name === "dry-run")!.status = "FAIL";
+    parsed.failed = 1;
+    parsed.passed -= 1;
+    const v = validatePreflightResult(parsed, 1);
+    expect(v.ok).toBe(true);
+    if (v.ok) expect(v.preflight.failed).toBe(1);
+  });
+
+  it("REJECTS: an unknown EXTRA check id riding alongside the expected set", () => {
+    const parsed = validChecks();
+    parsed.checks.push({ name: "rogue-renamed-check", status: "PASS" });
+    parsed.passed += 1;
+    const v = validatePreflightResult(parsed, 0);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.error).toContain("unknown check id: rogue-renamed-check");
+  });
+
+  it("REJECTS: a duplicate check id", () => {
+    const parsed = validChecks();
+    parsed.checks.push({ name: "dry-run", status: "PASS" });
+    parsed.passed += 1;
+    const v = validatePreflightResult(parsed, 0);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.error).toContain("duplicate check id: dry-run");
+  });
+
+  it("REJECTS: an unknown status value", () => {
+    const parsed = validChecks();
+    (parsed.checks.find((c) => c.name === "lab-mode")! as { status: string }).status = "MAYBE";
+    const v = validatePreflightResult(parsed, 0);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.error).toContain("unknown status");
+  });
+
+  it("REJECTS: a missing expected id (a silently renamed check never reads as absent = fine)", () => {
+    const parsed = validChecks();
+    parsed.checks = parsed.checks.filter((c) => c.name !== "production-graph");
+    parsed.passed -= 1;
+    const v = validatePreflightResult(parsed, 0);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.error).toContain("missing expected IDs: production-graph");
+  });
+
+  it("REJECTS: a check row without a name", () => {
+    const parsed = validChecks();
+    (parsed.checks[0] as { name?: string }).name = "";
+    const v = validatePreflightResult(parsed, 0);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.error).toContain("lacks a name");
+  });
+
+  it("REJECTS: summary tallies that disagree with the checks array", () => {
+    const parsed = validChecks();
+    parsed.passed += 3; // producer miscounts
+    const v = validatePreflightResult(parsed, 0);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.error).toContain("summary counts disagree");
+  });
+
+  it("REJECTS: a parsed payload without a checks array", () => {
+    expect(validatePreflightResult({}, 0).ok).toBe(false);
+    expect(validatePreflightResult(null, 0).ok).toBe(false);
+    // Synthesized fallback shape: empty checks with failed>=1 is structurally
+    // invalid by schema but is only CONSTRUCTED after validation failed —
+    // the validator itself must never bless it.
+    const v = validatePreflightResult({ checks: [], passed: 0, skipped: 0, failed: 1 }, 1);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.error).toContain("missing expected IDs");
+  });
+});
 
 describe("FR-P0-C: classifyMigrationList (wrangler d1 migrations list output)", () => {
   it("classifies a CURRENT database as current (the inverted-regex bug)", () => {
@@ -87,7 +219,7 @@ describe("FR-P0-C: classifyMigrationList (wrangler d1 migrations list output)", 
   });
 });
 
-describe("FR-P0-A: release-smoke-record.mjs (external smoke receipt)", () => {
+describe("FR-P0-A/FR-RR-49: release-smoke-record.mjs (smoke RUNNER, not an attestation box)", () => {
   const SCRIPT = join(ROOT, "scripts", "release-smoke-record.mjs");
 
   function runRecord(args: string[]) {
@@ -107,33 +239,71 @@ describe("FR-P0-A: release-smoke-record.mjs (external smoke receipt)", () => {
   it("refuses a receipt whose git_sha is not exactly HEAD (no fixed-point bug)", () => {
     const r = runRecord([
       "--git-sha", "0000000000000000000000000000000000000000",
-      "--worker-version", "v1",
-      "--url", "https://example.workers.dev",
-      "--checks", "signup_page,submit_failclosed,human_submit",
+      "--worker-version", "a".repeat(32),
+      "--human-submit-observed-status", "200",
     ]);
     expect(r.code).not.toBe(0);
     expect(r.stderr).toContain("does not equal current HEAD");
   });
 
-  it("refuses a receipt missing a required smoke check", () => {
+  it("FR-RR-49: refuses a nonsense worker-version id ('banana') before any network call", () => {
     const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
     const r = runRecord([
       "--git-sha", head,
-      "--worker-version", "v1",
-      "--url", "https://example.workers.dev",
-      "--checks", "signup_page", // human_submit + submit_failclosed missing
+      "--worker-version", "banana",
+      "--human-submit-observed-status", "200",
     ]);
     expect(r.code).not.toBe(0);
-    expect(r.stderr).toContain("human_submit");
+    expect(r.stderr).toContain("32 lowercase hex");
   });
 
-  it("refuses a receipt with no checks flag at all", () => {
+  it("FR-RR-49: refuses a non-HTTPS URL", () => {
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
     const r = runRecord([
-      "--git-sha", "x",
-      "--worker-version", "v1",
-      "--url", "https://example.workers.dev",
+      "--git-sha", head,
+      "--worker-version", "a".repeat(32),
+      "--url", "http://fireraid-production.example.workers.dev",
+      "--human-submit-observed-status", "200",
     ]);
     expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("HTTPS");
+  });
+
+  it("FR-RR-49: refuses a URL whose hostname does not match the production TURNSTILE_EXPECTED_HOSTNAME", () => {
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
+    const config = readFileSync(join(ROOT, "wrangler.jsonc"), "utf-8");
+    const m = config.match(/TURNSTILE_EXPECTED_HOSTNAME"\s*:\s*"([^"]+)"/);
+    if (!m) return; // no production hostname configured — the check cannot bind; skip
+    const r = runRecord([
+      "--git-sha", head,
+      "--worker-version", "a".repeat(32),
+      "--url", "https://not-the-production-host.example.com",
+      "--human-submit-observed-status", "200",
+    ]);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("TURNSTILE_EXPECTED_HOSTNAME");
+  });
+
+  it("FR-RR-49: refuses to record without the operator's observed human-submit status", () => {
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
+    const r = runRecord([
+      "--git-sha", head,
+      "--worker-version", "a".repeat(32),
+      // no --human-submit-observed-status
+    ]);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("human-submit-observed-status");
+  });
+
+  it("FR-RR-49: refuses an out-of-range human-submit observed status", () => {
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
+    const r = runRecord([
+      "--git-sha", head,
+      "--worker-version", "a".repeat(32),
+      "--human-submit-observed-status", "banana",
+    ]);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("HTTP status");
   });
 });
 
@@ -141,18 +311,23 @@ describe("FR-P0-A/B/D: release-verify.mjs structural contract", () => {
   const src = readFileSync(join(ROOT, "scripts", "release-verify.mjs"), "utf-8");
 
   it("validates the expected preflight check IDs (fail closed on missing)", () => {
+    // FR-RR-18: the expected set lives in the shared schema module and the
+    // script routes validation through it — the source must import the
+    // real validator, not carry a private copy.
     for (const id of [
       "lab-mode",
       "production-db-id",
       "production-db-distinct",
       "production-hostname",
-      "rate-limit-login",
+      "rate-limit-login-attested",
       "production-graph",
       "dry-run",
       "remote-migrations",
     ]) {
-      expect(src.includes(`"${id}"`), `expected check id ${id} listed`).toBe(true);
+      expect(EXPECTED_PREFLIGHT_CHECKS.has(id), `expected check id ${id} listed`).toBe(true);
     }
+    expect(src).toContain("lib/preflight-schema.mjs");
+    expect(src).toContain("validatePreflightResult(parsed, r.status)");
   });
 
   it("fails closed on unparseable preflight stdout (never a zero-failure result)", () => {

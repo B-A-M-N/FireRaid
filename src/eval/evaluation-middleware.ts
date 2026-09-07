@@ -100,6 +100,15 @@ function validateEvaluationDeps(deps: EvaluationMiddlewareDeps): EvaluationMiddl
     turnstileRequired: _turnstileRequired,
     ...structural
   } = deps;
+  // FR-RR-16: evaluation EXPLICITLY chooses advisory when no posture is
+  // named — the production factory refuses an omitted enforcementMode, but
+  // the experiment plane's default posture is a deliberate, wired choice,
+  // not a silent fallback. Written onto the ORIGINAL deps so the chosen
+  // posture is observable to the caller (the stripped copy is a throwaway).
+  if (deps.enforcementMode === undefined) {
+    deps.enforcementMode = "advisory";
+    structural.enforcementMode = "advisory";
+  }
   // FR-P1-03 (closure 6): the EVALUATION constructor permits explicit
   // "volatile" reference stores (in-memory telemetry/canary/submission
   // doubles for integration and experiments) through the validator's

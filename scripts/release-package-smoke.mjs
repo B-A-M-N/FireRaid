@@ -61,6 +61,11 @@ const proj = mkdtempSync(join(tmpdir(), "fireraid-pkg-smoke-"));
 try {
   writeFileSync(join(proj, "package.json"), JSON.stringify({ name: "pkg-smoke", private: true, type: "module" }, null, 2));
   run("install tarball in temp project", "npm", ["install", "--no-audit", "--no-fund", "--loglevel=error", tarball], { cwd: proj });
+  // @types/node moved OUT of the package's runtime dependencies (P2 hygiene:
+  // type packages are dev-only). The smoke consumer's own compilation needs
+  // node types — the public .d.ts references node:http — so the smoke
+  // project installs its own copy, exactly as a real consumer would.
+  run("install @types/node for the consumer compile", "npm", ["install", "--no-audit", "--no-fund", "--loglevel=error", "--save-dev", "@types/node@^22"], { cwd: proj });
 
   // 4. Import every declared subpath + run the functional smoke FROM the
   //    installed copy (resolution through the consumer's node_modules).
@@ -106,6 +111,9 @@ try {
       enforcement: { allow: async () => ({ kind: "created" }), deny: () => {} },
       canaryStore: __canary,
       submissionStore: __submission, // FR-P0-02: REQUIRED for the production factory
+      // FR-RR-16: the production posture is explicit — required by the
+      // factory (an omitted mode silently meant advisory).
+      enforcementMode: "enforcement",
     });
     const page = await root.admit(new Request("http://localhost/signup"), deps, async () => '<html><body><form id="signup-form"></form></body></html>');
     if (page.kind !== "get" || !page.setCookie?.startsWith("__Host-fr_")) throw new Error("GET did not issue the signed envelope cookie");

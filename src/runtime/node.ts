@@ -44,6 +44,15 @@ export interface OriginAssessment {
   submittedEmail?: string;
   risk?: MiddlewareResult["risk"];
   /**
+   * FR-RR-14: TRUE when this assessment is a REPLAY of the durably-stored
+   * snapshot (a retried request after this session's forward already
+   * finalized) rather than a fresh evaluation. The disposition/score/risk
+   * are then the ORIGINAL ones — a host persisting assessments should
+   * upsert keyed on sessionId, so the replayed hook is an idempotent
+   * re-write of the same review row, never a duplicate.
+   */
+  replayed?: boolean;
+  /**
    * P0-8: the discriminated enforcement detail when the host adapter
    * returned one. `queued-for-retry` carries the host's own retryId here so
    * the review pipeline can join this assessment to its pending-queue
@@ -109,8 +118,14 @@ export interface OriginServerOptions {
    * Promise BEFORE writing the success receipt, so an application is only
    * acked once its annotation is durable. A rejection is host-infrastructure
    * failure: the applicant gets a generic 500, never a success receipt.
+   *
+   * FR-RR-16: REQUIRED on the production origin — the Node host's durable
+   * decision channel. A production server without it evaluates submissions
+   * and discards every assessment (and with an advisory posture never
+   * blocks either): the middleware is technically running while delivering
+   * no admission-defense outcome. Omitting it is a construction-time error.
    */
-  onAssessment?: (assessment: OriginAssessment) => void | Promise<void>;
+  onAssessment: (assessment: OriginAssessment) => void | Promise<void>;
 }
 
 // ─── Request / Response bridge ──────────────────────────────────────────────
@@ -279,7 +294,7 @@ const RECEIVED_PENDING = JSON.stringify({
 async function writeResult(
   res: ServerResponse,
   result: MiddlewareResult,
-  onAssessment?: (a: OriginAssessment) => void | Promise<void>
+  onAssessment: (a: OriginAssessment) => void | Promise<void> | undefined
 ): Promise<void> {
   // Host-internal hook FIRST — the annotation path, never the wire.
   if (onAssessment && (result.kind === "admit" || (result.kind === "deny" && result.decisionDenied === true))) {
@@ -292,6 +307,7 @@ async function writeResult(
         score: result.score,
         submittedEmail: result.submittedEmail,
         risk: result.risk,
+        replayed: result.replayed,
         enforcementDetail: result.enforcementDetail,
       });
     } catch {
@@ -420,8 +436,24 @@ export function createOriginServer(
 /** Shared server construction; `validate` selects the posture's factory. */
 function buildOriginServer(
   options: OriginServerOptions,
-  validate: (deps: MiddlewareDeps) => MiddlewareDeps
+  validate: (deps: MiddlewareDeps) => MiddlewareDeps,
+  /** "production" requires the onAssessment seam; "evaluation" warns. */
+  posture: "production" | "evaluation" = "production"
 ): http.Server {
+  // FR-RR-16: the durable decision channel is not optional in production.
+  // The type makes it required; the runtime check is the JS-host backstop
+  // (a hand-written options object can still omit it).
+  if (typeof options.onAssessment !== "function") {
+    const message =
+      "createOriginServer: onAssessment is REQUIRED — the Node host's durable " +
+      "decision channel (an application is only acked once its annotation is " +
+      "durable). A server without it discards every assessment; wire the hook " +
+      "or use createEvaluationOriginServer for throwaway experiment wiring.";
+    if (posture === "production") {
+      throw new Error(message);
+    }
+    console.warn(`[evaluation] ${message}`);
+  }
   const deps = validate(options.middlewareDeps);
 
   const htmlLoader = options.htmlLoader;
@@ -519,7 +551,8 @@ export function closeServer(server: http.Server): Promise<void> {
  */
 export function __buildOriginServerWithValidator(
   options: OriginServerOptions,
-  validate: (deps: MiddlewareDeps) => MiddlewareDeps
+  validate: (deps: MiddlewareDeps) => MiddlewareDeps,
+  posture: "production" | "evaluation" = "production"
 ): http.Server {
-  return buildOriginServer(options, validate);
+  return buildOriginServer(options, validate, posture);
 }

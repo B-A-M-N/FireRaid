@@ -4,8 +4,8 @@
  */
 import { deriveProductionProfileByVersion, deriveEvaluationProfileByVersion } from "./profile-versions.js";
 import type { DefenseRecipe } from "./recipe-schema.js";
-import { correlate, type ServerObservationSet } from "./correlation.js";
-import { decide, getPolicyOrThrow } from "./decision.js";
+import { type ServerObservationSet } from "./correlation.js";
+import { correlateByVersion, getScoringPolicyByVersion, decideByVersion } from "./scoring-versions.js";
 import type { DefenseProfile } from "../types/profile.js";
 
 export interface FireRaidOptions {
@@ -84,9 +84,15 @@ export class FireRaidEngine {
       }
     }
 
-    const evidence = await correlate(options.profile, options.observations);
-    const policy = getPolicyOrThrow(options.policy || options.profile.scoringPolicy);
-    const decision = decide(evidence, policy);
+    // FR-RR-15: version-routed frozen scoring — an unknown policy or an
+    // unsupported profile version throws (fail closed), never a silent
+    // default-v1 score under live code.
+    const evidence = await correlateByVersion(options.profile, options.observations);
+    const policy = getScoringPolicyByVersion(
+      options.profile.version,
+      options.policy || options.profile.scoringPolicy
+    );
+    const decision = decideByVersion(options.profile, evidence, policy);
 
     return {
       disposition: decision.disposition,

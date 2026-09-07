@@ -29,8 +29,6 @@
  */
 
 import {
-  deriveProductionProfile,
-  deriveEvaluationProfile,
   type EvaluationProfileOptions,
   type ProductionProfileOptions,
 } from "./profile.js";
@@ -77,25 +75,62 @@ export function assertSupportedProfileVersion(version: number): void {
 }
 
 /**
+ * FR-RR-30 — the dispatch is a REGISTRY, not a switch with a live-code
+ * default. The old `default:` branches called the CURRENT engine as a
+ * "fallback": adding `2` to SUPPORTED_PROFILE_VERSIONS without wiring a
+ * frozen implementation would have silently derived v2 sessions with LIVE
+ * code — the exact treatment-drift hazard the freeze exists to prevent.
+ * A version derives ONLY through its registered implementation; any other
+ * version is a hard error.
+ */
+const PROFILE_VERSION_IMPLEMENTATIONS: ReadonlyMap<
+  number,
+  {
+    deriveProduction: (opts: ProductionProfileOptions) => Promise<DefenseProfile>;
+    deriveEvaluation: (
+      opts: EvaluationProfileOptions,
+      recipe?: DefenseRecipe
+    ) => Promise<DefenseProfile>;
+    hash: (profile: DefenseProfile) => Promise<string>;
+  }
+> = new Map([
+  [
+    1,
+    {
+      // The FROZEN v1 implementation (profile/v1.ts + profile/catalog-v1.ts).
+      deriveProduction: (opts) => deriveProfileEngineV1({ ...opts, mode: "production" }),
+      deriveEvaluation: (opts, recipe) => deriveProfileEngineV1(opts, recipe),
+      hash: (profile) => hashProfileV1(profile),
+    },
+  ],
+]);
+
+function implementationFor(version: number): {
+  deriveProduction: (opts: ProductionProfileOptions) => Promise<DefenseProfile>;
+  deriveEvaluation: (opts: EvaluationProfileOptions, recipe?: DefenseRecipe) => Promise<DefenseProfile>;
+  hash: (profile: DefenseProfile) => Promise<string>;
+} {
+  const impl = PROFILE_VERSION_IMPLEMENTATIONS.get(version);
+  if (!impl) {
+    throw new Error(
+      `UNSUPPORTED_PROFILE_VERSION: ${version} has no FROZEN implementation in the ` +
+        `registry (registered: ${[...PROFILE_VERSION_IMPLEMENTATIONS.keys()].join(", ")}) — ` +
+        `freeze an implementation for it first; there is NO live-code fallback`
+    );
+  }
+  return impl;
+}
+
+/**
  * Production derivation with TRUE version dispatch. The version selects the
- * frozen implementation; an unsupported version is a hard error, never a
+ * frozen implementation; an unregistered version is a hard error, never a
  * silent run of current code under an old number.
  */
 export async function deriveProductionProfileByVersion(
   opts: ProductionProfileOptions
 ): Promise<DefenseProfile> {
   assertSupportedProfileVersion(opts.version);
-  switch (opts.version) {
-    case 1:
-      // The FROZEN v1 implementation (profile/v1.ts + profile/catalog-v1.ts).
-      return deriveProfileEngineV1({ ...opts, mode: "production" });
-    default: {
-      // Unreachable while SUPPORTED_PROFILE_VERSIONS === [1]; the compiler
-      // knows, the runtime must too.
-      assertSupportedProfileVersion(opts.version);
-      return deriveProductionProfile(opts);
-    }
-  }
+  return implementationFor(opts.version).deriveProduction(opts);
 }
 
 /**
@@ -106,14 +141,7 @@ export async function deriveEvaluationProfileByVersion(
   recipe?: DefenseRecipe
 ): Promise<DefenseProfile> {
   assertSupportedProfileVersion(opts.version);
-  switch (opts.version) {
-    case 1:
-      return deriveProfileEngineV1(opts, recipe);
-    default: {
-      assertSupportedProfileVersion(opts.version);
-      return deriveEvaluationProfile(opts, recipe);
-    }
-  }
+  return implementationFor(opts.version).deriveEvaluation(opts, recipe);
 }
 
 /**
@@ -128,13 +156,5 @@ export async function hashProfileByVersion(
   version: number
 ): Promise<string> {
   assertSupportedProfileVersion(version);
-  switch (version) {
-    case 1:
-      return hashProfileV1(profile);
-    default: {
-      assertSupportedProfileVersion(version);
-      const { hashProfile } = await import("./profile.js");
-      return hashProfile(profile);
-    }
-  }
+  return implementationFor(version).hash(profile);
 }

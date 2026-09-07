@@ -20,7 +20,7 @@ import {
 } from "../../src/host-adapter/index.js";
 import { ReferenceEnforcementAdapter } from "../../src/host-adapter/reference-adapters.js";
 import { submissionIdempotencyKey } from "../../src/host-adapter/interface.js";
-import type { EnforcementResult } from "../../src/host-adapter/interface.js";
+import type { EnforcementResult, AssessmentSnapshot } from "../../src/host-adapter/interface.js";
 import { DurableCanaryStore, DurableSubmissionStore } from "./helpers/durable-stores.js";
 import { createServer } from "node:http";
 
@@ -254,6 +254,7 @@ describe("FR-P0-02: fail-closed claim store", () => {
         throw new Error("storage outage");
       },
       complete: async () => {},
+      finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
     };
     const r = await submit(deps, { enforcement });
     expect(r.kind).toBe("forward-failed");
@@ -274,6 +275,7 @@ describe("FR-P0-02: fail-closed claim store", () => {
       durability: "durable",
       claim: async () => ({ ok: true }) as unknown as never,
       complete: async () => {},
+      finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
     };
     const r = await submit(deps, { enforcement });
     expect(r.kind).toBe("forward-failed");
@@ -292,10 +294,15 @@ describe("FR-P0-02: fail-closed claim store", () => {
     const deps = baseDeps();
     (deps as { submissionStore: unknown }).submissionStore = {
       durability: "durable",
-      claim: async () => ({ kind: "claimed", claimId: "c1", idempotencyKey: "k1" }),
+      claim: async (sid: string) => ({
+        kind: "claimed",
+        claimId: "c1",
+        idempotencyKey: submissionIdempotencyKey(sid),
+      }),
       complete: async () => {
         throw new Error("durable write failed");
       },
+      finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
     };
     const r = await submit(deps, { enforcement });
     // The upstream MAY have created the account, but the durable record
@@ -305,6 +312,74 @@ describe("FR-P0-02: fail-closed claim store", () => {
     expect(r.kind).toBe("forward-failed");
     expect(r.forwardFailureReason).toBe("submission_complete_failed");
     expect(forwarded).toBe(true);
+  });
+
+  it("FR-RR-22: a store still speaking the PRE-FR-RR-14 replay shape fails closed (no invented replay)", async () => {
+    // The legacy shape { kind: "replay", outcome } carries no parseable
+    // terminal RECORD — under the strict FR-RR-22 claim parser it is a
+    // malformed claim result: operational error, zero upstream calls.
+    let forwarded = false;
+    const enforcement = {
+      allow: async (): Promise<EnforcementResult> => {
+        forwarded = true;
+        return { kind: "created" };
+      },
+      deny: () => {},
+    };
+    const ops: string[] = [];
+    const deps = baseDeps();
+    deps.onOperationalError = (op) => ops.push(op);
+    (deps as { submissionStore: unknown }).submissionStore = {
+      durability: "durable",
+      claim: async () => ({ kind: "replay", outcome: { kind: "created" } }) as unknown as never,
+      complete: async () => {},
+      finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+    };
+    const r = await submit(deps, { enforcement });
+    expect(r.kind).toBe("forward-failed");
+    expect(r.forwardFailureReason).toBe("submission_claim_invalid");
+    expect(forwarded).toBe(false);
+    expect(ops).toContain("submissionStore.claim");
+
+    // Same for the legacy bare-outcome lookupFinal shape.
+    const ops2: string[] = [];
+    const deps2 = baseDeps();
+    deps2.onOperationalError = (op) => ops2.push(op);
+    (deps2 as { submissionStore: unknown }).submissionStore = {
+      durability: "durable",
+      lookupFinal: async () => ({ kind: "created" }) as unknown as never,
+      claim: async (sid: string) => ({
+        kind: "claimed",
+        claimId: "c2",
+        idempotencyKey: submissionIdempotencyKey(sid),
+      }),
+      complete: async () => {},
+      finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+    };
+    const r2 = await submit(deps2, { enforcement });
+    expect(r2.kind).toBe("forward-failed");
+    expect(r2.forwardFailureReason).toBe("submission_claim_invalid");
+    expect(forwarded).toBe(false);
+    expect(ops2).toContain("submissionStore.lookupFinal");
+  });
+
+  it("FR-RR-22: an UNPARSEABLE replay record fails closed (never a fabricated receipt)", async () => {
+    const ops: string[] = [];
+    const deps = baseDeps();
+    deps.onOperationalError = (op) => ops.push(op);
+    (deps as { submissionStore: unknown }).submissionStore = {
+      durability: "durable",
+      claim: async () =>
+        ({ kind: "replay", record: { nonsense: true } }) as unknown as never,
+      complete: async () => {},
+      finalizeDecision: async () => ({ kind: "stored" as const, record: null as never }),
+    };
+    const r = await submit(deps);
+    // Guessing "created" for a record nobody can read is the FR-INV-008
+    // lie; fail closed instead.
+    expect(r.kind).toBe("forward-failed");
+    expect(r.forwardFailureReason).toBe("submission_claim_invalid");
+    expect(ops).toContain("submissionStore.claim");
   });
 });
 
@@ -335,6 +410,20 @@ describe("FR-P0-02: factory validation", () => {
     const deps = baseDeps();
     (deps as { submissionStore: unknown }).submissionStore = { claim: async () => ({ kind: "conflict" }) };
     expect(() => createFireRaidMiddleware(deps)).toThrow(/must implement complete/);
+  });
+
+  it("FR-RR-43: REJECTS a JS-shaped durable store that has claim+complete but NO finalizeDecision", () => {
+    // The coordinator calls finalizeDecision on every terminal
+    // REVIEW/QUARANTINE — a hand-written adapter without it would pass
+    // startup and fail on the FIRST denied applicant. Startup must catch it.
+    const deps = baseDeps();
+    (deps as { submissionStore: unknown }).submissionStore = {
+      durability: "durable",
+      claim: async () => ({ kind: "claimed" as const, claimId: "c", idempotencyKey: "k" }),
+      complete: async () => {},
+      // finalizeDecision: deliberately absent
+    };
+    expect(() => createFireRaidMiddleware(deps)).toThrow(/must implement finalizeDecision/);
   });
 });
 
@@ -586,12 +675,32 @@ describe("P0-E: ReferenceSubmissionStore.lookupFinal", () => {
     expect(c2.kind).toBe("conflict");
   });
 
-  it("returns the outcome after a terminal completion; replay via claim", async () => {
+  it("returns the outcome after a terminal completion; replay via claim (FR-RR-26: assessment mandatory)", async () => {
     const store = new ReferenceSubmissionStore();
     const c = await store.claim("s2", submissionIdempotencyKey("s2"));
     if (c.kind !== "claimed") throw new Error("expected claim");
-    await store.complete(c.claimId, { kind: "created" });
-    expect(await store.lookupFinal("s2")).toEqual({ kind: "created" });
+    const snapshot: AssessmentSnapshot = {
+      sessionId: "s2",
+      disposition: "ACCEPT",
+      score: 0.1,
+      risk: {
+        score: 0.1,
+        tier: "low",
+        confidence: "high",
+        recommendedAction: "accept",
+        evidence: [],
+      },
+    };
+    // FR-RR-26: complete() WITHOUT an assessment is a contract violation —
+    // the reference store refuses to write an assessment-less terminal record.
+    await expect(
+      store.complete(c.claimId, { kind: "created" })
+    ).rejects.toThrow(/assessment/i);
+    // With the assessment the record is complete and replayable.
+    await store.complete(c.claimId, { kind: "created" }, undefined, { assessment: snapshot });
+    const record = await store.lookupFinal("s2");
+    expect(record?.outcome).toEqual({ kind: "created" });
+    expect(record?.assessment).toEqual(snapshot);
     const again = await store.claim("s2", submissionIdempotencyKey("s2"));
     expect(again.kind).toBe("replay");
   });
@@ -619,17 +728,16 @@ describe("closure 4: durability window survives a spent request deadline", () =>
     expect((res as { forwardFailureReason?: string }).forwardFailureReason).toBe("adapter_deadline");
 
     // The uncertain marking landed DESPITE the spent request deadline: the
-    // slot is held (not open, no outcome) and a retry CONFLICTS — the
-    // fail-closed held-uncertain contract.
+    // state machine holds FORWARD_UNCERTAIN (no outcome) and a retry
+    // CONFLICTS — the fail-closed held-uncertain contract.
     const state = (
       store as unknown as {
-        claims: Map<string, { open: boolean; heldUncertain?: boolean; outcome?: { uncertain?: boolean } }>;
+        claims: Map<string, { state: string; outcome?: { uncertain?: boolean } }>;
       }
     );
     const entries = Array.from(state.claims.values());
     expect(entries.length).toBe(1);
-    expect(entries[0].open).toBe(false);
-    expect(entries[0].heldUncertain).toBe(true);
+    expect(entries[0].state).toBe("forward-uncertain");
   });
 
   it("a slow forward consumes the request budget but complete(created) still lands", async () => {
@@ -657,11 +765,11 @@ describe("closure 4: durability window survives a spent request deadline", () =>
     }).complete;
     let completeStartedAt = 0;
     let completeSettledAt = 0;
-    (store as unknown as { complete: (id: string, o: unknown) => Promise<void> }).complete =
-      async function (this: unknown, id: string, o: unknown) {
+    (store as unknown as { complete: (...args: unknown[]) => Promise<void> }).complete =
+      async function (this: unknown, ...args: unknown[]) {
         completeStartedAt = Date.now();
         await new Promise((r) => setTimeout(r, 280));
-        await origComplete.call(this, id, o);
+        await (origComplete as (...a: unknown[]) => Promise<void>).apply(this, args);
         completeSettledAt = Date.now();
       };
 
@@ -699,10 +807,10 @@ describe("FR-RR-08: per-operation durability budgets", () => {
     const origComplete = (ReferenceSubmissionStore.prototype as unknown as {
       complete: (id: string, o: unknown) => Promise<void>;
     }).complete;
-    (store as unknown as { complete: (id: string, o: unknown) => Promise<void> }).complete =
-      async function (this: unknown, id: string, o: unknown) {
+    (store as unknown as { complete: (...args: unknown[]) => Promise<void> }).complete =
+      async function (this: unknown, ...args: unknown[]) {
         await new Promise((r) => setTimeout(r, 700));
-        return origComplete.call(this, id, o);
+        return (origComplete as (...a: unknown[]) => Promise<void>).apply(this, args);
       };
     // finalizeStores iterates canaryStore + telemetry finalize hooks.
     let finalizeRan = false;

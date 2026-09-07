@@ -70,4 +70,36 @@ describe("paired demo smoke: the ledger joins work", () => {
       expect(rec.fireraid.email).toBe(emails.fireraid);
     }
   });
+
+  it("FR-DEMO-07: both arms are served the SAME base application snapshot", async () => {
+    coordinator ??= await startDemoCoordinator();
+    const history = coordinator.history();
+    // The CONTROL arm serves the snapshot verbatim: its live page must
+    // hash exactly to the recorded baseApplicationHash — the treatment
+    // delta on FireRaid's side is injection alone.
+    const { createHash } = await import("node:crypto");
+    const { controlUrl } = await coordinator.ready();
+    const controlPage = await (await fetch(`${controlUrl}/signup`)).text();
+    expect(createHash("sha256").update(controlPage).digest("hex")).toBe(
+      history[0].baseApplicationHash
+    );
+    // And every record carries the same (stable) hash.
+    for (const rec of history) {
+      expect(rec.baseApplicationHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(rec.baseApplicationHash).toBe(history[0].baseApplicationHash);
+    }
+  });
+
+  it("FR-DEMO-01: a BLOCKED fireraid verdict carries an observed non-ACCEPT action", async () => {
+    coordinator ??= await startDemoCoordinator();
+    const history = coordinator.history();
+    const blocked = history.find((r) => r.fireraid.outcome === "BLOCKED");
+    if (blocked) {
+      // The join rule's contract, enforced on live records: BLOCKED is
+      // never rendered without the observed intervention.
+      expect(blocked.fireraid.action).toBeDefined();
+      expect(["QUARANTINE", "REVIEW"]).toContain(blocked.fireraid.action);
+      expect(blocked.fireraid.decision?.disposition).toBe(blocked.fireraid.action);
+    }
+  });
 });
