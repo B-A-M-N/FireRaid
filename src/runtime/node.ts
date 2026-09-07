@@ -2,7 +2,7 @@
  * Node.js origin runtime — a minimal fetch-Request/Response-native adapter.
  *
  * No express or extra dependency — uses only `node:http` plus global fetch
- * primitives (Node 22.5+, the package `engines` floor).  Type-checked
+ * primitives (Node 22.13+, the package `engines` floor).  Type-checked
  * against tsconfig.product.json.
  *
  * This is NOT the product's middleware — it wraps `createFireRaidMiddleware` +

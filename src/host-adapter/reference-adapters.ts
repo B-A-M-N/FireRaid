@@ -436,7 +436,7 @@ export class ReferenceEnforcementAdapter implements HostEnforcementAdapter {
     try {
       // FR-P1-11: combine the middleware's request deadline with the adapter's
       // own forward timeout so an aborted request cancels the socket early.
-      // AbortSignal.any is universal on the Node 22.5+ floor; the guard
+      // AbortSignal.any is universal on the Node 22.13+ floor; the guard
       // remains a defensive fallback for embedded runtimes that lack it.
       const requestSignal = signal ?? new AbortController().signal;
       const combined = typeof AbortSignal.any === "function"

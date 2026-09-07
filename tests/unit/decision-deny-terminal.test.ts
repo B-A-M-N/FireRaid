@@ -297,6 +297,9 @@ describe("FR-RR-21: decision-deny is terminal and replayable", () => {
     }
     expect(first, "a REVIEW session within 40 draws").not.toBeNull();
 
+    // Earlier candidate draws may have taken the ACCEPT path before the
+    // REVIEW session was found; replay itself must not add another call.
+    const callsBeforeRetry = enforcement.calls;
     const retry = await fetch(`http://127.0.0.1:${port}/signup`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: first!.cookie },
@@ -307,7 +310,7 @@ describe("FR-RR-21: decision-deny is terminal and replayable", () => {
       }),
     });
     expect(retry.status).toBe(200);
-    expect(enforcement.calls).toBe(0);
+    expect(enforcement.calls).toBe(callsBeforeRetry);
     expect(assessments).toHaveLength(1);
     expect(assessments[0].replayed).toBe(true);
     expect(assessments[0].disposition).toBe("REVIEW");
